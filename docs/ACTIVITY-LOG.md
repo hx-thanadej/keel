@@ -85,5 +85,7 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
 - Created labels (`epic`, `decision`, `area:*`), milestones M0–M6, epic
   issues #1–#7 (one per milestone, with task checklists) and decision issues
   #8–#15 (one per open question Q1–Q8 in DESIGN.md §10).
-- GitHub Project board pending: the `gh` token lacks the `project` scope; the
-  user needs to run `gh auth refresh -s project` once.
+- User created GitHub Project [keel](https://github.com/users/hx-thanadej/projects/2)
+  and granted the `project` scope. All 15 issues are on the board; set
+  Priority (P0 = M0/M1 epics + the decisions blocking them; P1 = M2/M3 + Q1;
+  P2 = M4–M6 + Q5) and Size (epics XL, decisions S); linked board to the repo.
