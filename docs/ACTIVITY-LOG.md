@@ -89,3 +89,15 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
   and granted the `project` scope. All 15 issues are on the board; set
   Priority (P0 = M0/M1 epics + the decisions blocking them; P1 = M2/M3 + Q1;
   P2 = M4–M6 + Q5) and Size (epics XL, decisions S); linked board to the repo.
+
+## 2026-10-06 — thanadej@harmonyx.co → Claude — Break M0 and M1 into tickets
+
+- Created 29 tickets as sub-issues of the epics: M0 → #16–#28 (13 tickets,
+  under #1), M1 → #29–#44 (16 tickets, under #2). Each has acceptance criteria,
+  "Blocked by" links and refs to ADRs/research; all added to the Project with
+  Status, Priority and Size.
+- Slicing: tracer bullets first — #19 (Catalog API → authZ → RLS → Activity)
+  for M0, #31 (Tencent bill → cost facts → daily cost for tat-crm) for M1 —
+  then widen.
+- Critical path: #11 (stack) → #16 → #17 → #18 → #19; #9 (payer access) →
+  #29 → #31 → #34 → #37 → #41 (Budget screen).
