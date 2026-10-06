@@ -132,9 +132,9 @@ flowchart TB
         REL[Release & Promotion]
         REC[Activity Log & Decision Records]
       end
-      WF[Temporal workflows]
+      WF["River jobs<br/>in Postgres"]
       PG[(Postgres + RLS)]
-      CH[(ClickHouse<br/>cost facts, utilisation,<br/>activity query copy)]
+      CH[(Postgres partitions<br/>cost facts, utilisation<br/>later: columnar store)]
       WORM[(WORM archive<br/>signed, chained digests)]
     end
 
@@ -196,7 +196,7 @@ others.
 sequenceDiagram
     actor PA as Platform Admin
     participant K as Keel
-    participant T as Temporal
+    participant T as River job
     participant C as Cloud org (payer)
     participant G as GitHub
     PA->>K: Create Tenant (IdP federation, Tenant Approvers)
@@ -235,7 +235,7 @@ sequenceDiagram
 Engineer requests `prod-operator` on `tat-crm/prod` for 2h with a reason →
 policy decides (auto-approve for low-risk roles, Team Lead otherwise, Tenant
 Approver if the Tenant requires) → Keel creates the time-boxed assignment →
-Temporal timer revokes it → Activities on request, approval, use, revoke.
+a scheduled River job revokes it → Activities on request, approval, use, revoke.
 Break-glass bypasses Keel, alerts on use and requires a post-mortem
 ([ADR-0006](./adr/0006-keel-is-the-only-creator-of-cloud-identities.md)).
 
@@ -352,11 +352,11 @@ milestone is shippable on the existing Tencent estate before the next starts
 |---|---|---|
 | Q1 | Which GitHub plan? Required workflows, audit-log streaming and private-repo attestations need **Enterprise Cloud**. On Team plan, Keel must use reusable workflows + rulesets status checks instead. | M3, M4 |
 | Q2 | Who owns the Tencent payer UIN (200045645249) and can grant Keel a read-only billing role there? Member accounts return zero. | M1 |
-| Q3 | Which providers beyond Tencent and AWS are needed in year 1? | M1, M6 |
-| Q4 | Confirm stack ([ADR-0014](./adr/0014-keel-implementation-stack.md)): Go + Temporal vs TypeScript + trigger.dev. | M0 |
+| Q3 | ~~Providers~~ decided: Tencent + AWS in year 1. | — |
+| Q4 | ~~Stack~~ decided: Go + Postgres + River ([ADR-0014](./adr/0014-keel-implementation-stack.md)). | — |
 | Q5 | Do any Tenants contractually require a CAB or specific frameworks (ISO 27001, PDPA, SOC 2)? | M4, M6 |
 | Q6 | Are there Tenants whose cloud accounts are in *their* organisation (not ours)? That needs cross-org connectors and changes the account-vending flow. | M1, M3 |
-| Q7 | Budget currency: THB, USD or per-Tenant? FX source and timing. | M1 |
+| Q7 | ~~Currency~~ decided: per-Tenant (THB or USD), daily FX. | — |
 | Q8 | Is Tencent COS object-lock allowlisting obtainable for the log archive? | M0 |
 
 ---

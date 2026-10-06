@@ -3,3 +3,6 @@
 .env.*
 *.pem
 *.key
+node_modules/
+web/dist/
+/keel-api

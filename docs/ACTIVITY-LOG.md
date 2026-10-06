@@ -101,3 +101,20 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
   then widen.
 - Critical path: #11 (stack) → #16 → #17 → #18 → #19; #9 (payer access) →
   #29 → #31 → #34 → #37 → #41 (Budget screen).
+
+## 2026-10-06 — thanadej@harmonyx.co → Claude — Decisions + start of M0 build
+
+- **Decided:** stack = Go + Postgres (RLS) + River job queue; **no Temporal or
+  trigger.dev** (user asked why a workflow engine was needed; durable timers and
+  multi-step flows fit in Postgres via River with no extra infrastructure).
+  ClickHouse deferred. ADR-0014 rewritten and accepted; #11 closed.
+- **Decided:** year-1 providers = Tencent + AWS (#10 closed); per-Tenant budget
+  currency with daily FX (#14 closed); GitHub plan Free/unsure → design for the
+  lowest common denominator (#8 left open).
+- Started #16 on branch `feat/16-scaffold`: Go API (`/healthz`, test-first),
+  React/Vite portal, distroless Dockerfile and Postgres compose (images pinned by
+  digest), Makefile, CI with SHA-pinned actions + read-only token + no stored
+  credentials, Renovate with 7-day minimum release age.
+- Noted: local Go was 1.24.5 (out of support); `go.mod` now requires 1.26 so the
+  toolchain auto-upgrades. Docker daemon was not running, so the image and
+  compose were not built locally; CI builds the image.
