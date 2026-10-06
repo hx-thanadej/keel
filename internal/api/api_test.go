@@ -17,7 +17,11 @@ func TestHealthz(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	t.Cleanup(func() {
+		if err := res.Body.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", res.StatusCode)
@@ -42,7 +46,9 @@ func TestUnknownRouteIs404(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	if err := res.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", res.StatusCode)
 	}
