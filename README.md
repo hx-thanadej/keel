@@ -21,5 +21,5 @@ forecasting, rightsizing), all recorded in one tamper-evident Activity Log.
   superseded, never rewritten.
 - Every working session or meaningful step → an entry in `docs/ACTIVITY-LOG.md`.
 - New domain term → `CONTEXT.md` first, then use it everywhere.
-- Work is tracked in the GitHub Project for this repo, one milestone per
+- Work is tracked in GitHub issues + the Keel GitHub Project, one milestone per
   roadmap phase (M0–M6).

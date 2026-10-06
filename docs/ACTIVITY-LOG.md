@@ -82,5 +82,8 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
 - **Request:** use `hx-thanadej/keel` as the repository and GitHub Projects for
   project management.
 - Initialised git in `devsecops-platform/`, pushed design docs to `main`.
-- Created labels, milestones M0–M6, epic issues per milestone and decision
-  issues for each open question (see DESIGN.md §10).
+- Created labels (`epic`, `decision`, `area:*`), milestones M0–M6, epic
+  issues #1–#7 (one per milestone, with task checklists) and decision issues
+  #8–#15 (one per open question Q1–Q8 in DESIGN.md §10).
+- GitHub Project board pending: the `gh` token lacks the `project` scope; the
+  user needs to run `gh auth refresh -s project` once.
