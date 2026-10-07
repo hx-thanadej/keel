@@ -111,6 +111,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/templates"
 	"github.com/hx-thanadej/keel/internal/utilisation"
 	"github.com/hx-thanadej/keel/internal/vending"
+	"github.com/hx-thanadej/keel/internal/vex"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -206,6 +207,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Attest = &api.AttestDeps{Authz: az, Service: att}
+	deps.VEX = &api.VEXDeps{Authz: az, Service: vex.Service{Store: st}, Author: os.Getenv("KEEL_BASE_URL")}
 	deps.SBOM = &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: st}, Releases: att}
 	if os.Getenv("KEEL_OSV") != "0" {
 		m := sbom.Matcher{Store: st, OSV: sbom.OSVClient{BaseURL: os.Getenv("KEEL_OSV_URL")}, Tenants: func(ctx context.Context) ([]string, error) {

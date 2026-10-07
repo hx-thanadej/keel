@@ -71,6 +71,15 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		current := make([]string, 0, len(results))
 		for _, r := range results {
 			current = append(current, r.Fingerprint)
+			if r.Kind == "vulnerability" {
+				var suppressed bool
+				if err := tx.QueryRow(ctx, `SELECT vex_suppressed($1, $2)`, r.RuleID, service).Scan(&suppressed); err != nil {
+					return err
+				}
+				if suppressed {
+					continue // a VEX statement says this Service is not affected
+				}
+			}
 			r.Detail["service"], r.Detail["commit"], r.Detail["ref"] = slug, u.CommitSHA, u.Ref
 			detail, _ := json.Marshal(r.Detail)
 			title := fmt.Sprintf("%s in %s: %s", r.RuleID, slug, r.Title)
