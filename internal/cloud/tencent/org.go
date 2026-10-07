@@ -90,3 +90,16 @@ func MemberAccount(m *org.OrgMember) discovery.Account {
 	}
 	return a
 }
+
+// STS yields short-lived Tencent credentials for S3-compatible COS access.
+type STS struct{ Creds common.Provider }
+
+// Get returns (secretId, secretKey, token).
+func (s STS) Get() (string, string, string, error) {
+	c, err := s.Creds.GetCredential()
+	if err != nil {
+		return "", "", "", err
+	}
+	id, key, token := c.GetCredential()
+	return id, key, token, nil
+}
