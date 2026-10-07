@@ -49,7 +49,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}
 	router := api.NewRouter(api.Info{Version: "test"}, api.Deps{Auth: headerAuth{}, Sessions: noRoutes{}, Catalog: catalog.New(s, az),
 		Discovery: map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}},
-		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}},
+		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}, Rules: cost.Rules{Store: s}},
 		Budgets:   &api.BudgetDeps{Authz: az, Catalog: catalog.New(s, az), Budgets: budget.Service{Store: s}, Resolve: stubResolve},
 		Authz:     az})
 	srv := httptest.NewServer(router)
@@ -93,6 +93,9 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"PATCH /v1/tenants/{tenant}/budgets/{budget}":                             {"amount": "1"},
 		"POST /v1/tenants/{tenant}/budgets/{budget}/archive":                      {},
 		"POST /v1/tenants/{tenant}/findings/{finding}/resolve":                    {"resolution": "pwn"},
+		"POST /v1/tenants/{tenant}/allocation-rules":                              {"provider": "tencent", "sub_account_id": "pwn", "kind": "k8s", "cluster": "pwn"},
+		"POST /v1/tenants/{tenant}/allocation-rules/{rule}/archive":               {},
+		"PUT /v1/tenants/{tenant}/k8s-namespaces/{cluster}/{namespace}":           {"project_id": project},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)
@@ -103,7 +106,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns"},
 		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding"},
 	}
 

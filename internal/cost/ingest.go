@@ -83,22 +83,29 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 	}
 	rows.Close()
 
-	// Group lines by Tenant and total them.
+	// Allocate every line (account → keel-scope tag → rule → platform/unallocated).
+	al, err := in.allocator(ctx, l.Provider, *home)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	var facts []fact
+	for _, ln := range l.Lines {
+		facts = append(facts, al.allocate(ln, owners)...)
+	}
 	byTenant := map[string][]int{}
 	total, unalloc := new(big.Rat), new(big.Rat)
-	res := LoadResult{Lines: len(l.Lines)} // includes derived amortization rows
+	res := LoadResult{Lines: len(facts)} // includes derived amortization rows and split shares
 	currency := ""
-	for i, ln := range l.Lines {
-		amt, _ := new(big.Rat).SetString(ln.BilledCost)
+	for i, f := range facts {
+		amt, _ := new(big.Rat).SetString(f.line.BilledCost)
 		total.Add(total, amt)
-		currency = ln.BillingCurrency
-		if o, ok := owners[ln.SubAccountID]; ok {
-			byTenant[*o.tenant] = append(byTenant[*o.tenant], i)
-			res.Allocated++
-		} else {
-			byTenant[*home] = append(byTenant[*home], i)
+		currency = f.line.BillingCurrency
+		byTenant[f.tenant] = append(byTenant[f.tenant], i)
+		if f.method == "unallocated" {
 			unalloc.Add(unalloc, amt)
 			res.Unallocated++
+		} else {
+			res.Allocated++
 		}
 	}
 	touched := make([]string, 0, len(byTenant))
@@ -143,12 +150,8 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 		err := in.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 			b := &pgx.Batch{}
 			for _, i := range idx {
-				ln := l.Lines[i]
-				method := "unallocated"
-				var o owner
-				if ow, ok := owners[ln.SubAccountID]; ok {
-					o, method = ow, "account"
-				}
+				f := facts[i]
+				ln, method, o := f.line, f.method, f.owner
 				tags, _ := json.Marshal(ln.Tags)
 				vendor, _ := json.Marshal(ln.Vendor)
 				b.Queue(`INSERT INTO cost_facts (load_id, tenant_id, provider, billing_account_id, sub_account_id, cloud_account_id, project_id, environment_id,

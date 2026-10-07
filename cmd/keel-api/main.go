@@ -27,6 +27,7 @@
 //	KEEL_AWS_BILL_PREFIX      export prefix
 //	KEEL_AWS_PAYER_ACCOUNT    management account id (FOCUS BillingAccountId)
 //	KEEL_AWS_REGION           bucket region; credentials: AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE
+//	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
@@ -155,12 +156,16 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	st := store.New(pool)
 	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{},
-		Cost:    &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}},
+		Cost:    &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}, Rules: cost.Rules{Store: st}},
 		Budgets: &api.BudgetDeps{Authz: az, Budgets: budget.Service{Store: st}}}
 	deps.Budgets.Catalog = deps.Catalog
 	deps.Authz = az
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
+	if err := startOpenCost(ctx, st); err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
 	go evaluateLoop(ctx, evaluator)
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
@@ -569,6 +574,53 @@ func startAWSBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator)
 				slog.Info("aws bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads))
 				if len(rep.Loads) > 0 {
 					evaluate(ctx, ev)
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return nil
+}
+
+// startOpenCost pulls per-namespace daily cost from each shared cluster's
+// OpenCost every 6h (last 3 days, so late data settles) for k8s rules (#35).
+func startOpenCost(ctx context.Context, st *store.Store) error {
+	raw := os.Getenv("KEEL_OPENCOST")
+	if raw == "" {
+		return nil
+	}
+	clusters := map[string]string{}
+	for _, kv := range strings.Split(raw, ",") {
+		name, url, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if !ok || name == "" || url == "" {
+			return fmt.Errorf("KEEL_OPENCOST entry %q is not cluster=url", kv)
+		}
+		clusters[name] = strings.TrimSuffix(url, "/")
+	}
+	rules := cost.Rules{Store: st}
+	go func() {
+		t := time.NewTicker(6 * time.Hour)
+		defer t.Stop()
+		for {
+			var home *string
+			if err := st.AppPool().QueryRow(ctx, `SELECT home_tenant_id()::text`).Scan(&home); err == nil && home != nil {
+				now := time.Now().UTC()
+				to := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+				for name, url := range clusters {
+					days, err := cost.FetchOpenCost(ctx, nil, url, to.AddDate(0, 0, -3), to)
+					if err != nil {
+						slog.Error("opencost fetch failed", "cluster", name, "err", err)
+						continue
+					}
+					for day, costs := range days {
+						if _, err := rules.SaveNamespaceCosts(ctx, *home, name, day, costs); err != nil {
+							slog.Error("opencost save failed", "cluster", name, "err", err)
+						}
+					}
 				}
 			}
 			select {
