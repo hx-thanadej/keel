@@ -50,6 +50,7 @@ rules := {
 	"flow.operate": {"platform_admin"},
 	"environment.vend": {"platform_admin"},
 	"environment.set_approval": {"platform_admin"},
+	"environment.set_admission": {"platform_admin", "security_lead"},
 	"release.read": read_roles,
 	"release.create": {"platform_admin", "team_lead", "engineer", "pipeline"},
 	"scan.upload": {"platform_admin", "security_lead", "pipeline"},

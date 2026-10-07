@@ -76,6 +76,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/sigstore/sigstore-go/pkg/root"
 
+	"github.com/hx-thanadej/keel/internal/admission"
 	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/apply"
@@ -204,6 +205,20 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Attest = &api.AttestDeps{Authz: az, Service: att}
+	adm := admission.Service{Store: st, Registry: os.Getenv("KEEL_TCR_DOMAIN"), BuilderSubject: os.Getenv("KEEL_TRUSTED_BUILDER") + "*", RekorURL: os.Getenv("KEEL_REKOR_URL")}
+	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
+		adm.Git = apply.GitHub{Token: tok}
+	}
+	deps.Admission = &api.AdmissionDeps{Authz: az, Service: adm}
+	if adm.Git != nil && adm.Registry != "" && os.Getenv("KEEL_TRUSTED_BUILDER") != "" {
+		go every(ctx, time.Hour, "admission policies", func(ctx context.Context) error {
+			res, err := adm.Reconcile(ctx)
+			if err == nil && res.PRs > 0 {
+				slog.Info("admission policies proposed", "prs", res.PRs)
+			}
+			return err
+		})
+	}
 	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
 		promoSvc.Git = apply.GitHub{Token: tok}
 	}
