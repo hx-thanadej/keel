@@ -105,6 +105,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/githubgov"
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/landingzone"
+	"github.com/hx-thanadej/keel/internal/leaks"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/pipelineauth"
 	"github.com/hx-thanadej/keel/internal/promotion"
@@ -390,8 +391,19 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return err
 		})
 	}
+	lk := &leaks.Service{Store: st, WebhookSecret: []byte(os.Getenv("KEEL_GITHUB_WEBHOOK_SECRET")), Keys: map[string]leaks.Keys{},
+		Alerts: leaks.GitHubAlerts{Client: ghapi.Client{Token: os.Getenv("KEEL_GITHUB_ADMIN_TOKEN")}}}
+	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
+		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
+		lk.Keys["tencent"] = tencent.AccessKeys{API: func(account string) (tencent.KeyAPI, error) {
+			return tencent.NewKeyAPI(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+		}}
+	}
+	if len(lk.WebhookSecret) > 0 {
+		deps.Webhooks = &api.WebhookDeps{Leaks: lk}
+	}
 	excs := exceptions.New(st)
-	engine, stopJobs, err := startFlows(ctx, st, defs, excs, acc)
+	engine, stopJobs, err := startFlows(ctx, st, defs, excs, acc, lk)
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err

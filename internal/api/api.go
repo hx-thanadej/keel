@@ -41,6 +41,7 @@ type Deps struct {
 	Controls   *ControlDeps
 	Access     *AccessDeps
 	BreakGlass *BreakGlassDeps
+	Webhooks   *WebhookDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -93,6 +94,9 @@ func NewRouter(info Info, deps Deps) *Router {
 	})
 	if deps.Sessions != nil {
 		deps.Sessions.Mount(mux)
+	}
+	if deps.Webhooks != nil {
+		mountWebhooks(mux, *deps.Webhooks)
 	}
 	if deps.Catalog != nil && deps.Auth != nil {
 		mountCatalog(mux, deps.Catalog, deps.Auth)

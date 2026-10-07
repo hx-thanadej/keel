@@ -24,6 +24,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/flow"
+	"github.com/hx-thanadej/keel/internal/leaks"
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/sbom"
@@ -45,6 +46,7 @@ var notTenantScoped = map[string]string{
 	"GET /auth/callback":                        "pre-authentication",
 	"POST /auth/logout":                         "acts on caller's own session",
 	"GET /auth/me":                              "returns caller's own principal",
+	"POST /v1/webhooks/github":                  "authenticated by HMAC signature; leaks_test covers signature and replay",
 	"GET /v1/breakglass":                        "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
 	"POST /v1/breakglass":                       "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
 	"POST /v1/breakglass/{identity}/drill":      "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
@@ -84,6 +86,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Attest:     &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission:  &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
 		VEX:        &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
+		Webhooks:   &api.WebhookDeps{Leaks: &leaks.Service{Store: s}},
 		BreakGlass: &api.BreakGlassDeps{Authz: az, Service: breakglass.Service{Store: s}, Home: func(*http.Request) (string, error) { return home, nil }},
 		Access:     &api.AccessDeps{Authz: az, Service: mustAccess(t, s)},
 		Controls:   &api.ControlDeps{Authz: az, Service: controls.Service{Store: s, Registry: mustControls(t)}},
