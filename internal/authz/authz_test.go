@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	home   = "00000000-0000-4000-8000-00000000000h"
-	tat    = "00000000-0000-4000-8000-0000000000a1"
-	acme   = "00000000-0000-4000-8000-0000000000b2"
-	teamA  = "team-crm"
-	teamB  = "team-other"
+	home  = "00000000-0000-4000-8000-00000000000h"
+	tat   = "00000000-0000-4000-8000-0000000000a1"
+	acme  = "00000000-0000-4000-8000-0000000000b2"
+	teamA = "team-crm"
+	teamB = "team-other"
 )
 
 func principal(tenant string, isHome bool, bindings ...auth.Binding) auth.Principal {
