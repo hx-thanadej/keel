@@ -5,7 +5,27 @@ security, policy and findings, permission boundaries and just-in-time access,
 multi-cloud FinOps (budgets per Project × Environment per day/month/year,
 forecasting, rightsizing), all recorded in one tamper-evident Activity Log.
 
-**Status:** M0 in progress — repo scaffold (Go API + React portal).
+**Status:** M0 (foundations) and M1 (cost visibility) are built; connecting
+real billing data is the next step ([runbook](docs/runbooks/connect-billing.md)).
+
+What works today:
+
+- **Tenancy:** Tenants (client organisations) → Projects → Environments →
+  Cloud Accounts, isolated by Postgres row-level security and an every-route
+  cross-Tenant test suite; each Tenant signs in through its own OIDC provider.
+- **Record:** every change is an Activity (CloudEvents + OCSF), sealed hourly
+  into a per-Tenant signed chain and shipped to WORM storage; `verify-log` /
+  `verify-archive` prove nothing was altered.
+- **Catalog:** Tencent account discovery, `catalog-info.yaml` sync from GitHub.
+- **Cost:** FOCUS ingest from Tencent and AWS payer accounts (upload or bucket
+  sync), effective cost with prepaid amortization, invoice reconciliation,
+  finality per provider, allocation by account / `keel-scope` tag / weight
+  rules / Kubernetes namespaces.
+- **Budgets:** per Project or Project × Environment, Day / Month / Year, in
+  THB or USD (ECB rates), seasonal forecast with p10–p90, threshold alerts
+  (Activity + webhook), cost anomaly Findings, optional native Tencent/AWS
+  budget mirrors.
+- **Portal:** Budgets, Costs (CSV export), Findings, Projects, Activity.
 
 ## Develop
 

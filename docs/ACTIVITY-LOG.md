@@ -173,3 +173,36 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
   to the home Tenant as `unallocated` and are reported as a KPI.
 - Open: whether Tencent daily bill files are per-day or month-to-date decides
   how files combine into a load; must be checked on the first real delivery (#29).
+
+## 2026-10-07 — Claude — M1 built: multi-cloud cost, budgets, forecasting, rightsizing groundwork
+
+- **Merged:** #57 cost facts + Tencent ingest + allocation by account (#30, #31,
+  #34) · #58 effective cost, invoice reconciliation, finality, bill sync (#32,
+  #33) · #59 budgets with Day/Month/Year status, alerts, per-Tenant currency
+  (#36, #37, #43) · #60 seasonal-trend forecast with p10/p50/p90 (#38) · #61
+  cost anomalies → Findings (#40) · #62 budget screen + Tenant cost view (#41,
+  #42) · #63 AWS FOCUS 1.2 ingest (#44) · #64 shared-cost allocation (#35) ·
+  #65 native budget mirrors for Tencent and AWS (#39).
+- **Decisions taken while building** (in PRs, not ADR-worthy):
+  - Prepaid purchases keep their billed cost (months reconcile to invoices) and
+    are spread as zero-billed daily amortization rows for effective cost.
+  - ECB reference rates for FX (free, keyless, has THB); 3 years, 4 currencies.
+  - Forecast = classical decomposition (trend × day-of-week), withheld below
+    28 days of history rather than guessed; bands from resampled errors.
+  - Anomalies use median + MAD over 28 days; one open Finding per
+    Project/Environment/service; auto-resolve after 3 normal days.
+  - Shared costs: one `keel-scope` tag key (Tencent allows 15), weight rules,
+    and OpenCost namespace shares; splits are exact to the cent.
+  - The generic `findings` table now exists; M2 rightsizing and M4 security
+    will reuse it.
+  - River (ADR-0014) still not needed: hourly jobs are tickers + advisory
+    locks. It comes in with Access Grant timers (M5).
+- **Bugs found by tests, mutation checks and browser runs:** `missing_fx`
+  counted history outside the window; 90-day FX feed too short; months before
+  first spend counted as not final; breakdown summed past the as-of date;
+  Postgres session time zone in a test literal; Tencent constraint name
+  truncation; AWS deprecated budget fields.
+- **Still needs the user / real accounts:** #29 Tencent payer billing role and
+  COS bill delivery (then confirm per-day vs month-to-date files); #8 GitHub
+  plan; #15 COS object lock; IdP client registrations; AWS management-account
+  role if AWS is used. See `docs/runbooks/connect-billing.md`.
