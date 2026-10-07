@@ -10,7 +10,7 @@ import (
 )
 
 func TestHealthz(t *testing.T) {
-	srv := httptest.NewServer(api.NewRouter(api.Info{Version: "test"}))
+	srv := httptest.NewServer(api.NewRouter(api.Info{Version: "test"}, api.Deps{}))
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/healthz")
@@ -39,7 +39,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestUnknownRouteIs404(t *testing.T) {
-	srv := httptest.NewServer(api.NewRouter(api.Info{Version: "test"}))
+	srv := httptest.NewServer(api.NewRouter(api.Info{Version: "test"}, api.Deps{}))
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/nope")

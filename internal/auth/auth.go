@@ -1,7 +1,11 @@
 // Package auth carries the authenticated Principal through a request.
 package auth
 
-import "context"
+import (
+	"context"
+	"errors"
+	"net/http"
+)
 
 // Principal kinds.
 const (
@@ -51,4 +55,12 @@ func WithPrincipal(ctx context.Context, p Principal) context.Context {
 func FromContext(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(ctxKey{}).(Principal)
 	return p, ok
+}
+
+// ErrUnauthenticated means the request carried no valid credentials.
+var ErrUnauthenticated = errors.New("unauthenticated")
+
+// Authenticator turns a request into a Principal.
+type Authenticator interface {
+	Authenticate(r *http.Request) (Principal, error)
 }

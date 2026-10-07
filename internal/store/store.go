@@ -78,3 +78,19 @@ func (s *Store) CreateTenant(ctx context.Context, slug, name string, isHome bool
 	}
 	return id, nil
 }
+
+// CreateTenantThen registers a Tenant and, in the same transaction scoped to
+// the new Tenant, runs then (e.g. to record the Activity describing it).
+func (s *Store) CreateTenantThen(ctx context.Context, slug, name string, isHome bool, then func(tx pgx.Tx, id string) error) (string, error) {
+	var id string
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT create_tenant($1, $2, $3)::text`, slug, name, isHome).Scan(&id); err != nil {
+			return fmt.Errorf("create tenant %q: %w", slug, err)
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('keel.tenant_id', $1, true)`, id); err != nil {
+			return err
+		}
+		return then(tx, id)
+	})
+	return id, err
+}
