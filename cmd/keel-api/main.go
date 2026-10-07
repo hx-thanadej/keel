@@ -80,6 +80,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/fx"
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
+	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store"
 )
 
@@ -164,6 +165,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		Budgets: &api.BudgetDeps{Authz: az, Budgets: budget.Service{Store: st}}}
 	deps.Budgets.Catalog = deps.Catalog
 	deps.Authz = az
+	deps.Rightsize = &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: st}}
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
 	if err := startOpenCost(ctx, st); err != nil {

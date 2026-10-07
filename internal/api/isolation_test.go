@@ -17,6 +17,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
@@ -51,7 +52,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Discovery: map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}},
 		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}, Rules: cost.Rules{Store: s}},
 		Budgets:   &api.BudgetDeps{Authz: az, Catalog: catalog.New(s, az), Budgets: budget.Service{Store: s}, Resolve: stubResolve},
-		Authz:     az})
+		Authz:     az,
+		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	c := client{t: t, url: srv.URL}
@@ -96,6 +98,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/allocation-rules":                              {"provider": "tencent", "sub_account_id": "pwn", "kind": "k8s", "cluster": "pwn"},
 		"POST /v1/tenants/{tenant}/allocation-rules/{rule}/archive":               {},
 		"PUT /v1/tenants/{tenant}/k8s-namespaces/{cluster}/{namespace}":           {"project_id": project},
+		"POST /v1/tenants/{tenant}/recommendations/{recommendation}/accept":       {},
+		"POST /v1/tenants/{tenant}/recommendations/{recommendation}/dismiss":      {"reason": "pwn"},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)
@@ -105,9 +109,14 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	victimRec, _, err := (rightsize.Service{Store: s}).Upsert(t.Context(), a, rightsize.Recommendation{Source: "engine:k8s", Provider: "tencent", ResourceID: "victim-workload",
+		ResourceType: "k8s_workload", Action: "resize_requests", MonthlySavings: "99.00", Currency: "USD", Confidence: 0.9, ProjectID: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns"},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding"},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload"},
 	}
 
 	attackers := map[string]auth.Principal{

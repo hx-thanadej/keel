@@ -25,7 +25,8 @@ type Deps struct {
 	Cost      *CostDeps
 	Budgets   *BudgetDeps
 	// Authz enables the Findings inbox (shared by cost, rightsizing, security).
-	Authz catalog.Authorizer
+	Authz     catalog.Authorizer
+	Rightsize *RightsizeDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -90,6 +91,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Authz != nil {
 			mountFindings(mux, deps.Auth, deps.Catalog, deps.Authz)
+		}
+		if deps.Rightsize != nil {
+			mountRightsize(mux, deps.Auth, *deps.Rightsize)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).

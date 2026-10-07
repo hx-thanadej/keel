@@ -18,7 +18,7 @@ import (
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -77,6 +77,10 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 		var load string
 		if err := q(`INSERT INTO cost_loads (tenant_id, provider, billing_account_id, billing_period, line_count, total_billed, unallocated_billed, currency, touched_tenants)
 			VALUES ($1, 'tencent', $2, '2026-09-01', 1, 1, 0, 'USD', ARRAY[$1::uuid]) RETURNING id`, &load, f.tenant, "payer-"+slug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO recommendations (tenant_id, fingerprint, source, provider, resource_id, resource_type, action, monthly_savings, currency, confidence)
+			VALUES ($1, $2, 'test', 'tencent', 'r', 'vm', 'resize', 1, 'USD', 0.5)`, f.tenant, "rec-"+slug); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO allocation_rules (tenant_id, provider, sub_account_id, kind) VALUES ($1, 'tencent', $2, 'weights')`, f.tenant, "sa-"+slug); err != nil {
