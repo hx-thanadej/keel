@@ -64,6 +64,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -73,11 +74,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	awscreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/riverqueue/river"
+	"github.com/sigstore/sigstore-go/pkg/root"
 
 	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/apply"
 	"github.com/hx-thanadej/keel/internal/archive"
+	"github.com/hx-thanadej/keel/internal/attest"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/budget"
@@ -193,7 +196,14 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
 		deps.Rightsize.Applier = &apply.Applier{Recs: rightsize.Service{Store: st}, Git: apply.GitHub{Token: tok}}
 	}
-	promoSvc := promotion.Service{Store: st, PathTemplate: os.Getenv("KEEL_PROMOTION_PATH"), AppTemplate: os.Getenv("KEEL_ARGOCD_APP")}
+	promoSvc := promotion.Service{Store: st, PathTemplate: os.Getenv("KEEL_PROMOTION_PATH"), AppTemplate: os.Getenv("KEEL_ARGOCD_APP"),
+		RequireVSA: os.Getenv("KEEL_REQUIRE_VSA") != "0"}
+	att, err := attestService(st)
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	deps.Attest = &api.AttestDeps{Authz: az, Service: att}
 	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
 		promoSvc.Git = apply.GitHub{Token: tok}
 	}
@@ -407,6 +417,29 @@ func flowDefs(vs map[string]vending.Vendor) []flow.Def {
 		defs = append(defs, v.Def())
 	}
 	return defs
+}
+
+// attestService configures the release policy (#112): the Sigstore trusted
+// root (KEEL_SIGSTORE_TRUSTED_ROOT, e.g. from "gh attestation trusted-root"),
+// GitHub's private instance (KEEL_SIGSTORE_GITHUB_PRIVATE=1), the trusted
+// builder workflow prefix (KEEL_TRUSTED_BUILDER) and Keel's signing key.
+func attestService(st *store.Store) (attest.Service, error) {
+	s := attest.Service{Store: st, VerifierID: strings.TrimSuffix(os.Getenv("KEEL_BASE_URL"), "/") + "/attestations",
+		Expectation: attest.Expectation{BuilderPrefix: os.Getenv("KEEL_TRUSTED_BUILDER")}}
+	key, err := digestKey()
+	if err != nil {
+		return s, err
+	}
+	s.Key = key
+	if path := os.Getenv("KEEL_SIGSTORE_TRUSTED_ROOT"); path != "" {
+		tr, err := root.NewTrustedRootFromPath(path)
+		if err != nil {
+			return s, fmt.Errorf("sigstore trusted root: %w", err)
+		}
+		builder := os.Getenv("KEEL_TRUSTED_BUILDER")
+		s.Verifier = attest.Sigstore{Trusted: tr, GitHubPrivate: os.Getenv("KEEL_SIGSTORE_GITHUB_PRIVATE") == "1", IdentityRegexp: "^" + regexp.QuoteMeta(builder)}
+	}
+	return s, nil
 }
 
 // pipelines lets GitHub Actions authenticate with their OIDC token

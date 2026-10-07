@@ -54,6 +54,7 @@ rules := {
 	"release.create": {"platform_admin", "team_lead", "engineer", "pipeline"},
 	"scan.upload": {"platform_admin", "security_lead", "pipeline"},
 	"scan.read": read_roles,
+	"attestation.submit": {"platform_admin", "pipeline"},
 	"promotion.read": read_roles,
 	"promotion.request": {"platform_admin", "team_lead", "engineer"},
 	"promotion.approve": {"platform_admin", "tenant_approver"},
