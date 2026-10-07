@@ -99,6 +99,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/allocation-rules/{rule}/archive":               {},
 		"PUT /v1/tenants/{tenant}/k8s-namespaces/{cluster}/{namespace}":           {"project_id": project},
 		"POST /v1/tenants/{tenant}/recommendations/{recommendation}/accept":       {},
+		"PATCH /v1/tenants/{tenant}/projects/{project}/environments/{env}":        {"waste_cleanup": false},
 		"POST /v1/tenants/{tenant}/recommendations/{recommendation}/dismiss":      {"reason": "pwn"},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})

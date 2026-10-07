@@ -33,6 +33,8 @@
 //	KEEL_PROMETHEUS     cluster=url[@tenant/project/env][,…]: per-container utilisation for rightsizing
 //	KEEL_TENCENT_MEMBER_ROLE  role Keel assumes in member accounts to read Cloud Monitor (CVM utilisation)
 //	KEEL_AWS_COH=1      import AWS Cost Optimization Hub recommendations (management account, web identity)
+//	KEEL_WASTE_CLEANUP=1      allow deleting waste in opted-in non-prod Environments after the grace period
+//	KEEL_WASTE_GRACE_DAYS     days a waste recommendation must stay open first (default 7)
 //	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
@@ -61,6 +63,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -794,6 +797,17 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 		slog.Error("cvm rightsizing failed", "err", err)
 	} else {
 		slog.Info("cvm rightsizing", "raised", res.Raised, "kept", res.Kept, "skipped", res.Skipped)
+	}
+	grace, _ := strconv.Atoi(envOr("KEEL_WASTE_GRACE_DAYS", "7"))
+	waste := rightsize.WasteEngine{Service: rightsize.Service{Store: st}, GraceDays: max(grace, 1), CleanupEnabled: os.Getenv("KEEL_WASTE_CLEANUP") == "1",
+		Scanner: func(account string) (rightsize.WasteScanner, rightsize.Cleaner, error) {
+			w, err := tencent.NewWaste(region, &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region})
+			return w, w, err
+		}}
+	if res, err := waste.Run(ctx); err != nil {
+		slog.Error("waste scan failed", "err", err)
+	} else {
+		slog.Info("waste", "raised", res.Raised, "kept", res.Kept, "deleted", res.Deleted, "errors", res.Errors)
 	}
 }
 
