@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 
@@ -24,19 +25,28 @@ func (quick) NextRetry(*rivertype.JobRow) time.Time { return time.Now().Add(10 *
 // ends or the returned stop is called.
 func Start(t *testing.T, st *store.Store, e *flow.Engine) (stop func()) {
 	t.Helper()
+	c, stop := Client(t, st, e.Register)
+	e.SetClient(c)
+	return stop
+}
+
+// Client starts a River client with the given workers registered.
+func Client(t *testing.T, st *store.Store, register ...func(*river.Workers)) (*river.Client[pgx.Tx], func()) {
+	t.Helper()
 	w := river.NewWorkers()
-	e.Register(w)
+	for _, r := range register {
+		r(w)
+	}
 	c, err := flow.NewClient(st.AppPool(), w, flow.ClientOptions{RetryPolicy: quick{}, PollInterval: 20 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.SetClient(c)
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var once sync.Once
-	stop = func() {
+	stop := func() {
 		once.Do(func() {
 			sc, done := context.WithTimeout(context.Background(), 5*time.Second)
 			defer done()
@@ -45,7 +55,7 @@ func Start(t *testing.T, st *store.Store, e *flow.Engine) (stop func()) {
 		})
 	}
 	t.Cleanup(stop)
-	return stop
+	return c, stop
 }
 
 // Wait polls until the flow reaches one of states.

@@ -234,7 +234,7 @@ func (s *Service) facts(ctx context.Context, tx pgx.Tx, releaseID, env string) (
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return f, err
 	}
-	err = tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE project_id = $1 AND status = 'open' AND severity = 'critical'`, f.projectID).Scan(&f.criticalOpen)
+	err = tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE project_id = $1 AND status = 'open' AND severity = 'critical' AND NOT finding_excepted(findings)`, f.projectID).Scan(&f.criticalOpen)
 	return f, err
 }
 

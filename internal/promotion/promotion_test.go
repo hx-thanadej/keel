@@ -246,4 +246,15 @@ func TestCriticalFindingsAndBudgetBreachBlock(t *testing.T) {
 	if !strings.HasPrefix(p.Decision.Reasons[0], "1 open critical Findings") || !strings.HasPrefix(p.Decision.Reasons[1], "budget hard-breached: CRM 2026 at 125%") {
 		t.Fatalf("reasons %q", p.Decision.Reasons)
 	}
+	// An approved Exception for the CVE takes it out of the gate; the budget still blocks.
+	if err := w.s.InTenant(ctx, w.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO exceptions (tenant_id, fingerprint, reason, state, requested_by, decided_by, expires_at)
+			VALUES ($1, 'cve', 'patched in base image next sprint', 'approved', 'user:eng', 'user:sec', now() + interval '7 days')`, w.tenant)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.Preview(ctx, w.tenant, rel.ID, w.dev); err != nil || len(d.Reasons) != 1 || !strings.HasPrefix(d.Reasons[0], "budget hard-breached") {
+		t.Fatalf("with exception: %+v %v", d, err)
+	}
 }
