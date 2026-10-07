@@ -169,6 +169,16 @@ describe('finops screens', () => {
     expect(await screen.findByText('tat-crm · prod · tencent')).toBeTruthy()
   })
 
+  it('findings tab shows rightsizing current → recommended with evidence', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f2', kind: 'rightsizing', severity: 'high', status: 'open',
+      title: 'Right-size requests of prod-tke/tat-crm-prod/api/app: save about 21516.00 THB/month',
+      detail: { current: { cpu: '2000m', memory: '4096Mi' }, recommended: { cpu: '410m', memory: '1531Mi' }, evidence: { lookback_days: 21, replicas: 2 } },
+      first_seen_at: '2026-09-30T03:00:00Z', resolution: null }] } })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Findings' }))
+    expect(await screen.findByText(/cpu: 2000m → 410m · memory: 4096Mi → 1531Mi · based on 21 days, 2 replica/)).toBeTruthy()
+  })
+
   it('findings tab lists anomalies with severity label and contributors', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null }] } })
     render(<App />)

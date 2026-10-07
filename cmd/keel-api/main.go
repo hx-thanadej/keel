@@ -730,6 +730,7 @@ func startUtilisation(ctx context.Context, st *store.Store) error {
 				slog.Error("utilisation backfill", "day", today.AddDate(0, 0, -d).Format("2006-01-02"), "err", err)
 			}
 		}
+		rightsizeAll(ctx, st)
 		t := time.NewTicker(6 * time.Hour)
 		defer t.Stop()
 		for {
@@ -744,7 +745,18 @@ func startUtilisation(ctx context.Context, st *store.Store) error {
 					slog.Error("utilisation collection", "err", err)
 				}
 			}
+			rightsizeAll(ctx, st)
 		}
 	}()
 	return nil
+}
+
+// rightsizeAll runs Keel's rightsizing engines over fresh utilisation.
+func rightsizeAll(ctx context.Context, st *store.Store) {
+	k8s := rightsize.K8sEngine{Service: rightsize.Service{Store: st}, Utilisation: utilisation.Store{Store: st}}
+	if res, err := k8s.Run(ctx); err != nil {
+		slog.Error("k8s rightsizing failed", "err", err)
+	} else {
+		slog.Info("k8s rightsizing", "raised", res.Raised, "kept", res.Kept, "skipped", res.Skipped)
+	}
 }

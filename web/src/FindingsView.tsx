@@ -43,6 +43,9 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
       {items.map((f) => {
         const s = sev[f.severity]
         const top = (f.detail.top_resources as { resource_id: string; delta: string }[] | undefined) ?? []
+        const cur = f.detail.current as Record<string, string> | undefined
+        const rec = f.detail.recommended as Record<string, string> | undefined
+        const ev = f.detail.evidence as Record<string, unknown> | undefined
         return (
           <article key={f.id} className="card finding">
             <span className={`status ${s.cls}`}>
@@ -50,6 +53,15 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
             </span>
             <strong>{f.title}</strong>
             {top.length > 0 && <span className="meta">Top contributors: {top.map((t) => `${t.resource_id} (+${t.delta})`).join(', ')}</span>}
+            {cur && rec && (
+              <span className="meta">
+                {Object.keys(rec)
+                  .map((k) => `${k}: ${cur[k] ?? '—'} → ${rec[k]}`)
+                  .join(' · ')}
+                {ev?.lookback_days !== undefined && ` · based on ${String(ev.lookback_days)} days`}
+                {ev?.replicas !== undefined && `, ${String(ev.replicas)} replica(s)`}
+              </span>
+            )}
             <span className="meta">First seen {new Date(f.first_seen_at).toLocaleString()}</span>
             <div>
               <button className="secondary" onClick={() => resolve(f)}>
