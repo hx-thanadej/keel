@@ -37,6 +37,8 @@ rules := {
 	"cost.read": read_roles,
 	"budget.read": read_roles,
 	"finding.read": read_roles,
+	"recommendation.read": read_roles,
+	"recommendation.decide": {"platform_admin", "finops_lead", "team_lead", "engineer"},
 	"finding.resolve": {"platform_admin", "security_lead", "finops_lead", "team_lead", "engineer"},
 	"budget.create": {"platform_admin", "finops_lead", "team_lead"},
 	"budget.update": {"platform_admin", "finops_lead", "team_lead"},
