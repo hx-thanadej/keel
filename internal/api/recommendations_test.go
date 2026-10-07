@@ -52,4 +52,12 @@ func TestRecommendationsAPI(t *testing.T) {
 	mustStatus(t, st, 400, body)
 	st, body = eng.do("POST", "/v1/tenants/"+tat+"/recommendations/00000000-0000-4000-8000-000000000000/accept", map[string]any{})
 	mustStatus(t, st, 404, body)
+
+	st, body = viewer.do("GET", "/v1/tenants/"+tat+"/savings", nil)
+	mustStatus(t, st, 200, body)
+	if body["accepted"] != "180.00" || body["open"] != "0.00" {
+		t.Fatalf("savings %s", body)
+	}
+	st, body = viewer.do("GET", "/v1/tenants/"+tat+"/savings?project=nope", nil)
+	mustStatus(t, st, 400, body)
 }

@@ -62,6 +62,22 @@ func mountRightsize(mux Mux, a auth.Authenticator, d RightsizeDeps) {
 		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
+	mux.Handle("GET /v1/tenants/{tenant}/savings", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant := r.PathValue("tenant")
+		if err := d.allow(r, p, "recommendation.read", tenant); err != nil {
+			return err
+		}
+		project := r.URL.Query().Get("project")
+		if project != "" && !catalog.ValidID(project) {
+			return errors.Join(catalog.ErrInvalid, errors.New("project must be a uuid"))
+		}
+		out, err := rightsize.Tracker{Service: d.Service}.Summary(r.Context(), tenant, project)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, out)
+		return nil
+	}))
 	mux.Handle("POST /v1/tenants/{tenant}/recommendations/{recommendation}/accept", authed(a, []string{"tenant", "recommendation"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tenant := r.PathValue("tenant")
 		if err := d.allow(r, p, "recommendation.decide", tenant); err != nil {

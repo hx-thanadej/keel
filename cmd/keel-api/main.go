@@ -787,6 +787,12 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 			slog.Info("aws recommendations", "raised", res.Raised, "kept", res.Kept, "unowned", res.Unowned)
 		}
 	}
+	// Realised savings and regressions; advice from engines below is seen on the next run.
+	if res, err := (rightsize.Tracker{Service: rightsize.Service{Store: st}}).Run(ctx); err != nil {
+		slog.Error("savings tracker failed", "err", err)
+	} else {
+		slog.Info("savings tracker", "updated", res.Updated, "waiting", res.Waiting, "regressions", res.Regressions)
+	}
 	role := os.Getenv("KEEL_TENCENT_MEMBER_ROLE")
 	if role == "" {
 		return

@@ -181,6 +181,22 @@ describe('finops screens', () => {
     expect(await screen.findByRole('button', { name: 'Open pull request' })).toBeTruthy()
   })
 
+  it('savings tab compares recommended with realised and flags regressions, per project', async () => {
+    const calls = mockFetch({ ...routes([]), [`/v1/tenants/${tat}/savings`]: (u: URL) => ({ currency: 'THB', open: '9000.00', accepted: '0.00', applied: u.searchParams.get('project') ? '3150.00' : '24666.00',
+      realised: '3150.00', regressions: 1,
+      items: [{ id: 'r1', resource_id: 'ins-big', action: 'resize', project_id: 'p1', recommended: '3150.00', realised: '3150.00', method: 'measured', regression: null, applied_at: '2026-09-15T00:00:00Z' },
+        { id: 'r2', resource_id: 'tke/ns/api/app', action: 'resize_requests', project_id: 'p1', recommended: '21516.00', realised: null, method: null, regression: 'cpu_cores p95 at 98% of request on 2026-09-20', applied_at: '2026-09-10T00:00:00Z' }] }) })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Savings' }))
+    expect(await screen.findByText('24,666.00 THB')).toBeTruthy()
+    expect(screen.getByText(/measured/)).toBeTruthy()
+    expect(screen.getByText(/waiting for 7 days of data/)).toBeTruthy()
+    expect(screen.getByText(/Regression: cpu_cores p95 at 98%/)).toBeTruthy()
+    await userEvent.selectOptions(screen.getByLabelText('Project'), 'p1')
+    expect(await screen.findAllByText('3,150.00 THB')).not.toHaveLength(0)
+    expect(calls).toContain(`/v1/tenants/${tat}/savings?project=p1`)
+  })
+
   it('findings tab lists anomalies with severity label and contributors', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null }] } })
     render(<App />)
