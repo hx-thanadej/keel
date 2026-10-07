@@ -236,6 +236,32 @@ describe('finops screens', () => {
     expect(screen.getByRole('button', { name: 'Create repository and service' })).toBeTruthy()
   })
 
+  it('security tab shows VSA results, approves exceptions, requires VEX justification and lists control gaps', async () => {
+    const calls = mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/services`]: { items: [{ id: 's1', project_id: 'p1', slug: 'crm-api', name: 'CRM API', repository: '', template: '' }] },
+      [`/v1/tenants/${tat}/releases`]: { items: [{ id: 'r1', service_id: 's1', version: '1.5.0', images: [], created_at: '2026-10-01T00:00:00Z' }] },
+      [`/v1/tenants/${tat}/releases/r1/attestations`]: { items: [{ id: 'a1', image_digest: 'sha256:aa', passed: false, created_at: '2026-10-01T00:00:00Z',
+        checks: [{ name: 'signature', pass: true, detail: 'ok' }, { name: 'trigger', pass: false, detail: 'triggered by pull_request_target' }] }] },
+      [`/v1/tenants/${tat}/exceptions`]: { items: [{ id: 'x1', fingerprint: 'vuln:CVE-2026-1:', finding_ids: [], reason: 'patch next sprint', state: 'requested', requested_by: 'user:eng@harmonyx.co', decided_by: null, expires_at: '2026-11-01T00:00:00Z' }] },
+      [`/v1/tenants/${tat}/exceptions/x1/approve`]: { id: 'x1', state: 'approved' },
+      [`/v1/tenants/${tat}/vex`]: { items: [] },
+      [`/v1/tenants/${tat}/controls`]: { version: 'keel-controls@1', services: 1, controls: [
+        { id: 'PW.7.2', framework: 'SSDF', title: 'Review code', policies: ['keel-scans@1'], coverage: [{ name: 'keel-scans@1', point: 'pipeline', covered_services: 1 }], gap: false },
+        { id: 'PO.1.1', framework: 'SSDF', title: 'Security requirements', policies: [], coverage: [], gap: true }] },
+    })
+    vi.stubGlobal('prompt', () => 'internal only')
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Security' }))
+    expect(await screen.findByText(/VSA failed: trigger/)).toBeTruthy()
+    expect(screen.getByText(/triggered by pull_request_target/)).toBeTruthy()
+    expect(screen.getByText(/2 controls, 1 without coverage, across 1 services/)).toBeTruthy()
+    expect(screen.getByText('no Keel policy yet')).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Approve exception' }))
+    expect(calls).toContain(`/v1/tenants/${tat}/exceptions/x1/approve`)
+    expect((screen.getByLabelText('Justification') as HTMLSelectElement).required).toBe(true)
+  })
+
   it('findings tab lists anomalies with severity label and contributors', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null, due_at: '2026-09-18T03:00:00Z', overdue_at: '2026-09-19T00:00:00Z' }] } })
     render(<App />)
