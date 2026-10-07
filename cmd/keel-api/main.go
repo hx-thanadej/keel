@@ -461,16 +461,21 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 	return nil
 }
 
-// fxLoop keeps ECB reference rates current: 90-day backfill, then every 6h.
+// fxLoop keeps ECB reference rates current: a full 3-year backfill when the
+// stored history is shorter, then the daily feed every 6h.
 func fxLoop(ctx context.Context, st *store.Store) {
 	db := fx.DB{Store: st}
-	url := fx.ECB90DaysURL
+	since := time.Now().UTC().AddDate(-3, 0, 0)
+	url := fx.ECBDailyURL
+	if earliest, err := db.Earliest(ctx); err != nil || earliest.IsZero() || earliest.After(since.AddDate(0, 0, 7)) {
+		url = fx.ECBHistoryURL
+	}
 	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()
 	for {
 		if rates, err := fx.FetchECB(ctx, nil, url); err != nil {
 			slog.Error("fx fetch failed", "err", err)
-		} else if n, err := db.SaveRates(ctx, rates); err != nil {
+		} else if n, err := db.SaveRates(ctx, fx.Filter(rates, since)); err != nil {
 			slog.Error("fx save failed", "err", err)
 		} else {
 			slog.Info("fx rates", "new", n)

@@ -107,6 +107,9 @@ func TestStatusMonthSeriesInTenantCurrency(t *testing.T) {
 	if len(st.Series) != 30 || st.Series[0].Actual != "217.00" || st.Series[1].Actual != "217.00" || st.Series[0].Budget != "1000.00" {
 		t.Errorf("series %+v", st.Series[:2])
 	}
+	if len(st.Providers) != 1 || st.Providers[0].Provider != "tencent" || st.Providers[0].Final {
+		t.Errorf("providers %+v", st.Providers)
+	}
 	if st.Series[2].Actual != "" {
 		t.Errorf("days after as-of must have no actual, got %q", st.Series[2].Actual)
 	}

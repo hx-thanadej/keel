@@ -3,6 +3,7 @@ package fx
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -30,4 +31,14 @@ func (d DB) SaveRates(ctx context.Context, rates []Rate) (int, error) {
 		return nil
 	})
 	return n, err
+}
+
+// Earliest returns the oldest stored rate day, or zero time when none.
+func (d DB) Earliest(ctx context.Context) (time.Time, error) {
+	var t *time.Time
+	err := d.Store.AppPool().QueryRow(ctx, `SELECT min(day)::timestamptz FROM fx_rates_days()`).Scan(&t)
+	if err != nil || t == nil {
+		return time.Time{}, err
+	}
+	return *t, nil
 }

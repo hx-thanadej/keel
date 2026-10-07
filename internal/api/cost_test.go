@@ -84,6 +84,27 @@ func TestCostUploadAndQuery(t *testing.T) {
 	if got["2026-09-01/prod"] != "35.20" || got["2026-09-02/dev"] != "1.20" {
 		t.Errorf("daily = %v", got)
 	}
+	// Breakdown by service (tenant currency USD here): prod MySQL purchase is the top effective item.
+	st, body = v.do("GET", "/v1/tenants/"+tat+"/costs/breakdown?from=2026-09-01&to=2026-10-01&by=service", nil)
+	mustStatus(t, st, 200, body)
+	rows := items(t, body)
+	if len(rows) != 3 || rows[0]["key"] != "TencentDB for MySQL" || rows[0]["effective"] != "30.00" || rows[1]["key"] != "Cloud Virtual Machine" {
+		t.Errorf("breakdown %v", rows)
+	}
+	st, body = v.do("GET", "/v1/tenants/"+tat+"/costs/breakdown?by=region", nil)
+	mustStatus(t, st, 400, body)
+	st, body = v.do("GET", "/v1/tenants/"+tat+"/costs/breakdown?from=2026-09-01&to=2026-10-01&by=resource&limit=1", nil)
+	mustStatus(t, st, 200, body)
+	if r := items(t, body); len(r) != 1 || r[0]["key"] != "cdb-prod" {
+		t.Errorf("resource breakdown %v", r)
+	}
+	// CSV export of the Tenant's own daily costs.
+	st, body = v.do("GET", "/v1/tenants/"+tat+"/costs/daily?from=2026-09-01&to=2026-10-01&format=csv", nil)
+	mustStatus(t, st, 200, body)
+	csvText, _ := body["_raw"].(string)
+	if !strings.HasPrefix(csvText, "day,project,environment,provider,currency,billed,effective\n") || !strings.Contains(csvText, "2026-09-01,tat-crm,prod,tencent,USD,35.20,6.20") || strings.Contains(csvText, "200099999999") {
+		t.Errorf("csv:\n%s", csvText)
+	}
 	st, body = v.do("GET", "/v1/tenants/"+tat+"/costs/daily?from=bad", nil)
 	mustStatus(t, st, 400, body)
 	st, body = v.do("GET", "/v1/tenants/"+tat+"/costs/unallocated", nil)

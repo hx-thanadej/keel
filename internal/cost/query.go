@@ -132,3 +132,60 @@ func (q Queries) Loads(ctx context.Context, homeTenantID string, limit int) ([]L
 	})
 	return out, err
 }
+
+// BreakdownRow is spend for one service or resource over a window, in the
+// Tenant's currency.
+type BreakdownRow struct {
+	Key       string `json:"key"`
+	Service   string `json:"service"`
+	Billed    string `json:"billed"`
+	Effective string `json:"effective"`
+	Currency  string `json:"currency"`
+}
+
+// Breakdown ranks services (by="service") or resources (by="resource") by
+// effective spend in [from, to), converted to the Tenant's currency.
+func (q Queries) Breakdown(ctx context.Context, tenantID string, f DailyFilter, by string, limit int) ([]BreakdownRow, error) {
+	key := "service_name"
+	if by == "resource" {
+		key = "coalesce(nullif(resource_id, ''), '(no resource id)')"
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var out []BreakdownRow
+	err := q.Store.InTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			WITH t AS (SELECT currency FROM tenants WHERE id = current_tenant_id())
+			SELECT k, svc,
+			       to_char(sum(fx_convert(billed, cur, (SELECT currency FROM t), d)), 'FM999999999990.00'),
+			       to_char(sum(fx_convert(effective, cur, (SELECT currency FROM t), d)), 'FM999999999990.00'),
+			       (SELECT currency FROM t)
+			FROM (SELECT `+key+` AS k, max(service_name) AS svc, billing_currency AS cur, (charge_period_start AT TIME ZONE 'UTC')::date AS d,
+			             sum(billed_cost) AS billed, sum(coalesce(effective_cost, billed_cost)) AS effective
+			      FROM cost_facts
+			      WHERE current AND charge_period_start >= $1 AND charge_period_start < $2
+			        AND ($3 = '' OR project_id::text = $3) AND ($4 = '' OR environment_id::text = $4)
+			      GROUP BY 1, 3, 4) x
+			GROUP BY 1, 2
+			ORDER BY sum(fx_convert(effective, cur, (SELECT currency FROM t), d)) DESC NULLS LAST
+			LIMIT $5`, f.From, f.To, f.ProjectID, f.EnvironmentID, limit)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (BreakdownRow, error) {
+			var b BreakdownRow
+			var billed, eff *string
+			err := r.Scan(&b.Key, &b.Service, &billed, &eff, &b.Currency)
+			if billed != nil {
+				b.Billed = *billed
+			}
+			if eff != nil {
+				b.Effective = *eff
+			}
+			return b, err
+		})
+		return err
+	})
+	return out, err
+}

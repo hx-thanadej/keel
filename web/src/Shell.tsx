@@ -2,11 +2,23 @@ import { useEffect, useState } from 'react'
 import { api, visibleTenantIds, type Principal, type Tenant } from './api'
 import { TenantView } from './TenantView'
 import { ActivityFeed } from './ActivityFeed'
+import { BudgetsView } from './BudgetsView'
+import { CostsView } from './CostsView'
+import { FindingsView } from './FindingsView'
+
+type Tab = 'budgets' | 'costs' | 'findings' | 'catalog' | 'activity'
+const tabs: [Tab, string][] = [
+  ['budgets', 'Budgets'],
+  ['costs', 'Costs'],
+  ['findings', 'Findings'],
+  ['catalog', 'Projects'],
+  ['activity', 'Activity'],
+]
 
 export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => void }) {
   const [tenants, setTenants] = useState<Tenant[]>([])
   const [selected, setSelected] = useState<string | null>(null)
-  const [tab, setTab] = useState<'catalog' | 'activity'>('catalog')
+  const [tab, setTab] = useState<Tab>('budgets')
 
   useEffect(() => {
     // A binding the policy rejects (e.g. outside a Tenant Member's own Tenant) simply fails to load.
@@ -54,14 +66,17 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
           <>
             <h1>{current.name}</h1>
             <div role="tablist">
-              <button role="tab" aria-selected={tab === 'catalog'} onClick={() => setTab('catalog')}>
-                Projects
-              </button>
-              <button role="tab" aria-selected={tab === 'activity'} onClick={() => setTab('activity')}>
-                Activity
-              </button>
+              {tabs.map(([id, name]) => (
+                <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>
+                  {name}
+                </button>
+              ))}
             </div>
-            {tab === 'catalog' ? <TenantView key={current.id} tenant={current} /> : <ActivityFeed key={current.id} tenantId={current.id} />}
+            {tab === 'budgets' && <BudgetsView key={current.id} tenantId={current.id} />}
+            {tab === 'costs' && <CostsView key={current.id} tenantId={current.id} />}
+            {tab === 'findings' && <FindingsView key={current.id} tenantId={current.id} />}
+            {tab === 'catalog' && <TenantView key={current.id} tenant={current} />}
+            {tab === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
           </>
         )}
       </main>
