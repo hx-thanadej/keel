@@ -15,6 +15,9 @@
 // named by each provider's client_secret_ref.
 //
 //	KEEL_DIGEST_KEY     base64 32-byte Ed25519 seed; enables hourly Activity Log sealing
+//	KEEL_ARCHIVE_BUCKET   S3-compatible bucket for the WORM Activity Log archive (with KEEL_DIGEST_KEY)
+//	KEEL_ARCHIVE_ENDPOINT e.g. cos.ap-bangkok.myqcloud.com
+//	KEEL_ARCHIVE_REGION   e.g. ap-bangkok; credentials are Tencent STS (keyless)
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
@@ -25,6 +28,7 @@
 //
 //	keel-api digest-pubkey                 print the public key for KEEL_DIGEST_KEY
 //	keel-api verify-log -tenant ID -pubkey BASE64[,BASE64...]
+//	keel-api verify-archive -tenant ID -pubkey BASE64[,BASE64...]   (needs KEEL_ARCHIVE_*)
 //
 //	keel-api bootstrap -slug harmonyx -name HarmonyX -issuer URL -client-id ID \
 //	    -client-secret-ref ENV_NAME -admin-group keel-admins [-email-domain harmonyx.co]
@@ -48,6 +52,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/hx-thanadej/keel/internal/api"
+	"github.com/hx-thanadej/keel/internal/archive"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
@@ -64,7 +69,7 @@ var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 {
-		cmds := map[string]func([]string) error{"bootstrap": bootstrap, "digest-pubkey": digestPubkey, "verify-log": verifyLog}
+		cmds := map[string]func([]string) error{"bootstrap": bootstrap, "digest-pubkey": digestPubkey, "verify-log": verifyLog, "verify-archive": verifyArchive}
 		if cmd, ok := cmds[os.Args[1]]; ok {
 			if err := cmd(os.Args[2:]); err != nil {
 				slog.Error(os.Args[1], "err", err)
@@ -259,12 +264,27 @@ func startSealer(ctx context.Context, st *store.Store) error {
 		return nil
 	}
 	sealer := &integrity.Sealer{Store: st, Signer: integrity.NewEd25519(key)}
+	objs, err := archiveStore()
+	if err != nil {
+		return err
+	}
+	var exporter *archive.Exporter
+	if objs != nil {
+		exporter = &archive.Exporter{Store: st, Objects: objs}
+	} else {
+		slog.Warn("KEEL_ARCHIVE_BUCKET not set; sealed digests are not shipped to the WORM archive")
+	}
 	go func() {
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {
 			if err := sealer.SealAll(ctx); err != nil {
 				slog.Error("ALERT activity log sealing failed", "err", err)
+			}
+			if exporter != nil {
+				if n, err := exporter.ExportAll(ctx); err != nil {
+					slog.Error("ALERT activity log archive export failed", "err", err, "exported", n)
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -293,13 +313,9 @@ func verifyLog(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	keys := map[string]ed25519.PublicKey{}
-	for _, p := range strings.Split(*pubs, ",") {
-		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(p))
-		if err != nil || len(b) != ed25519.PublicKeySize {
-			return fmt.Errorf("bad public key %q", p)
-		}
-		keys[integrity.KeyID(b)] = b
+	keys, err := parseKeys(*pubs)
+	if err != nil {
+		return err
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, os.Getenv("KEEL_DATABASE_URL"))
@@ -311,6 +327,53 @@ func verifyLog(args []string) error {
 	if err != nil {
 		return err
 	}
+	return printReport(r)
+}
+
+func archiveStore() (archive.ObjectStore, error) {
+	bucket := os.Getenv("KEEL_ARCHIVE_BUCKET")
+	if bucket == "" {
+		return nil, nil
+	}
+	creds := archive.Refreshing(tencent.STS{Creds: tencent.Credentials()}, 10*time.Minute)
+	return archive.NewS3(archive.S3Config{Endpoint: os.Getenv("KEEL_ARCHIVE_ENDPOINT"), Region: os.Getenv("KEEL_ARCHIVE_REGION"), Bucket: bucket, Creds: creds})
+}
+
+func verifyArchive(args []string) error {
+	fs := flag.NewFlagSet("verify-archive", flag.ContinueOnError)
+	tenant := fs.String("tenant", "", "tenant id")
+	pubs := fs.String("pubkey", "", "comma-separated base64 Ed25519 public keys")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	keys, err := parseKeys(*pubs)
+	if err != nil {
+		return err
+	}
+	objs, err := archiveStore()
+	if err != nil || objs == nil {
+		return errors.New("set KEEL_ARCHIVE_BUCKET, KEEL_ARCHIVE_ENDPOINT, KEEL_ARCHIVE_REGION")
+	}
+	r, err := archive.Verify(context.Background(), objs, *tenant, keys)
+	if err != nil {
+		return err
+	}
+	return printReport(r)
+}
+
+func parseKeys(csv string) (map[string]ed25519.PublicKey, error) {
+	keys := map[string]ed25519.PublicKey{}
+	for _, p := range strings.Split(csv, ",") {
+		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(p))
+		if err != nil || len(b) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("bad public key %q", p)
+		}
+		keys[integrity.KeyID(b)] = b
+	}
+	return keys, nil
+}
+
+func printReport(r integrity.Report) error {
 	fmt.Printf("digests=%d covered=%d unsealed=%d\n", r.Digests, r.Covered, r.Unsealed)
 	for _, p := range r.Problems {
 		fmt.Println("PROBLEM:", p)

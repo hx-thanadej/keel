@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -87,15 +88,35 @@ func scanDigest(r pgx.Row) (Digest, error) {
 	return d, err
 }
 
+// BatchHasher computes a digest's batch hash. Feed activities in seq order;
+// event is the activity's event exactly as Postgres renders event::text.
+// The database verifier and the offline archive verifier both use it.
+type BatchHasher struct {
+	h hash.Hash
+	n int
+}
+
+// NewBatchHasher starts an empty batch.
+func NewBatchHasher() *BatchHasher { return &BatchHasher{h: sha256.New()} }
+
+// Add appends one activity.
+func (b *BatchHasher) Add(seq int64, id string, event []byte) {
+	sum := sha256.Sum256(event)
+	_, _ = fmt.Fprintf(b.h, "%d %s %x\n", seq, id, sum) // hash writes cannot fail
+	b.n++
+}
+
+// Sum returns the count and hash so far.
+func (b *BatchHasher) Sum() (int, []byte) { return b.n, b.h.Sum(nil) }
+
 // batch hashes activities seq_from < seq <= seq_to of the scoped Tenant.
 func batch(ctx context.Context, tx pgx.Tx, from, to int64) (int, []byte, error) {
-	rows, err := tx.Query(ctx, `SELECT seq, id::text, sha256(convert_to(event::text, 'UTF8')) FROM activities WHERE seq > $1 AND seq <= $2 ORDER BY seq`, from, to)
+	rows, err := tx.Query(ctx, `SELECT seq, id::text, convert_to(event::text, 'UTF8') FROM activities WHERE seq > $1 AND seq <= $2 ORDER BY seq`, from, to)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer rows.Close()
-	h := sha256.New()
-	n := 0
+	b := NewBatchHasher()
 	for rows.Next() {
 		var seq int64
 		var id string
@@ -103,10 +124,10 @@ func batch(ctx context.Context, tx pgx.Tx, from, to int64) (int, []byte, error) 
 		if err := rows.Scan(&seq, &id, &ev); err != nil {
 			return 0, nil, err
 		}
-		_, _ = fmt.Fprintf(h, "%d %s %x\n", seq, id, ev) // hash writes cannot fail
-		n++
+		b.Add(seq, id, ev)
 	}
-	return n, h.Sum(nil), rows.Err()
+	n, sum := b.Sum()
+	return n, sum, rows.Err()
 }
 
 // Seal appends the next digest for tenantID.
