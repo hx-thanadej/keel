@@ -31,6 +31,7 @@ type Deps struct {
 	Vending   *VendingDeps
 	Promotion *PromotionDeps
 	Templates *TemplateDeps
+	Registry  *RegistryDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -110,6 +111,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Templates != nil {
 			mountTemplates(mux, deps.Auth, *deps.Templates)
+		}
+		if deps.Registry != nil {
+			mountRegistry(mux, deps.Auth, *deps.Registry)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).

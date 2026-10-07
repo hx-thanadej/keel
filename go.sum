@@ -187,6 +187,7 @@ github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cbs v1.3.179/go.mod h1:
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb v1.3.187 h1:xib8SM3l6Oa5Bu2DLQ/KzQFoVTV7bFhISuQcVnO/kjU=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb v1.3.187/go.mod h1:m96Ehb1zBiO0PkQ37uxFUX7Kpl/FPdw4W/83tDVAvHM=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.11/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.175/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.179/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.182/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.183/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
@@ -203,6 +204,8 @@ github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/organization v1.3.182 h
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/organization v1.3.182/go.mod h1:oKXWyPD6PvC6KWTdKmLzQkD9o1Z/6zUdAgEF6aE62o0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts v1.1.11 h1:FWhgjLYFHWJvYIsLfk4k2XWaJcn7HMUmFLWNSL4pqto=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts v1.1.11/go.mod h1:et851eJUuaPGcsKDi1eUfQZoslCaDS3QKUgoqQZtF1c=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tcr v1.3.175 h1:Gn2ESkuwl5RMyo8VDTYQIJ8j8pHrr1XDmVuny3I1sIk=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tcr v1.3.175/go.mod h1:/NSrK31WwKYkAIPBSmJXSIYXKEDcfuzwqvHoAzEyy6o=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/vpc v1.3.188 h1:FXwhvQ/TPzROxiIbZBDDTUYSkG4qM8OA/MQ4IiIXYNQ=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/vpc v1.3.188/go.mod h1:ZOu9+KoOROE9/HDgiO142QGq7t5z8r6TNxkXisWwgHk=
 github.com/tetratelabs/wazero v1.12.0 h1:DuWcpNu/FzgEXgGBDp8J1Spc+CWOvvtvVyjKlaZopYU=

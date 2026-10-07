@@ -95,6 +95,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/landingzone"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/promotion"
+	"github.com/hx-thanadej/keel/internal/registry"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/templates"
@@ -274,6 +275,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Flows = &api.FlowDeps{Authz: az, Engine: engine}
+	deps.Registry = &api.RegistryDeps{Authz: az, Store: st}
 	if creator != nil {
 		deps.Templates = &api.TemplateDeps{Authz: az, Engine: engine, Creator: *creator}
 	}
@@ -313,8 +315,16 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 				api, err := tencent.NewCAM(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
 				return tencent.CIIdentity{API: api}, err
 			}}
-		out["tencent"] = vending.Vendor{Store: st, Org: tencent.AccountFactory{API: orgAPI},
-			Baseline: []flow.Step{landingzone.Step(st, guardrails, baseline), ci.Step()}}
+		steps := []flow.Step{landingzone.Step(st, guardrails, baseline), ci.Step()}
+		if id := os.Getenv("KEEL_TCR_REGISTRY_ID"); id != "" {
+			api, err := tencent.NewTCR(envOr("KEEL_TENCENT_REGION", "ap-bangkok"), tencent.Credentials())
+			if err != nil {
+				slog.Error("tcr client", "err", err)
+			} else {
+				steps = append(steps, registry.Step(st, tencent.Registry{API: api, RegistryID: id}, 30))
+			}
+		}
+		out["tencent"] = vending.Vendor{Store: st, Org: tencent.AccountFactory{API: orgAPI}, Baseline: steps}
 		go daily(ctx, "ci identity sync", func(ctx context.Context) error {
 			res, err := ci.Sync(ctx)
 			if err == nil {
