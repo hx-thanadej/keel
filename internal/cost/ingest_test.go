@@ -86,7 +86,8 @@ func sum(t *testing.T, w world, tenant, where string, args ...any) string {
 func TestLoadAllocatesByCloudAccount(t *testing.T) {
 	w := setup(t)
 	res := ingest(t, w, false)
-	if res.Lines != 9 || res.Allocated != 7 || res.Unallocated != 2 {
+	// 9 source lines + 30 daily amortization rows for the prepaid MySQL purchase.
+	if res.Lines != 39 || res.Allocated != 37 || res.Unallocated != 2 {
 		t.Fatalf("result %+v", res)
 	}
 	if got := sum(t, w, w.tat, "environment_id = $1", w.devEnv); got != "2.40" {
@@ -97,6 +98,20 @@ func TestLoadAllocatesByCloudAccount(t *testing.T) {
 	}
 	if got := sum(t, w, w.tat, "project_id = $1", w.project); got != "42.80" {
 		t.Errorf("project billed = %s, want 42.80", got)
+	}
+	// Effective cost spreads the prepaid purchase across September but the month totals agree.
+	var effective, day1 string
+	must(t, w.s.InTenant(context.Background(), w.tat, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(context.Background(), `SELECT sum(effective_cost)::text FROM cost_facts WHERE current`).Scan(&effective); err != nil {
+			return err
+		}
+		return tx.QueryRow(context.Background(), `SELECT sum(effective_cost)::text FROM cost_facts WHERE current AND environment_id = $1 AND charge_period_start = '2026-09-01T00:00:00Z'`, w.prdEnv).Scan(&day1)
+	}))
+	if effective != "42.800000" {
+		t.Errorf("effective month total = %s, want 42.80", effective)
+	}
+	if day1 != "6.200000" { // 4.80 + 0.40 + 30/30
+		t.Errorf("prod day-1 effective = %s, want 6.20", day1)
 	}
 	// Unknown member account lands in the home Tenant, unallocated.
 	if got := sum(t, w, w.home, "allocation_method = 'unallocated'"); got != "4.00" {
@@ -119,8 +134,8 @@ func TestReloadSupersedesAndFinalFreezes(t *testing.T) {
 	must(t, w.s.InTenant(context.Background(), w.tat, func(tx pgx.Tx) error {
 		return tx.QueryRow(context.Background(), `SELECT count(*) FROM cost_facts WHERE NOT current`).Scan(&history)
 	}))
-	if history != 7 {
-		t.Errorf("superseded rows kept = %d, want 7 (history is retained)", history)
+	if history != 37 {
+		t.Errorf("superseded rows kept = %d, want 37 (history is retained)", history)
 	}
 	ingest(t, w, true)
 	lines, _ := cost.ParseFOCUS(fixture(t))

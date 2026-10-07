@@ -94,3 +94,41 @@ func (q Queries) Unallocated(ctx context.Context, homeTenantID string, from, to 
 	}
 	return k, nil
 }
+
+// LoadSummary is a load with its reconciliation outcome.
+type LoadSummary struct {
+	ID              string     `json:"id"`
+	Provider        string     `json:"provider"`
+	BillingAccount  string     `json:"billing_account_id"`
+	BillingPeriod   time.Time  `json:"billing_period"`
+	Final           bool       `json:"final"`
+	Lines           int        `json:"lines"`
+	TotalBilled     string     `json:"total_billed"`
+	Unallocated     string     `json:"unallocated_billed"`
+	Currency        string     `json:"currency"`
+	InvoiceTotal    *string    `json:"invoice_total"`
+	ReconcileStatus string     `json:"reconcile_status"`
+	ReconcileDiff   *string    `json:"reconcile_diff"`
+	LoadedAt        time.Time  `json:"loaded_at"`
+	SupersededAt    *time.Time `json:"superseded_at"`
+}
+
+// Loads lists recent loads (home Tenant only holds them).
+func (q Queries) Loads(ctx context.Context, homeTenantID string, limit int) ([]LoadSummary, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var out []LoadSummary
+	err := q.Store.InTenant(ctx, homeTenantID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id::text, provider, billing_account_id, billing_period, is_final, line_count,
+				to_char(total_billed, 'FM999999999990.00'), to_char(unallocated_billed, 'FM999999999990.00'), currency,
+				to_char(invoice_total, 'FM999999999990.00'), reconcile_status, to_char(reconcile_diff, 'FM999999999990.00'), loaded_at, superseded_at
+			FROM cost_loads ORDER BY loaded_at DESC LIMIT $1`, limit)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[LoadSummary])
+		return err
+	})
+	return out, err
+}

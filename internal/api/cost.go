@@ -95,6 +95,19 @@ func mountCost(mux Mux, a auth.Authenticator, d CostDeps) {
 		writeJSON(w, http.StatusOK, k)
 		return nil
 	}))
+	mux.Handle("GET /v1/tenants/{tenant}/cost-loads", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant := r.PathValue("tenant")
+		if err := d.allow(r, p, "cost.read_unallocated", tenant); err != nil {
+			return err
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		out, err := d.Queries.Loads(r.Context(), tenant, limit)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
 	// Manual load of a FOCUS export (CSV, .gz or .zip body). Lines are
 	// attributed across all Tenants by Cloud Account, so only the home
 	// Tenant's admins and FinOps leads may load.

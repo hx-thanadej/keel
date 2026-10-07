@@ -132,6 +132,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/tchap/go-patricia/v2 v2.3.3 h1:xfNEsODumaEcCcY3gI0hYPZ/PcpVv5ju6RMAhgwZDDc=
 github.com/tchap/go-patricia/v2 v2.3.3/go.mod h1:VZRHKAb53DLaG+nA9EaYYiaEx6YztwDlLElMsnSHD4k=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182 h1:N3aUDk/2Vk46JXHRRujkwgTpYrj/gKAhkLquezRcAk4=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182/go.mod h1:rwlA+clAU4TRk++lBnC1OMuQpa1da5v3RGBTIltpNQ4=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.182/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191 h1:MybHMdLwxStTaz0PO4c3/1dli7W0xMmqa7/HD3O01AQ=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
