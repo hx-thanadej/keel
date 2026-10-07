@@ -111,6 +111,7 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Authz != nil {
 			mountFindings(mux, deps.Auth, deps.Catalog, deps.Authz)
+			mountDecisions(mux, deps.Auth, deps.Catalog, deps.Authz)
 		}
 		if deps.Rightsize != nil {
 			mountRightsize(mux, deps.Auth, *deps.Rightsize)

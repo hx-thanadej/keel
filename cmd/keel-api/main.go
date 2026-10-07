@@ -96,6 +96,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/controls"
 	"github.com/hx-thanadej/keel/internal/cost"
+	"github.com/hx-thanadej/keel/internal/decisions"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/dora"
 	"github.com/hx-thanadej/keel/internal/exceptions"
@@ -325,6 +326,16 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			rep, err := gov.Run(ctx)
 			if err == nil {
 				slog.Info("github governance", "plan", rep.Plan, "mode", rep.Mode, "repos", rep.Repos, "drift", len(rep.Items))
+			}
+			return err
+		})
+	}
+	if tok := os.Getenv("KEEL_GITHUB_TOKEN"); tok != "" {
+		ix := decisions.Indexer{Store: st, Source: decisions.GitHub{Client: ghapi.Client{Token: tok}}}
+		go every(ctx, 6*time.Hour, "decision index", func(ctx context.Context) error {
+			res, err := ix.Run(ctx)
+			if err == nil && res.Changed > 0 {
+				slog.Info("decision records", "services", res.Services, "records", res.Records, "changed", res.Changed)
 			}
 			return err
 		})
