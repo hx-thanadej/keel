@@ -38,6 +38,7 @@ type Deps struct {
 	Admission *AdmissionDeps
 	SBOM      *SBOMDeps
 	VEX       *VEXDeps
+	Controls  *ControlDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -138,6 +139,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.VEX != nil {
 			mountVEX(mux, deps.Auth, *deps.VEX)
+		}
+		if deps.Controls != nil {
+			mountControls(mux, deps.Auth, *deps.Controls)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).

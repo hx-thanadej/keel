@@ -17,6 +17,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/controls"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/exceptions"
@@ -76,6 +77,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Attest:    &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission: &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
 		VEX:       &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
+		Controls:  &api.ControlDeps{Authz: az, Service: controls.Service{Store: s, Registry: mustControls(t)}},
 		SBOM:      &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: s}, Releases: attest.Service{Store: s}},
 		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
 		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
@@ -267,4 +269,13 @@ func rawDo(t *testing.T, base, method, path string, p auth.Principal, body map[s
 	defer func() { _ = res.Body.Close() }()
 	raw, _ := io.ReadAll(res.Body)
 	return res.StatusCode, string(raw)
+}
+
+func mustControls(t *testing.T) controls.Registry {
+	t.Helper()
+	r, err := controls.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
