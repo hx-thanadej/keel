@@ -248,6 +248,54 @@ func mountCatalog(mux *http.ServeMux, c *catalog.Service, a auth.Authenticator) 
 		return nil
 	}))
 
+	mux.Handle("POST /v1/tenants/{tenant}/identity-providers", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Issuer          string  `json:"issuer"`
+			ClientID        string  `json:"client_id"`
+			ClientSecretRef string  `json:"client_secret_ref"`
+			GroupsClaim     string  `json:"groups_claim"`
+			EmailDomain     *string `json:"email_domain"`
+			Why             string  `json:"why"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		out, err := c.CreateIdentityProvider(r.Context(), p, r.PathValue("tenant"), catalog.IdentityProvider{
+			Issuer: in.Issuer, ClientID: in.ClientID, ClientSecretRef: in.ClientSecretRef, GroupsClaim: in.GroupsClaim, EmailDomain: in.EmailDomain}, in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusCreated, out)
+		return nil
+	}))
+	mux.Handle("GET /v1/tenants/{tenant}/identity-providers", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		out, err := c.ListIdentityProviders(r.Context(), p, r.PathValue("tenant"))
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
+	mux.Handle("POST /v1/tenants/{tenant}/identity-providers/{idp}/group-roles", authed(a, []string{"tenant", "idp"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Group          string   `json:"group"`
+			Role           string   `json:"role"`
+			TargetTenantID string   `json:"target_tenant_id"`
+			TeamIDs        []string `json:"team_ids"`
+			Why            string   `json:"why"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		out, err := c.AddGroupRole(r.Context(), p, r.PathValue("tenant"), r.PathValue("idp"), catalog.GroupRole{
+			Group: in.Group, Role: in.Role, TargetTenantID: in.TargetTenantID, TeamIDs: in.TeamIDs}, in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusCreated, out)
+		return nil
+	}))
+
 	mux.Handle("GET /v1/tenants/{tenant}/activities", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		q := r.URL.Query()
 		f := activity.Filter{ActorUID: q.Get("actor"), Type: q.Get("type"), Subject: q.Get("subject")}

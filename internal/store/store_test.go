@@ -18,7 +18,7 @@ import (
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -51,6 +51,16 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 			return err
 		}
 		if err := q(`INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, 'api', 'API') RETURNING id`, &f.service, f.tenant, f.project, f.team); err != nil {
+			return err
+		}
+		var idp string
+		if err := q(`INSERT INTO identity_providers (tenant_id, issuer, client_id, client_secret_ref) VALUES ($1, $2, 'keel', 'SECRET') RETURNING id`, &idp, f.tenant, "https://idp."+slug+".example"); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO idp_group_roles (tenant_id, idp_id, group_name, role, target_tenant_id) VALUES ($1, $2, 'viewers', 'tenant_viewer', $1)`, f.tenant, idp); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO sessions (id_hash, tenant_id, principal, expires_at) VALUES (sha256($2::bytea), $1, '{}', now() + interval '1 hour')`, f.tenant, slug); err != nil {
 			return err
 		}
 		_, err := activity.Record(ctx, tx, activity.Activity{
@@ -225,6 +235,22 @@ func TestEveryTableIsListed(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClientIdPCannotGrantRolesElsewhere(t *testing.T) {
+	s := storetest.New(t)
+	a := seed(t, s, "tat")
+	b := seed(t, s, "acme")
+	ctx := context.Background()
+	err := s.InTenant(ctx, a.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO idp_group_roles (tenant_id, idp_id, group_name, role, target_tenant_id)
+			SELECT tenant_id, id, 'sneaky', 'platform_admin', $1 FROM identity_providers`, b.tenant)
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("client IdP binding into another tenant: err = %v, want check_violation", err)
 	}
 }
 
