@@ -5,8 +5,10 @@ security, policy and findings, permission boundaries and just-in-time access,
 multi-cloud FinOps (budgets per Project × Environment per day/month/year,
 forecasting, rightsizing), all recorded in one tamper-evident Activity Log.
 
-**Status:** M0 (foundations) and M1 (cost visibility) are built; connecting
-real billing data is the next step ([runbook](docs/runbooks/connect-billing.md)).
+**Status:** M0 (foundations), M1 (cost visibility) and M2 (rightsizing &
+waste) are built; connecting real billing data and member-account roles is the
+next step ([billing](docs/runbooks/connect-billing.md),
+[rightsizing](docs/runbooks/rightsizing.md)).
 
 What works today:
 
@@ -25,7 +27,12 @@ What works today:
   THB or USD (ECB rates), seasonal forecast with p10–p90, threshold alerts
   (Activity + webhook), cost anomaly Findings, optional native Tencent/AWS
   budget mirrors.
-- **Portal:** Budgets, Costs (CSV export), Findings, Projects, Activity.
+- **Rightsizing & waste:** daily utilisation from Prometheus and Tencent Cloud
+  Monitor; Kubernetes request and Tencent CVM size advice, AWS Cost
+  Optimization Hub import, idle/orphaned resources with gated cleanup,
+  off-hours schedules for non-prod; accepted advice becomes a pull request;
+  realised savings and regressions tracked per Project.
+- **Portal:** Budgets, Costs (CSV export), Findings, Savings, Projects, Activity.
 
 ## Develop
 
