@@ -26,6 +26,7 @@ type fakeRepo struct {
 }
 
 type fakeGitHub struct {
+	actions  map[string]any
 	mu       sync.Mutex
 	plan     string
 	schema   []githubgov.Property
@@ -132,6 +133,28 @@ func (f *fakeGitHub) server(t *testing.T) *httptest.Server {
 		}
 		write(w, out)
 	}))
+	for _, path := range []string{"", "/selected-actions", "/workflow", "/fork-pr-contributor-approval"} {
+		key := path
+		mux.HandleFunc("GET /orgs/acme/actions/permissions"+path, lock(func(w http.ResponseWriter, _ *http.Request) {
+			if f.actions == nil {
+				f.actions = map[string]any{}
+			}
+			v, _ := f.actions[key].(map[string]any)
+			if v == nil {
+				v = map[string]any{}
+			}
+			write(w, v)
+		}))
+		mux.HandleFunc("PUT /orgs/acme/actions/permissions"+path, lock(func(w http.ResponseWriter, r *http.Request) {
+			var in map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			if f.actions == nil {
+				f.actions = map[string]any{}
+			}
+			f.actions[key] = in
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	}
 	mux.HandleFunc("PATCH /repos/acme/{repo}", lock(func(w http.ResponseWriter, r *http.Request) {
 		rp := f.repo(r.PathValue("repo"))
 		if rp.Private && f.plan == "free" {
@@ -202,7 +225,7 @@ func TestTeamPlanOrgIsReconciled(t *testing.T) {
 		t.Fatalf("report %+v", rep)
 	}
 	home, tat := findings(t, w, w.home), findings(t, w, w.tat)
-	for _, fp := range []string{"github:acme::property:keel-tenant", "github:acme::oidc_subject_template", "github:acme::ruleset:keel-default-branch", "github:acme::ruleset:keel-prod-tier", "github:acme:scratch:properties"} {
+	for _, fp := range []string{"github:acme::actions", "github:acme::property:keel-tenant", "github:acme::oidc_subject_template", "github:acme::ruleset:keel-default-branch", "github:acme::ruleset:keel-prod-tier", "github:acme:scratch:properties"} {
 		if home[fp] == "" {
 			t.Errorf("home lacks %s: %v", fp, home)
 		}
@@ -215,6 +238,10 @@ func TestTeamPlanOrgIsReconciled(t *testing.T) {
 	rep, err = githubgov.Reconciler{Store: w.s, API: api, Policy: policy, Remediate: true}.Run(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if perms, _ := f.actions[""].(map[string]any); perms["sha_pinning_required"] != true || perms["allowed_actions"] != "selected" ||
+		f.actions["/workflow"].(map[string]any)["default_workflow_permissions"] != "read" || f.actions["/fork-pr-contributor-approval"].(map[string]any)["approval_policy"] != "all_external_contributors" {
+		t.Fatalf("actions not restored: %v", f.actions)
 	}
 	if len(f.rulesets) != 2 || len(f.schema) != 3 || f.subKeys[1] != "repository_id" || !f.repo("crm-api").PP {
 		t.Fatalf("not restored: rulesets %d schema %d sub %v", len(f.rulesets), len(f.schema), f.subKeys)

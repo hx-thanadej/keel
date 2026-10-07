@@ -290,7 +290,13 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 				checks = append(checks, c)
 			}
 		}
-		gov := githubgov.Reconciler{Store: st, Policy: githubgov.Default(checks), Remediate: os.Getenv("KEEL_GITHUB_REMEDIATE") == "1",
+		policy := githubgov.Default(checks)
+		for _, p := range strings.Split(os.Getenv("KEEL_GITHUB_ALLOWED_ACTIONS"), ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				policy.Actions.AllowedPatterns = append(policy.Actions.AllowedPatterns, p)
+			}
+		}
+		gov := githubgov.Reconciler{Store: st, Policy: policy, Remediate: os.Getenv("KEEL_GITHUB_REMEDIATE") == "1",
 			API: githubgov.GitHub{Client: ghapi.Client{Token: tok}, Login: os.Getenv("KEEL_GITHUB_OWNER"), Org: os.Getenv("KEEL_GITHUB_ORG") == "1"}}
 		go every(ctx, time.Hour, "github governance", func(ctx context.Context) error {
 			rep, err := gov.Run(ctx)

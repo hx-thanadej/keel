@@ -33,12 +33,22 @@ type RulesetSpec struct {
 	RequireCodeOwners bool
 }
 
+// ActionsPolicy is the organisation's GitHub Actions settings (#115).
+type ActionsPolicy struct {
+	SHAPinningRequired     bool
+	AllowedPatterns        []string // beyond GitHub-owned and verified creators, e.g. "acme/*"
+	DefaultTokenRead       bool     // GITHUB_TOKEN is read-only unless a workflow asks
+	ForkApproval           string   // e.g. all_external_contributors
+	CanApprovePullRequests bool     // workflows approving PRs: never
+}
+
 // Policy is the desired state.
 type Policy struct {
 	Version      string
 	Properties   []Property
 	Rulesets     []RulesetSpec
 	SubClaimKeys []string
+	Actions      ActionsPolicy
 }
 
 // Required properties every repository must carry.
@@ -62,6 +72,7 @@ func Default(requiredChecks []string) Policy {
 			{Name: "keel-prod-tier", Tier: "prod", Reviews: 2, LastPushApproval: true, RequireCodeOwners: true, RequiredChecks: requiredChecks},
 		},
 		SubClaimKeys: ciidentity.SubjectClaimKeys,
+		Actions:      ActionsPolicy{SHAPinningRequired: true, DefaultTokenRead: true, ForkApproval: "all_external_contributors"},
 	}
 }
 
