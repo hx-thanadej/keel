@@ -142,6 +142,30 @@ func newService(t *testing.T, w world) (*promotion.Service, *fakeGit, *fakeArgo)
 	return s, g, a
 }
 
+func TestPromotionNeedsAPassingVSAWhenRequired(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	s, _, _ := newService(t, w)
+	s.RequireVSA = true
+	rel, err := s.CreateRelease(ctx, w.tenant, w.service, "3.0.0", []promotion.Image{{Name: image, Digest: digest}}, "", eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := s.Preview(ctx, w.tenant, rel.ID, w.dev); d.Allow || d.Reasons[0] != "release has no passing provenance verification (VSA) for every image" {
+		t.Fatalf("%+v", d)
+	}
+	if err := w.s.InTenant(ctx, w.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO release_attestations (tenant_id, release_id, image_digest, passed, checks, bundle_sha256, vsa, submitted_by)
+			VALUES ($1, $2, $3, true, '[]', 'x', '{}', 'p')`, w.tenant, rel.ID, digest)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := s.Preview(ctx, w.tenant, rel.ID, w.dev); !d.Allow {
+		t.Fatalf("with VSA: %+v", d)
+	}
+}
+
 func TestReleaseMustBePinnedByDigest(t *testing.T) {
 	w := setup(t)
 	s, _, _ := newService(t, w)

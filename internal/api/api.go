@@ -34,6 +34,7 @@ type Deps struct {
 	Registry  *RegistryDeps
 	Exception *ExceptionDeps
 	Scans     *ScanDeps
+	Attest    *AttestDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -122,6 +123,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Scans != nil {
 			mountScans(mux, deps.Auth, *deps.Scans)
+		}
+		if deps.Attest != nil {
+			mountAttest(mux, deps.Auth, *deps.Attest)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).

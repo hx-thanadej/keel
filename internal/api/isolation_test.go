@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/api"
+	"github.com/hx-thanadej/keel/internal/attest"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/budget"
@@ -69,6 +70,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Registry:  &api.RegistryDeps{Authz: az, Store: s},
 		Exception: &api.ExceptionDeps{Authz: az, Service: exceptions.New(s)},
 		Scans:     &api.ScanDeps{Authz: az, Service: scans.Service{Store: s}},
+		Attest:    &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
 		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
 	srv := httptest.NewServer(router)
@@ -128,6 +130,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/promotions/{promotion}/approve":                {},
 		"POST /v1/tenants/{tenant}/projects/{project}/services":                   {"slug": "pwn", "template": "go"},
 		"POST /v1/tenants/{tenant}/services/{service}/scans":                      {"version": "2.1.0", "runs": []any{}},
+		"POST /v1/tenants/{tenant}/releases/{release}/attestations":               {},
 		"POST /v1/tenants/{tenant}/exceptions":                                    {"fingerprint": "victim", "reason": "pwned by attacker", "expires_at": "2099-01-01T00:00:00Z"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/approve":                {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/reject":                 {"note": "pwn"},

@@ -34,6 +34,11 @@ deny contains msg if {
 
 deny contains "the Project has no config repository" if input.config_repo == ""
 
+deny contains "release has no passing provenance verification (VSA) for every image" if {
+	input.vsa.required
+	not input.vsa.passed
+}
+
 needs_approval if {
 	input.environment.requires_approval
 	not input.approval.given

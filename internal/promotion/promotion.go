@@ -104,7 +104,9 @@ type Service struct {
 	PathTemplate string // default "envs/{env}/{service}/kustomization.yaml"
 	// AppTemplate names the Argo CD application.
 	AppTemplate string // default "{project}-{env}-{service}"
-	Now         func() time.Time
+	// RequireVSA: every image needs a passing provenance verification (#112).
+	RequireVSA bool
+	Now        func() time.Time
 
 	query rego.PreparedEvalQuery
 }
@@ -189,6 +191,7 @@ type facts struct {
 	hardBreach                          bool
 	breachDetail                        string
 	criticalOpen                        int
+	vsaPassed                           bool
 }
 
 func (s *Service) facts(ctx context.Context, tx pgx.Tx, releaseID, env string) (facts, error) {
@@ -234,7 +237,10 @@ func (s *Service) facts(ctx context.Context, tx pgx.Tx, releaseID, env string) (
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return f, err
 	}
-	err = tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE project_id = $1 AND status = 'open' AND severity = 'critical' AND NOT finding_excepted(findings)`, f.projectID).Scan(&f.criticalOpen)
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE project_id = $1 AND status = 'open' AND severity = 'critical' AND NOT finding_excepted(findings)`, f.projectID).Scan(&f.criticalOpen); err != nil {
+		return f, err
+	}
+	err = tx.QueryRow(ctx, `SELECT release_verified($1)`, releaseID).Scan(&f.vsaPassed)
 	return f, err
 }
 
@@ -247,6 +253,7 @@ func (s *Service) decide(ctx context.Context, f facts, approved bool) (Decision,
 		"findings":    map[string]any{"critical_open": f.criticalOpen},
 		"approval":    map[string]any{"given": approved},
 		"config_repo": f.configRepo,
+		"vsa":         map[string]any{"required": s.RequireVSA, "passed": f.vsaPassed},
 	}
 	rs, err := s.query.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
