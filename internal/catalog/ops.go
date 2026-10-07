@@ -161,6 +161,21 @@ func (s *Service) SetTenantTimeZone(ctx context.Context, p auth.Principal, tenan
 	return t, mapErr(err)
 }
 
+// ListServices lists active Services.
+func (s *Service) ListServices(ctx context.Context, p auth.Principal, tenantID string) ([]ServiceEntry, error) {
+	var out []ServiceEntry
+	err := s.read(ctx, p, "service.read", authz.Resource{Type: "service", TenantID: tenantID}, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id::text, project_id::text, team_id::text, slug, name, repository, template, template_version
+			FROM services WHERE archived_at IS NULL ORDER BY slug`)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[ServiceEntry])
+		return err
+	})
+	return out, mapErr(err)
+}
+
 // ListProjects lists active Projects.
 func (s *Service) ListProjects(ctx context.Context, p auth.Principal, tenantID string) ([]Project, error) {
 	var out []Project

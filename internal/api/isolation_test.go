@@ -120,6 +120,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/vend":    {"provider": "tencent"},
 		"POST /v1/tenants/{tenant}/services/{service}/releases":                   {"version": "pwn", "images": []map[string]string{{"name": "x", "digest": "sha256:" + strings.Repeat("a", 64)}}},
 		"POST /v1/tenants/{tenant}/releases/{release}/promote":                    {"environment_id": env},
+		"POST /v1/tenants/{tenant}/releases/{release}/preview":                    {"environment_id": env},
 		"POST /v1/tenants/{tenant}/promotions/{promotion}/approve":                {},
 		"POST /v1/tenants/{tenant}/projects/{project}/services":                   {"slug": "pwn", "template": "go"},
 	}

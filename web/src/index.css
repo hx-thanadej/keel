@@ -144,3 +144,8 @@ button.primary { padding: 7px 12px; border: 0; border-radius: 6px; background: v
 @media (max-width: 640px) {
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.delivery h2 { margin: 18px 0 8px; }
+.delivery h2:first-child { margin-top: 0; }
+.delivery .finding > button, .delivery .finding > a { justify-self: start; }
+.delivery input { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); max-width: 100%; }
