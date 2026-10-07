@@ -20,6 +20,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
+	"github.com/hx-thanadej/keel/internal/vending"
 )
 
 // Routes that are not Tenant-scoped, with the reason. Every other route must
@@ -55,7 +56,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Budgets:   &api.BudgetDeps{Authz: az, Catalog: catalog.New(s, az), Budgets: budget.Service{Store: s}, Resolve: stubResolve},
 		Authz:     az,
 		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}},
-		Flows:     &api.FlowDeps{Authz: az, Engine: flow.New(s)}})
+		Flows:     &api.FlowDeps{Authz: az, Engine: flow.New(s)},
+		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	c := client{t: t, url: srv.URL}
@@ -106,6 +108,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/recommendations/{recommendation}/dismiss":      {"reason": "pwn"},
 		"POST /v1/tenants/{tenant}/flows/{flow}/retry":                            {},
 		"POST /v1/tenants/{tenant}/flows/{flow}/cancel":                           {"reason": "pwn"},
+		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/vend":    {"provider": "tencent"},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)

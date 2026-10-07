@@ -28,6 +28,7 @@ type Deps struct {
 	Authz     catalog.Authorizer
 	Rightsize *RightsizeDeps
 	Flows     *FlowDeps
+	Vending   *VendingDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -98,6 +99,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Flows != nil {
 			mountFlows(mux, deps.Auth, *deps.Flows)
+		}
+		if deps.Vending != nil {
+			mountVending(mux, deps.Auth, *deps.Vending)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).
