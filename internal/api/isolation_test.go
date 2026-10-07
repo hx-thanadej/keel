@@ -18,6 +18,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/flow"
+	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 	"github.com/hx-thanadej/keel/internal/vending"
@@ -50,6 +51,10 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	promo, err := promotion.New(promotion.Service{Store: s})
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := api.NewRouter(api.Info{Version: "test"}, api.Deps{Auth: headerAuth{}, Sessions: noRoutes{}, Catalog: catalog.New(s, az),
 		Discovery: map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}},
 		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}, Rules: cost.Rules{Store: s}},
@@ -57,6 +62,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Authz:     az,
 		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}},
 		Flows:     &api.FlowDeps{Authz: az, Engine: flow.New(s)},
+		Promotion: &api.PromotionDeps{Authz: az, Service: promo},
 		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
@@ -109,6 +115,9 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/flows/{flow}/retry":                            {},
 		"POST /v1/tenants/{tenant}/flows/{flow}/cancel":                           {"reason": "pwn"},
 		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/vend":    {"provider": "tencent"},
+		"POST /v1/tenants/{tenant}/services/{service}/releases":                   {"version": "pwn", "images": []map[string]string{{"name": "x", "digest": "sha256:" + strings.Repeat("a", 64)}}},
+		"POST /v1/tenants/{tenant}/releases/{release}/promote":                    {"environment_id": env},
+		"POST /v1/tenants/{tenant}/promotions/{promotion}/approve":                {},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)
@@ -129,9 +138,21 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	var victimService, victimRelease, victimPromotion string
+	if err := s.InTenant(t.Context(), a, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(t.Context(), `INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, 'victim-svc', 'Victim Service') RETURNING id::text`, a, project, team).Scan(&victimService); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(t.Context(), `INSERT INTO releases (tenant_id, service_id, version, images, created_by) VALUES ($1, $2, 'victim-1.0', '[{"name":"victim/img","digest":"sha256:victim"}]', 'u') RETURNING id::text`, a, victimService).Scan(&victimRelease); err != nil {
+			return err
+		}
+		return tx.QueryRow(t.Context(), `INSERT INTO promotions (tenant_id, release_id, environment_id, state, requested_by) VALUES ($1, $2, $3, 'pending_approval', 'user:victim') RETURNING id::text`, a, victimRelease, env).Scan(&victimPromotion)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input"},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img"},
 	}
 
 	attackers := map[string]auth.Principal{

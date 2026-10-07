@@ -18,7 +18,7 @@ import (
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps", "releases", "promotions"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -85,6 +85,13 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO recommendations (tenant_id, fingerprint, source, provider, resource_id, resource_type, action, monthly_savings, currency, confidence)
 			VALUES ($1, $2, 'test', 'tencent', 'r', 'vm', 'resize', 1, 'USD', 0.5)`, f.tenant, "rec-"+slug); err != nil {
+			return err
+		}
+		var rel string
+		if err := q(`INSERT INTO releases (tenant_id, service_id, version, images, created_by) VALUES ($1, $2, 'v1', '[]', 't') RETURNING id`, &rel, f.tenant, f.service); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO promotions (tenant_id, release_id, environment_id, state, requested_by) VALUES ($1, $2, $3, 'denied', 't')`, f.tenant, rel, f.env); err != nil {
 			return err
 		}
 		var flowID string

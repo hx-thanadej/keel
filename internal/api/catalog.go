@@ -153,13 +153,28 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 		return nil
 	}))
 	mux.Handle("PATCH /v1/tenants/{tenant}/projects/{project}", authed(a, tp, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-		var in struct{ Name, Why string }
+		var in struct {
+			Name       string  `json:"name"`
+			ConfigRepo *string `json:"config_repo"`
+			Why        string  `json:"why"`
+		}
 		if err := decode(r, &in); err != nil {
 			return err
 		}
-		out, err := c.RenameProject(r.Context(), p, r.PathValue("tenant"), r.PathValue("project"), in.Name, in.Why)
-		if err != nil {
-			return err
+		if in.Name == "" && in.ConfigRepo == nil {
+			return errors.Join(catalog.ErrInvalid, errors.New("set name or config_repo"))
+		}
+		var out catalog.Project
+		var err error
+		if in.Name != "" {
+			if out, err = c.RenameProject(r.Context(), p, r.PathValue("tenant"), r.PathValue("project"), in.Name, in.Why); err != nil {
+				return err
+			}
+		}
+		if in.ConfigRepo != nil {
+			if out, err = c.SetConfigRepo(r.Context(), p, r.PathValue("tenant"), r.PathValue("project"), *in.ConfigRepo, in.Why); err != nil {
+				return err
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 		return nil
@@ -199,18 +214,28 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 	}))
 	mux.Handle("PATCH /v1/tenants/{tenant}/projects/{project}/environments/{env}", authed(a, []string{"tenant", "project", "env"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
-			WasteCleanup *bool  `json:"waste_cleanup"`
-			Why          string `json:"why"`
+			WasteCleanup     *bool  `json:"waste_cleanup"`
+			PromotionOrder   *int   `json:"promotion_order"`
+			RequiresApproval *bool  `json:"requires_approval"`
+			Why              string `json:"why"`
 		}
 		if err := decode(r, &in); err != nil {
 			return err
 		}
-		if in.WasteCleanup == nil {
-			return errors.Join(catalog.ErrInvalid, errors.New("waste_cleanup is required"))
+		if in.WasteCleanup == nil && in.PromotionOrder == nil && in.RequiresApproval == nil {
+			return errors.Join(catalog.ErrInvalid, errors.New("set waste_cleanup, promotion_order or requires_approval"))
 		}
-		out, err := c.SetWasteCleanup(r.Context(), p, r.PathValue("tenant"), r.PathValue("project"), r.PathValue("env"), *in.WasteCleanup, in.Why)
-		if err != nil {
-			return err
+		var out catalog.Environment
+		var err error
+		if in.WasteCleanup != nil {
+			if out, err = c.SetWasteCleanup(r.Context(), p, r.PathValue("tenant"), r.PathValue("project"), r.PathValue("env"), *in.WasteCleanup, in.Why); err != nil {
+				return err
+			}
+		}
+		if in.PromotionOrder != nil || in.RequiresApproval != nil {
+			if out, err = c.SetPromotionPath(r.Context(), p, r.PathValue("tenant"), r.PathValue("project"), r.PathValue("env"), in.PromotionOrder, in.RequiresApproval, in.Why); err != nil {
+				return err
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 		return nil

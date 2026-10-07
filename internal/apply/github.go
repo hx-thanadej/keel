@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // GitHub is the write side Keel needs: read a tree and files, create a
@@ -72,6 +73,11 @@ func Repo(repoURL string) (string, error) {
 	return parts[0] + "/" + parts[1], nil
 }
 
+// DefaultBranch returns the repository's default branch.
+func (g GitHub) DefaultBranch(ctx context.Context, repo string) (string, error) {
+	return g.defaultBranch(ctx, repo)
+}
+
 func (g GitHub) defaultBranch(ctx context.Context, repo string) (string, error) {
 	var r struct {
 		DefaultBranch string `json:"default_branch"`
@@ -126,10 +132,11 @@ func (g GitHub) Commit(ctx context.Context, repo, branch, path, sha, message str
 
 // PullRequest is the part of a PR Keel tracks.
 type PullRequest struct {
-	Number  int    `json:"number"`
-	HTMLURL string `json:"html_url"`
-	State   string `json:"state"`
-	Merged  bool   `json:"merged"`
+	Number   int        `json:"number"`
+	HTMLURL  string     `json:"html_url"`
+	State    string     `json:"state"`
+	Merged   bool       `json:"merged"`
+	MergedAt *time.Time `json:"merged_at"`
 }
 
 // OpenPR opens a pull request.
