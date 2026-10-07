@@ -42,6 +42,23 @@ type Principal struct {
 	Issuer   string    `json:"issuer,omitempty"`
 	MFA      bool      `json:"mfa,omitempty"`
 	Bindings []Binding `json:"bindings"`
+	// Pipelines act only on their own Services.
+	ServiceIDs []string  `json:"service_ids,omitempty"`
+	Pipeline   *Pipeline `json:"pipeline,omitempty"`
+}
+
+// Pipeline is what a CI token proves about the run.
+type Pipeline struct {
+	Repository   string `json:"repository"`
+	RepositoryID string `json:"repository_id"`
+	Ref          string `json:"ref"`
+	RefProtected bool   `json:"ref_protected"`
+	SHA          string `json:"sha"`
+	Workflow     string `json:"workflow_ref"`
+	JobWorkflow  string `json:"job_workflow_ref"`
+	Event        string `json:"event_name"`
+	RunID        string `json:"run_id"`
+	Environment  string `json:"environment,omitempty"`
 }
 
 type ctxKey struct{}

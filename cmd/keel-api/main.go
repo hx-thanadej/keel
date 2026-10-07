@@ -97,9 +97,11 @@ import (
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/landingzone"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
+	"github.com/hx-thanadej/keel/internal/pipelineauth"
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/registry"
 	"github.com/hx-thanadej/keel/internal/rightsize"
+	"github.com/hx-thanadej/keel/internal/scans"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/templates"
 	"github.com/hx-thanadej/keel/internal/utilisation"
@@ -287,6 +289,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	deps.Flows = &api.FlowDeps{Authz: az, Engine: engine}
 	deps.Exception = &api.ExceptionDeps{Authz: az, Service: excs}
+	deps.Scans = &api.ScanDeps{Authz: az, Service: scans.Service{Store: st}}
 	deps.Registry = &api.RegistryDeps{Authz: az, Store: st}
 	if creator != nil {
 		deps.Templates = &api.TemplateDeps{Authz: az, Engine: engine, Creator: *creator}
@@ -299,7 +302,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			cleanup()
 			return api.Deps{}, noop, err
 		}
-		deps.Auth, deps.Sessions = authn, authn
+		deps.Auth, deps.Sessions = pipelines(st, authn), authn
 		return deps, cleanup, nil
 	}
 	sessions, err := signIn(st)
@@ -307,7 +310,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		cleanup()
 		return api.Deps{}, noop, err
 	}
-	deps.Auth, deps.Sessions = sessions, sessions
+	deps.Auth, deps.Sessions = pipelines(st, sessions), sessions
 	return deps, cleanup, nil
 }
 
@@ -404,6 +407,13 @@ func flowDefs(vs map[string]vending.Vendor) []flow.Def {
 		defs = append(defs, v.Def())
 	}
 	return defs
+}
+
+// pipelines lets GitHub Actions authenticate with their OIDC token
+// (audience KEEL_PIPELINE_AUDIENCE, default "keel"); everything else goes
+// to the human authenticator.
+func pipelines(st *store.Store, next auth.Authenticator) auth.Authenticator {
+	return &pipelineauth.Authenticator{Store: st, Audience: envOr("KEEL_PIPELINE_AUDIENCE", "keel"), Next: next}
 }
 
 // riverUser is anything with its own River workers (timers).
