@@ -17,7 +17,12 @@ type SyncResult struct {
 	Merged   int `json:"merged"`
 	Closed   int `json:"closed"`
 	Deployed int `json:"deployed"`
+	Failed   int `json:"failed"`
 }
+
+// FailureWatch: a deployment Argo CD reports Degraded within this time is
+// marked failed (DORA change fail rate, #148).
+const FailureWatch = 24 * time.Hour
 
 type active struct {
 	id, state, prURL, release, env, envName, service, serviceID, project string
@@ -65,8 +70,60 @@ func (s *Service) Sync(ctx context.Context) (SyncResult, error) {
 				return res, fmt.Errorf("promotion %s: %w", a.id, err)
 			}
 		}
+		if err := s.watchFailures(ctx, tenant, &res); err != nil {
+			return res, err
+		}
 	}
 	return res, nil
+}
+
+// watchFailures marks recent deployments failed when Argo CD reports their
+// application Degraded.
+func (s *Service) watchFailures(ctx context.Context, tenant string, res *SyncResult) error {
+	if s.Argo == nil {
+		return nil
+	}
+	type recent struct{ id, app string }
+	var list []recent
+	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT p.id::text, pr.slug, e.name, sv.slug FROM promotions p JOIN environments e ON e.id = p.environment_id
+			JOIN releases r ON r.id = p.release_id JOIN services sv ON sv.id = r.service_id JOIN projects pr ON pr.id = sv.project_id
+			WHERE p.state = 'deployed' AND p.failed_at IS NULL AND p.deployed_at > $1`, s.Now().Add(-FailureWatch))
+		if err != nil {
+			return err
+		}
+		list, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (recent, error) {
+			var x recent
+			var project, env, svc string
+			err := r.Scan(&x.id, &project, &env, &svc)
+			x.app = render(s.AppTemplate, project, env, svc)
+			return x, err
+		})
+		return err
+	}); err != nil {
+		return err
+	}
+	for _, d := range list {
+		st, err := s.Argo.App(ctx, d.app)
+		if err != nil {
+			return err
+		}
+		if st.Health != "Degraded" {
+			continue
+		}
+		res.Failed++
+		if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `UPDATE promotions SET failed_at = $2, failure_reason = $3 WHERE id = $1 AND failed_at IS NULL`, d.id, s.Now(), "Argo CD reports "+d.app+" Degraded")
+			if err != nil || tag.RowsAffected() == 0 {
+				return err
+			}
+			return record(ctx, tx, tenant, "keel.deployment.failed", "MarkDeploymentFailed", "promotion/"+d.id, activity.Update, activity.Failure, keelActor,
+				"Argo CD reports "+d.app+" Degraded", activity.Resource{Type: "promotion", UID: d.id})
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) advance(ctx context.Context, tenant string, a active, res *SyncResult) error {

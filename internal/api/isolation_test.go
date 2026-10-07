@@ -22,6 +22,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/controls"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/dora"
 	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/leaks"
@@ -86,6 +87,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Attest:     &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission:  &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
 		VEX:        &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
+		DORA:       &api.DORADeps{Authz: az, Service: dora.Service{Store: s}},
 		Webhooks:   &api.WebhookDeps{Leaks: &leaks.Service{Store: s}},
 		BreakGlass: &api.BreakGlassDeps{Authz: az, Service: breakglass.Service{Store: s}, Home: func(*http.Request) (string, error) { return home, nil }},
 		Access:     &api.AccessDeps{Authz: az, Service: mustAccess(t, s)},
@@ -154,6 +156,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/services/{service}/registry-token":               {},
 		"POST /v1/tenants/{tenant}/access/roles":                                    {"environment_id": env, "team_id": team, "template": "read-only"},
 		"POST /v1/tenants/{tenant}/access/roles/{role}/decide":                      {"approve": true},
+		"POST /v1/tenants/{tenant}/promotions/{promotion}/failed":                   {"reason": "pwn"},
 		"POST /v1/tenants/{tenant}/access/grants":                                   {"role_id": "set below", "hours": 1, "reason": "pwn the victim"},
 		"POST /v1/tenants/{tenant}/access/grants/{grant}/approve":                   {},
 		"POST /v1/tenants/{tenant}/access/grants/{grant}/reject":                    {"reason": "pwn"},
