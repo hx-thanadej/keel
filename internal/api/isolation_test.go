@@ -145,6 +145,10 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/services/{service}/registry-token":               {},
 		"POST /v1/tenants/{tenant}/access/roles":                                    {"environment_id": env, "team_id": team, "template": "read-only"},
 		"POST /v1/tenants/{tenant}/access/roles/{role}/decide":                      {"approve": true},
+		"POST /v1/tenants/{tenant}/access/grants":                                   {"role_id": "set below", "hours": 1, "reason": "pwn the victim"},
+		"POST /v1/tenants/{tenant}/access/grants/{grant}/approve":                   {},
+		"POST /v1/tenants/{tenant}/access/grants/{grant}/reject":                    {"reason": "pwn"},
+		"POST /v1/tenants/{tenant}/access/grants/{grant}/revoke":                    {"reason": "pwn"},
 		"POST /v1/tenants/{tenant}/vex":                                             {"vulnerability": "CVE-2026-0001", "service_id": "set below", "status": "under_investigation"},
 		"POST /v1/tenants/{tenant}/releases/{release}/sbom":                         {"bomFormat": "CycloneDX", "specVersion": "1.6"},
 		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/admission": {"mode": "warn", "why": "pwn"},
@@ -172,7 +176,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var victimService, victimRelease, victimPromotion, victimException, victimRole string
+	var victimService, victimRelease, victimPromotion, victimException, victimRole, victimGrant string
 	if err := s.InTenant(t.Context(), a, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(t.Context(), `INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, 'victim-svc', 'Victim Service') RETURNING id::text`, a, project, team).Scan(&victimService); err != nil {
 			return err
@@ -186,14 +190,18 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		if err := tx.QueryRow(t.Context(), `INSERT INTO access_roles (tenant_id, environment_id, team_id, template, state, requested_by) VALUES ($1, $2, $3, 'operator', 'requested', 'user:victim') RETURNING id::text`, a, env, team).Scan(&victimRole); err != nil {
 			return err
 		}
+		if err := tx.QueryRow(t.Context(), `INSERT INTO access_grants (tenant_id, role_id, requester, reason, hours, state) VALUES ($1, $2, 'user:victim', 'victim grant reason', 1, 'requested') RETURNING id::text`, a, victimRole).Scan(&victimGrant); err != nil {
+			return err
+		}
 		return tx.QueryRow(t.Context(), `INSERT INTO exceptions (tenant_id, fingerprint, reason, requested_by, expires_at) VALUES ($1, 'victim-fp', 'victim exception reason', 'user:victim', now() + interval '1 day') RETURNING id::text`, a).Scan(&victimException)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	bodies["POST /v1/tenants/{tenant}/vex"]["service_id"] = victimService
+	bodies["POST /v1/tenants/{tenant}/access/grants"]["role_id"] = victimRole
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole, "grant": victimGrant},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole, victimGrant, "victim grant reason"},
 	}
 
 	attackers := map[string]auth.Principal{

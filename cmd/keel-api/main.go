@@ -352,7 +352,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	deps.Access = &api.AccessDeps{Authz: az, Service: acc}
 	excs := exceptions.New(st)
-	engine, stopJobs, err := startFlows(ctx, st, defs, excs)
+	engine, stopJobs, err := startFlows(ctx, st, defs, excs, acc)
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
