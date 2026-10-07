@@ -70,8 +70,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/riverqueue/river"
 	awscreds "github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/riverqueue/river"
 
 	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
