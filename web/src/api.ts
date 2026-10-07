@@ -200,6 +200,49 @@ export const delivery = {
   approve: (t: string, id: string) => post<Promotion>(`/v1/tenants/${t}/promotions/${id}/approve`, {}),
 }
 
+export type ControlView = {
+  id: string
+  framework: string
+  title: string
+  policies: string[]
+  coverage: { name: string; point: string; covered_services: number }[]
+  gap: boolean
+}
+export type ControlReport = { version: string; services: number; controls: ControlView[] }
+export type Exception = {
+  id: string
+  fingerprint: string
+  finding_ids: string[]
+  reason: string
+  state: string
+  requested_by: string
+  decided_by: string | null
+  expires_at: string
+}
+export type VexStatement = {
+  id: string
+  vulnerability: string
+  service_id: string
+  status: string
+  justification: string | null
+  impact_statement: string | null
+  action_statement: string | null
+  author: string
+  created_at: string
+}
+export type Attestation = { id: string; image_digest: string; passed: boolean; checks: { name: string; pass: boolean; detail: string }[]; created_at: string }
+
+export const security = {
+  controls: (t: string) => request<ControlReport>(`/v1/tenants/${t}/controls`),
+  exceptions: (t: string) => list<Exception>(`/v1/tenants/${t}/exceptions`),
+  requestException: (t: string, b: { fingerprint: string; reason: string; expires_at: string }) => post<Exception>(`/v1/tenants/${t}/exceptions`, b),
+  decideException: (t: string, id: string, decision: 'approve' | 'reject', note: string) => post<Exception>(`/v1/tenants/${t}/exceptions/${id}/${decision}`, { note }),
+  vex: (t: string) => list<VexStatement>(`/v1/tenants/${t}/vex`),
+  recordVex: (t: string, b: { vulnerability: string; service_id: string; status: string; justification?: string; impact_statement?: string; action_statement?: string }) =>
+    post<VexStatement>(`/v1/tenants/${t}/vex`, b),
+  attestations: (t: string, release: string) => list<Attestation>(`/v1/tenants/${t}/releases/${release}/attestations`),
+}
+
 /** Money for display: grouped, two decimals, currency code after. */
 export function fmtMoney(v: string | number | null | undefined, currency?: string): string {
   if (v === null || v === undefined || v === '') return '—'
