@@ -164,11 +164,16 @@ github.com/tchap/go-patricia/v2 v2.3.3 h1:xfNEsODumaEcCcY3gI0hYPZ/PcpVv5ju6RMAhg
 github.com/tchap/go-patricia/v2 v2.3.3/go.mod h1:VZRHKAb53DLaG+nA9EaYYiaEx6YztwDlLElMsnSHD4k=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182 h1:N3aUDk/2Vk46JXHRRujkwgTpYrj/gKAhkLquezRcAk4=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182/go.mod h1:rwlA+clAU4TRk++lBnC1OMuQpa1da5v3RGBTIltpNQ4=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.11/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.182/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191 h1:MybHMdLwxStTaz0PO4c3/1dli7W0xMmqa7/HD3O01AQ=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor v1.3.182 h1:NoxrRqe2CBNFr+gCbvJ9CjCxUDrGWSaYu9P3Agy7AJc=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor v1.3.182/go.mod h1:/6snXD5i0UJS0vBoZl4JXwW70N09E4jVV/ywobxYFhg=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/organization v1.3.182 h1:vE2W7b4mM6E/WFS4UJTpLTKZ3NpLfSEEaoJptvgIr40=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/organization v1.3.182/go.mod h1:oKXWyPD6PvC6KWTdKmLzQkD9o1Z/6zUdAgEF6aE62o0=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts v1.1.11 h1:FWhgjLYFHWJvYIsLfk4k2XWaJcn7HMUmFLWNSL4pqto=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts v1.1.11/go.mod h1:et851eJUuaPGcsKDi1eUfQZoslCaDS3QKUgoqQZtF1c=
 github.com/tetratelabs/wazero v1.12.0 h1:DuWcpNu/FzgEXgGBDp8J1Spc+CWOvvtvVyjKlaZopYU=
 github.com/tetratelabs/wazero v1.12.0/go.mod h1:LvKtzl2RqO4gyF27BiXU+nKAjcV8f38U+kP/q2vgxh0=
 github.com/tinylib/msgp v1.6.4 h1:mOwYbyYDLPj35mkA2BjjYejgJk9BuHxDdvRnb6v2ZcQ=

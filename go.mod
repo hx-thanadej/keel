@@ -14,7 +14,9 @@ require (
 	github.com/pressly/goose/v3 v3.28.0
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor v1.3.182
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/organization v1.3.182
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts v1.1.11
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/oauth2 v0.37.0
 )
