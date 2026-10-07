@@ -69,6 +69,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	awscreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/riverqueue/river"
@@ -87,6 +88,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/fx"
@@ -277,12 +279,14 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if creator != nil {
 		defs = append(defs, creator.Def())
 	}
-	engine, stopJobs, err := startFlows(ctx, st, defs)
+	excs := exceptions.New(st)
+	engine, stopJobs, err := startFlows(ctx, st, defs, excs)
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
 	deps.Flows = &api.FlowDeps{Authz: az, Engine: engine}
+	deps.Exception = &api.ExceptionDeps{Authz: az, Service: excs}
 	deps.Registry = &api.RegistryDeps{Authz: az, Store: st}
 	if creator != nil {
 		deps.Templates = &api.TemplateDeps{Authz: az, Engine: engine, Creator: *creator}
@@ -402,17 +406,29 @@ func flowDefs(vs map[string]vending.Vendor) []flow.Def {
 	return defs
 }
 
+// riverUser is anything with its own River workers (timers).
+type riverUser interface {
+	Register(*river.Workers)
+	SetClient(*river.Client[pgx.Tx])
+}
+
 // startFlows runs River (ADR-0014) for durable flows. The returned func stops
 // it, letting running steps finish for up to 30s.
-func startFlows(ctx context.Context, st *store.Store, defs []flow.Def) (*flow.Engine, func(), error) {
+func startFlows(ctx context.Context, st *store.Store, defs []flow.Def, timers ...riverUser) (*flow.Engine, func(), error) {
 	engine := flow.New(st, defs...)
 	workers := river.NewWorkers()
 	engine.Register(workers)
+	for _, t := range timers {
+		t.Register(workers)
+	}
 	client, err := flow.NewClient(st.AppPool(), workers, flow.ClientOptions{Logger: slog.Default()})
 	if err != nil {
 		return nil, nil, fmt.Errorf("river: %w", err)
 	}
 	engine.SetClient(client)
+	for _, t := range timers {
+		t.SetClient(client)
+	}
 	if err := client.Start(ctx); err != nil {
 		return nil, nil, fmt.Errorf("river: %w", err)
 	}
