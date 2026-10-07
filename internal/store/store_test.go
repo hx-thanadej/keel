@@ -18,7 +18,7 @@ import (
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -77,6 +77,16 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 		var load string
 		if err := q(`INSERT INTO cost_loads (tenant_id, provider, billing_account_id, billing_period, line_count, total_billed, unallocated_billed, currency, touched_tenants)
 			VALUES ($1, 'tencent', $2, '2026-09-01', 1, 1, 0, 'USD', ARRAY[$1::uuid]) RETURNING id`, &load, f.tenant, "payer-"+slug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO fx_rates (tenant_id, day, currency, per_eur) VALUES ($1, '2026-09-01', $2, 1)`, f.tenant, "X"+slug); err != nil {
+			return err
+		}
+		var budget string
+		if err := q(`INSERT INTO budgets (tenant_id, project_id, name, year, amount, currency) VALUES ($1, $2, 'b', 2026, 100, 'USD') RETURNING id`, &budget, f.tenant, f.project); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO budget_alerts (tenant_id, budget_id, month, pct, basis, value, budget_amount) VALUES ($1, $2, '2026-09-01', 80, 'actual', 1, 1)`, f.tenant, budget); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO cost_source_files (tenant_id, provider, billing_account_id, object_key, billing_period, line_count)

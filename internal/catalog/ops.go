@@ -121,6 +121,28 @@ func (s *Service) projectTeam(ctx context.Context, tenantID, projectID string) (
 	return team, nil
 }
 
+// ProjectTeam returns a Project's delivering Team ("" if none or missing),
+// for other modules' authorisation checks.
+func (s *Service) ProjectTeam(ctx context.Context, tenantID, projectID string) (string, error) {
+	return s.projectTeam(ctx, tenantID, projectID)
+}
+
+// SetTenantCurrency changes the currency Budgets and reports use.
+func (s *Service) SetTenantCurrency(ctx context.Context, p auth.Principal, tenantID, currency, why string) (Tenant, error) {
+	if currency != "USD" && currency != "THB" {
+		return Tenant{}, invalid("currency must be USD or THB")
+	}
+	var t Tenant
+	err := s.do(ctx, p, write{action: "tenant.update", res: authz.Resource{Type: "tenant", ID: tenantID, TenantID: tenantID},
+		actType: "keel.tenant.currency_changed", operation: "SetTenantCurrency", kind: activity.Update, why: why + " → " + currency},
+		func(tx pgx.Tx) (string, error) {
+			err := tx.QueryRow(ctx, `UPDATE tenants SET currency = $2 WHERE id = $1 RETURNING id::text, slug, name, is_home, created_at`, tenantID, currency).
+				Scan(&t.ID, &t.Slug, &t.Name, &t.IsHome, &t.CreatedAt)
+			return tenantID, err
+		})
+	return t, mapErr(err)
+}
+
 // ListProjects lists active Projects.
 func (s *Service) ListProjects(ctx context.Context, p auth.Principal, tenantID string) ([]Project, error) {
 	var out []Project
