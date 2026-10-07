@@ -17,6 +17,7 @@ require (
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.49.0
 	github.com/riverqueue/river/rivertype v0.49.0
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cam v1.3.186
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cbs v1.3.179
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb v1.3.187
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191

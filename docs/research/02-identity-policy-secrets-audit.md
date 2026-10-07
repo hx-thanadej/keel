@@ -220,7 +220,7 @@ Research date: 2026-10-06. Primary sources only (vendor docs, specs, project rep
 
 | # | Constraint / gap | Status | Mitigation |
 |---|---|---|---|
-| T1 | CAM OIDC IdP stores a static base64 JWKS (`IdentityKey`); no documented auto-refresh | Verified API shape; auto-refresh UNVERIFIED | JWKS sync job + alert on `AssumeRoleWithWebIdentity` signature failures |
+| T1 | CAM OIDC IdP stores a static base64 JWKS (`IdentityKey`) | Verified API shape. **Update 2026-10-07:** CAM's `CreateOIDCConfig`/`UpdateOIDCConfig` now take `AutoRotateKey` (SDK v1.3.186); behaviour UNVERIFIED | Keel turns `AutoRotateKey` on **and** keeps the daily JWKS sync + Finding as a check (#90) |
 | T2 | No documented condition key to force a permissions boundary on created users/roles | UNVERIFIED (not found) | Platform is the sole CAM principal creator; SCP-deny others |
 | T3 | SCP effect on the org admin account and member root identities undocumented; SCPs skip service-linked roles | Partly verified | Treat the admin account as a vault: no workloads, hardware MFA, monitored |
 | T4 | No native PIM/JIT service found | UNVERIFIED (absence) | Platform-built JIT on CIC assignments |

@@ -76,8 +76,8 @@ func fakeGitHub(t *testing.T, files map[string]string, token string) *httptest.S
 			return
 		}
 		var repos []map[string]any
-		for _, name := range []string{"crm", "no-descriptor", "orphan", "bad-yaml"} {
-			repos = append(repos, map[string]any{"name": name, "full_name": r.PathValue("owner") + "/" + name, "archived": false, "html_url": "https://github.com/" + r.PathValue("owner") + "/" + name})
+		for i, name := range []string{"crm", "no-descriptor", "orphan", "bad-yaml"} {
+			repos = append(repos, map[string]any{"id": 900 + i, "owner": map[string]any{"id": 42}, "name": name, "full_name": r.PathValue("owner") + "/" + name, "archived": false, "html_url": "https://github.com/" + r.PathValue("owner") + "/" + name})
 		}
 		repos = append(repos, map[string]any{"name": "old", "full_name": r.PathValue("owner") + "/old", "archived": true})
 		_ = json.NewEncoder(w).Encode(repos)
@@ -147,17 +147,18 @@ func TestSyncCreatesServicesAndReportsProblems(t *testing.T) {
 
 	var n int
 	var lifecycle, repoURL string
+	var repoID, ownerID int64
 	err = s.InTenant(context.Background(), tat, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(context.Background(), `SELECT count(*) FROM services`).Scan(&n); err != nil {
 			return err
 		}
-		return tx.QueryRow(context.Background(), `SELECT lifecycle, repository FROM services WHERE slug = 'crm-api'`).Scan(&lifecycle, &repoURL)
+		return tx.QueryRow(context.Background(), `SELECT lifecycle, repository, repository_id, repository_owner_id FROM services WHERE slug = 'crm-api'`).Scan(&lifecycle, &repoURL, &repoID, &ownerID)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 || lifecycle != "production" || repoURL != "https://github.com/hx/crm" {
-		t.Errorf("services=%d lifecycle=%q repo=%q", n, lifecycle, repoURL)
+	if n != 2 || lifecycle != "production" || repoURL != "https://github.com/hx/crm" || repoID != 900 || ownerID != 42 {
+		t.Errorf("services=%d lifecycle=%q repo=%q ids=%d/%d", n, lifecycle, repoURL, repoID, ownerID)
 	}
 
 	// Second run updates in place, no duplicates; activity per change only.

@@ -82,9 +82,13 @@ func Parse(b []byte) ([]Component, error) {
 
 // Repo is a source repository.
 type Repo struct {
+	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`
 	URL      string `json:"html_url"`
 	Archived bool   `json:"archived"`
+	Owner    struct {
+		ID int64 `json:"id"`
+	} `json:"owner"`
 }
 
 // Source lists repositories and reads files from them.
@@ -186,15 +190,16 @@ func (s *Syncer) upsert(ctx context.Context, r Repo, c Component, rep *Report) s
 		}
 		var id string
 		err := tx.QueryRow(ctx, `
-			INSERT INTO services (tenant_id, project_id, team_id, slug, name, repository, lifecycle, type)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO services (tenant_id, project_id, team_id, slug, name, repository, lifecycle, type, repository_id, repository_owner_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, nullif($9, 0), nullif($10, 0))
 			ON CONFLICT (project_id, slug) DO UPDATE
 			SET team_id = excluded.team_id, name = excluded.name, repository = excluded.repository,
-			    lifecycle = excluded.lifecycle, type = excluded.type
-			WHERE (services.team_id, services.name, services.repository, services.lifecycle, services.type)
-			      IS DISTINCT FROM (excluded.team_id, excluded.name, excluded.repository, excluded.lifecycle, excluded.type)
+			    lifecycle = excluded.lifecycle, type = excluded.type,
+			    repository_id = excluded.repository_id, repository_owner_id = excluded.repository_owner_id
+			WHERE (services.team_id, services.name, services.repository, services.lifecycle, services.type, services.repository_id, services.repository_owner_id)
+			      IS DISTINCT FROM (excluded.team_id, excluded.name, excluded.repository, excluded.lifecycle, excluded.type, excluded.repository_id, excluded.repository_owner_id)
 			RETURNING id::text`,
-			*tenant, project, team, c.Name, c.Title, r.URL, c.Lifecycle, c.Type).Scan(&id)
+			*tenant, project, team, c.Name, c.Title, r.URL, c.Lifecycle, c.Type, r.ID, r.Owner.ID).Scan(&id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			rep.Unchanged++
 			return nil
