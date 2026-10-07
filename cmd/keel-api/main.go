@@ -15,6 +15,9 @@
 // named by each provider's client_secret_ref.
 //
 //	KEEL_DIGEST_KEY     base64 32-byte Ed25519 seed; enables hourly Activity Log sealing
+//	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
+//	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
+//	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
 //	KEEL_TENCENT_ORG_REGION  enables Tencent organisation discovery (e.g. ap-bangkok);
 //	                    credentials: TKE pod identity or CVM role (env keys only with KEEL_ENV=dev)
 //
@@ -48,6 +51,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/catalogsync"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/integrity"
@@ -134,6 +138,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{}}
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
+	}
+	if owner := os.Getenv("KEEL_GITHUB_OWNER"); owner != "" {
+		syncer := &catalogsync.Syncer{Store: st, Source: &catalogsync.GitHub{Owner: owner, Org: os.Getenv("KEEL_GITHUB_ORG") == "1", Token: os.Getenv("KEEL_GITHUB_TOKEN")}}
+		go syncer.Every(ctx, 10*time.Minute)
 	}
 	if err := startSealer(ctx, st); err != nil {
 		pool.Close()
