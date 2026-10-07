@@ -153,7 +153,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			pool.Close()
 			return api.Deps{}, noop, err
 		}
-		deps.Auth = authn
+		deps.Auth, deps.Sessions = authn, authn
 		return deps, pool.Close, nil
 	}
 	sessions, err := signIn(st)
@@ -220,9 +220,9 @@ func bootstrap(args []string) error {
 	return nil
 }
 
-func devAuthenticator(raw string) (auth.Authenticator, error) {
+func devAuthenticator(raw string) (auth.Static, error) {
 	if os.Getenv("KEEL_ENV") != "dev" {
-		return nil, errors.New("KEEL_DEV_PRINCIPAL is only allowed with KEEL_ENV=dev")
+		return auth.Static{}, errors.New("KEEL_DEV_PRINCIPAL is only allowed with KEEL_ENV=dev")
 	}
 	slog.Warn("DEV AUTHENTICATION: every request is the static KEEL_DEV_PRINCIPAL")
 	return auth.ParseStatic(raw)
