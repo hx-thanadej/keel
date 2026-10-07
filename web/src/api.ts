@@ -120,6 +120,26 @@ export type Finding = {
   resolution: string | null
 }
 
+export type Savings = {
+  currency: string
+  open: string
+  accepted: string
+  applied: string
+  realised: string
+  regressions: number
+  items: {
+    id: string
+    resource_id: string
+    action: string
+    project_id: string | null
+    recommended: string
+    realised: string | null
+    method: 'measured' | 'estimated' | null
+    regression: string | null
+    applied_at: string
+  }[]
+}
+
 const send = <T,>(path: string, method: string, body: unknown) => request<T>(path, { method, body: JSON.stringify(body) })
 
 export const finops = {
@@ -139,6 +159,7 @@ export const finops = {
   findings: (t: string) => list<Finding>(`/v1/tenants/${t}/findings`),
   resolve: (t: string, id: string, resolution: string) => send<Finding>(`/v1/tenants/${t}/findings/${id}/resolve`, 'POST', { resolution }),
   recommendations: (t: string) => list<{ id: string; finding_id: string; pr_url: string | null; state: string }>(`/v1/tenants/${t}/recommendations`),
+  savings: (t: string, project?: string) => request<Savings>(`/v1/tenants/${t}/savings${project ? `?project=${project}` : ''}`),
   applyRecommendation: (t: string, id: string) => send<{ pr_url: string }>(`/v1/tenants/${t}/recommendations/${id}/apply`, 'POST', {}),
 }
 

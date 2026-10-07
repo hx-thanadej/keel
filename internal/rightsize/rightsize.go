@@ -322,6 +322,20 @@ func record(ctx context.Context, tx pgx.Tx, tenant, id, typ, op string, kind act
 	return err
 }
 
+type appliedAtKey struct{}
+
+// WithAppliedAt makes MarkApplied record t instead of now (backfills, tests).
+func WithAppliedAt(ctx context.Context, t time.Time) context.Context {
+	return context.WithValue(ctx, appliedAtKey{}, t)
+}
+
+func appliedAt(ctx context.Context) *time.Time {
+	if t, ok := ctx.Value(appliedAtKey{}).(time.Time); ok {
+		return &t
+	}
+	return nil
+}
+
 func observed(t time.Time) *time.Time {
 	if t.IsZero() {
 		return nil
@@ -334,8 +348,8 @@ func observed(t time.Time) *time.Time {
 func (s Service) MarkApplied(ctx context.Context, tenant, id, note, prURL string, by activity.Actor) error {
 	return s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var finding string
-		err := tx.QueryRow(ctx, `UPDATE recommendations SET state = 'applied', decided_by = $2, decision_reason = $3, pr_url = nullif($4, ''), updated_at = now()
-			WHERE id = $1 AND state IN ('open', 'accepted') RETURNING coalesce(finding_id::text, '')`, id, by.UID, note, prURL).Scan(&finding)
+		err := tx.QueryRow(ctx, `UPDATE recommendations SET state = 'applied', decided_by = $2, decision_reason = $3, pr_url = coalesce(nullif($4, ''), pr_url), updated_at = now(), applied_at = coalesce($5, now())
+			WHERE id = $1 AND state IN ('open', 'accepted') RETURNING coalesce(finding_id::text, '')`, id, by.UID, note, prURL, appliedAt(ctx)).Scan(&finding)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrState
 		}
