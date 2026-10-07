@@ -30,4 +30,13 @@ func mountDiscovery(mux Mux, c *catalog.Service, a auth.Authenticator, sources m
 		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
+	mux.Handle("GET /v1/tenants/{tenant}/catalog-sync", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		out, err := c.LastCatalogSync(r.Context(), p, r.PathValue("tenant"))
+		if err != nil {
+			return err
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, err = w.Write(out)
+		return err
+	}))
 }

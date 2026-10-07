@@ -82,3 +82,13 @@ func (s *Service) ListDiscovered(ctx context.Context, p auth.Principal, tenantID
 	})
 	return out, mapErr(err)
 }
+
+// LastCatalogSync returns the most recent catalog-info.yaml sync report.
+func (s *Service) LastCatalogSync(ctx context.Context, p auth.Principal, tenantID string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	err := s.read(ctx, p, "catalog_sync.read", authz.Resource{Type: "catalog_sync", TenantID: tenantID}, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT jsonb_build_object('started_at', started_at, 'finished_at', finished_at, 'report', report)
+			FROM catalog_sync_runs ORDER BY started_at DESC LIMIT 1`).Scan(&raw)
+	})
+	return raw, mapErr(err)
+}
