@@ -11,6 +11,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
@@ -46,7 +47,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}
 	router := api.NewRouter(api.Info{Version: "test"}, api.Deps{Auth: headerAuth{}, Sessions: noRoutes{}, Catalog: catalog.New(s, az),
 		Discovery: map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}},
-		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}}})
+		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}},
+		Budgets:   &api.BudgetDeps{Authz: az, Catalog: catalog.New(s, az), Budgets: budget.Service{Store: s}, Resolve: stubResolve}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	c := client{t: t, url: srv.URL}
@@ -83,10 +85,16 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/identity-providers/{idp}/group-roles":          {"group": "pwn", "role": "platform_admin", "target_tenant_id": a},
 		"POST /v1/tenants/{tenant}/discoveries/{provider}":                        {},
 		"POST /v1/tenants/{tenant}/cost-loads":                                    {},
+		"PATCH /v1/tenants/{tenant}":                                              {"currency": "THB"},
+		"POST /v1/tenants/{tenant}/budgets":                                       {"project_id": project, "name": "pwn", "year": 2026, "amount": "1"},
+		"PATCH /v1/tenants/{tenant}/budgets/{budget}":                             {"amount": "1"},
+		"POST /v1/tenants/{tenant}/budgets/{budget}/archive":                      {},
 	}
+	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
+	victimBudget := body["id"].(string)
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent"},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client"},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456"},
 	}
 
 	attackers := map[string]auth.Principal{

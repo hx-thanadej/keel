@@ -60,11 +60,13 @@ import (
 	"github.com/hx-thanadej/keel/internal/archive"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/fx"
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/store"
@@ -147,7 +149,12 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	st := store.New(pool)
 	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{},
-		Cost: &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}}}
+		Cost:    &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}},
+		Budgets: &api.BudgetDeps{Authz: az, Budgets: budget.Service{Store: st}}}
+	deps.Budgets.Catalog = deps.Catalog
+	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
+	go fxLoop(ctx, st)
+	go evaluateLoop(ctx, evaluator)
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
 	}
@@ -155,7 +162,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		syncer := &catalogsync.Syncer{Store: st, Source: &catalogsync.GitHub{Owner: owner, Org: os.Getenv("KEEL_GITHUB_ORG") == "1", Token: os.Getenv("KEEL_GITHUB_TOKEN")}}
 		go syncer.Every(ctx, 10*time.Minute)
 	}
-	if err := startBillSync(ctx, st); err != nil {
+	if err := startBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
@@ -398,7 +405,7 @@ func printReport(r integrity.Report) error {
 
 // startBillSync loads the Tencent payer's FOCUS bills hourly and reconciles
 // them against the billing API (#31–#33).
-func startBillSync(ctx context.Context, st *store.Store) error {
+func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) error {
 	bucket := os.Getenv("KEEL_TENCENT_BILL_BUCKET")
 	if bucket == "" {
 		return nil
@@ -438,6 +445,9 @@ func startBillSync(ctx context.Context, st *store.Store) error {
 						slog.Error("ALERT tencent bill does not reconcile with invoice", "period", l.Period.Format("2006-01"), "load", l.LoadID)
 					}
 				}
+				if len(rep.Loads) > 0 {
+					evaluate(ctx, ev)
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -447,4 +457,51 @@ func startBillSync(ctx context.Context, st *store.Store) error {
 		}
 	}()
 	return nil
+}
+
+// fxLoop keeps ECB reference rates current: 90-day backfill, then every 6h.
+func fxLoop(ctx context.Context, st *store.Store) {
+	db := fx.DB{Store: st}
+	url := fx.ECB90DaysURL
+	t := time.NewTicker(6 * time.Hour)
+	defer t.Stop()
+	for {
+		if rates, err := fx.FetchECB(ctx, nil, url); err != nil {
+			slog.Error("fx fetch failed", "err", err)
+		} else if n, err := db.SaveRates(ctx, rates); err != nil {
+			slog.Error("fx save failed", "err", err)
+		} else {
+			slog.Info("fx rates", "new", n)
+			url = fx.ECBDailyURL
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func evaluateLoop(ctx context.Context, ev budget.Evaluator) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		evaluate(ctx, ev)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func evaluate(ctx context.Context, ev budget.Evaluator) {
+	alerts, err := ev.EvaluateAll(ctx)
+	if err != nil {
+		slog.Error("budget evaluation failed", "err", err)
+		return
+	}
+	for _, a := range alerts {
+		slog.Warn("budget threshold crossed", "tenant", a.TenantID, "budget", a.Name, "basis", a.Basis, "pct", a.Pct, "value", a.Value, "currency", a.Currency)
+	}
 }

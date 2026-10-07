@@ -23,6 +23,7 @@ type Deps struct {
 	// Discovery sources by provider name, e.g. "tencent".
 	Discovery map[string]discovery.Source
 	Cost      *CostDeps
+	Budgets   *BudgetDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -81,6 +82,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		mountDiscovery(mux, deps.Catalog, deps.Auth, deps.Discovery)
 		if deps.Cost != nil {
 			mountCost(mux, deps.Auth, *deps.Cost)
+		}
+		if deps.Budgets != nil {
+			mountBudgets(mux, deps.Auth, *deps.Budgets)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).
