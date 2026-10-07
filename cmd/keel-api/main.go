@@ -89,6 +89,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/fx"
 	"github.com/hx-thanadej/keel/internal/integrity"
+	"github.com/hx-thanadej/keel/internal/landingzone"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store"
@@ -215,7 +216,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	vendors := vendors(st)
+	vendors := vendors(ctx, st)
 	engine, stopJobs, err := startFlows(ctx, st, flowDefs(vendors))
 	if err != nil {
 		pool.Close()
@@ -244,12 +245,40 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 
 // vendors are the account factories per provider (#88). Tencent vending
 // needs organisation-admin credentials: KEEL_TENCENT_ORG_REGION.
-func vendors(st *store.Store) map[string]vending.Vendor {
+func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 	out := map[string]vending.Vendor{}
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
-		out["tencent"] = vending.Vendor{Store: st, Org: tencent.AccountFactory{API: tencent.NewOrgAPI(region, tencent.Credentials())}}
+		orgAPI := tencent.NewOrgAPI(region, tencent.Credentials())
+		baseline := landingzone.Tencent(landingzone.Options{AutomationRole: os.Getenv("KEEL_TENCENT_AUTOMATION_ROLE")})
+		guardrails := tencent.Guardrails{API: orgAPI}
+		out["tencent"] = vending.Vendor{Store: st, Org: tencent.AccountFactory{API: orgAPI},
+			Baseline: []flow.Step{landingzone.Step(st, guardrails, baseline)}}
+		w := landingzone.Watcher{Store: st, Provider: "tencent", Org: guardrails, Baseline: baseline, Remediate: os.Getenv("KEEL_LANDING_ZONE_REMEDIATE") == "1"}
+		go daily(ctx, "landing zone drift", func(ctx context.Context) error {
+			res, err := w.Run(ctx)
+			if err == nil {
+				slog.Info("landing zone drift", "accounts", res.Accounts, "drifted", res.Drifted, "remediated", res.Remediated)
+			}
+			return err
+		})
 	}
 	return out
+}
+
+// daily runs fn now and then every 24h until ctx ends.
+func daily(ctx context.Context, name string, fn func(context.Context) error) {
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		if err := fn(ctx); err != nil {
+			slog.Error(name+" failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // flowDefs lists the durable flows Keel runs (#87).

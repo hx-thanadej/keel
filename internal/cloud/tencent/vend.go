@@ -25,8 +25,11 @@ type OrgAPI interface {
 
 // NewOrgAPI returns an Organization API whose every call uses fresh
 // credentials (role credentials expire); they must belong to the
-// organisation admin account.
-func NewOrgAPI(region string, creds common.Provider) OrgAPI {
+// organisation admin account. It also serves PolicyAPI.
+func NewOrgAPI(region string, creds common.Provider) interface {
+	OrgAPI
+	PolicyAPI
+} {
 	return lazyOrg{region: region, creds: creds}
 }
 
@@ -230,4 +233,52 @@ func (f AccountFactory) AccountReady(ctx context.Context, id string) (bool, erro
 			return false, nil
 		}
 	}
+}
+
+func (l lazyOrg) ListPoliciesWithContext(ctx context.Context, r *org.ListPoliciesRequest) (*org.ListPoliciesResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListPoliciesWithContext(ctx, r)
+}
+
+func (l lazyOrg) CreatePolicyWithContext(ctx context.Context, r *org.CreatePolicyRequest) (*org.CreatePolicyResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.CreatePolicyWithContext(ctx, r)
+}
+
+func (l lazyOrg) UpdatePolicyWithContext(ctx context.Context, r *org.UpdatePolicyRequest) (*org.UpdatePolicyResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.UpdatePolicyWithContext(ctx, r)
+}
+
+func (l lazyOrg) DescribePolicyWithContext(ctx context.Context, r *org.DescribePolicyRequest) (*org.DescribePolicyResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.DescribePolicyWithContext(ctx, r)
+}
+
+func (l lazyOrg) ListPoliciesForTargetWithContext(ctx context.Context, r *org.ListPoliciesForTargetRequest) (*org.ListPoliciesForTargetResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListPoliciesForTargetWithContext(ctx, r)
+}
+
+func (l lazyOrg) AttachPolicyWithContext(ctx context.Context, r *org.AttachPolicyRequest) (*org.AttachPolicyResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.AttachPolicyWithContext(ctx, r)
 }
