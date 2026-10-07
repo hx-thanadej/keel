@@ -12,6 +12,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
@@ -44,7 +45,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := api.NewRouter(api.Info{Version: "test"}, api.Deps{Auth: headerAuth{}, Sessions: noRoutes{}, Catalog: catalog.New(s, az),
-		Discovery: map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}}})
+		Discovery: map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}},
+		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	c := client{t: t, url: srv.URL}
@@ -80,6 +82,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/identity-providers":                            {"issuer": "https://pwn.example", "client_id": "pwn", "client_secret_ref": "PWN"},
 		"POST /v1/tenants/{tenant}/identity-providers/{idp}/group-roles":          {"group": "pwn", "role": "platform_admin", "target_tenant_id": a},
 		"POST /v1/tenants/{tenant}/discoveries/{provider}":                        {},
+		"POST /v1/tenants/{tenant}/cost-loads":                                    {},
 	}
 	v := victim{
 		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent"},
