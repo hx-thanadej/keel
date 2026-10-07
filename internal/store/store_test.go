@@ -11,13 +11,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -49,7 +50,14 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 			&f.account, f.tenant, f.env, "uin-"+slug, slug+"-crm-prod"); err != nil {
 			return err
 		}
-		return q(`INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, 'api', 'API') RETURNING id`, &f.service, f.tenant, f.project, f.team)
+		if err := q(`INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, 'api', 'API') RETURNING id`, &f.service, f.tenant, f.project, f.team); err != nil {
+			return err
+		}
+		_, err := activity.Record(ctx, tx, activity.Activity{
+			TenantID: f.tenant, Source: "test", Type: "test.seeded", Operation: "Seed",
+			Kind: activity.Create, Actor: activity.Actor{Type: activity.ActorKeel, UID: "keel:test"}, Outcome: activity.Success,
+		})
+		return err
 	})
 	if err != nil {
 		t.Fatalf("seed %s: %v", slug, err)
