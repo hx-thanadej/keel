@@ -30,6 +30,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/sbom"
 	"github.com/hx-thanadej/keel/internal/scans"
+	"github.com/hx-thanadej/keel/internal/scorecard"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 	"github.com/hx-thanadej/keel/internal/templates"
@@ -87,6 +88,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Attest:     &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission:  &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
 		VEX:        &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
+		Scorecards: &api.ScorecardDeps{Authz: az, Service: scorecard.Service{Store: s}},
 		DORA:       &api.DORADeps{Authz: az, Service: dora.Service{Store: s}},
 		Webhooks:   &api.WebhookDeps{Leaks: &leaks.Service{Store: s}},
 		BreakGlass: &api.BreakGlassDeps{Authz: az, Service: breakglass.Service{Store: s}, Home: func(*http.Request) (string, error) { return home, nil }},
