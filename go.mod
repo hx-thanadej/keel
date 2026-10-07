@@ -21,6 +21,7 @@ require (
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cam v1.3.186
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cbs v1.3.179
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb v1.3.187
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cloudaudit v1.3.40
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm v1.3.183
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor v1.3.182

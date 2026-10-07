@@ -25,21 +25,22 @@ type Deps struct {
 	Cost      *CostDeps
 	Budgets   *BudgetDeps
 	// Authz enables the Findings inbox (shared by cost, rightsizing, security).
-	Authz     catalog.Authorizer
-	Rightsize *RightsizeDeps
-	Flows     *FlowDeps
-	Vending   *VendingDeps
-	Promotion *PromotionDeps
-	Templates *TemplateDeps
-	Registry  *RegistryDeps
-	Exception *ExceptionDeps
-	Scans     *ScanDeps
-	Attest    *AttestDeps
-	Admission *AdmissionDeps
-	SBOM      *SBOMDeps
-	VEX       *VEXDeps
-	Controls  *ControlDeps
-	Access    *AccessDeps
+	Authz      catalog.Authorizer
+	Rightsize  *RightsizeDeps
+	Flows      *FlowDeps
+	Vending    *VendingDeps
+	Promotion  *PromotionDeps
+	Templates  *TemplateDeps
+	Registry   *RegistryDeps
+	Exception  *ExceptionDeps
+	Scans      *ScanDeps
+	Attest     *AttestDeps
+	Admission  *AdmissionDeps
+	SBOM       *SBOMDeps
+	VEX        *VEXDeps
+	Controls   *ControlDeps
+	Access     *AccessDeps
+	BreakGlass *BreakGlassDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -146,6 +147,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Access != nil {
 			mountAccess(mux, deps.Auth, *deps.Access)
+		}
+		if deps.BreakGlass != nil {
+			mountBreakGlass(mux, deps.Auth, *deps.BreakGlass)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).

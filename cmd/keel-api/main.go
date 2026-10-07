@@ -75,6 +75,7 @@ import (
 	awscreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/riverqueue/river"
 	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 
 	"github.com/hx-thanadej/keel/internal/access"
 	"github.com/hx-thanadej/keel/internal/admission"
@@ -86,6 +87,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/boundary"
+	"github.com/hx-thanadej/keel/internal/breakglass"
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
@@ -351,9 +353,33 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Access = &api.AccessDeps{Authz: az, Service: acc}
+	bg := breakglass.Service{Store: st}
+	deps.BreakGlass = &api.BreakGlassDeps{Authz: az, Service: bg, Home: func(r *http.Request) (string, error) {
+		var h *string
+		if err := st.AppPool().QueryRow(r.Context(), `SELECT home_tenant_id()::text`).Scan(&h); err != nil || h == nil {
+			return "", errors.Join(errors.New("no home tenant"), err)
+		}
+		return *h, nil
+	}}
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
-		standing := access.Standing{Store: st, Directory: dir, Users: func(account string) (access.Users, error) {
+		bg.Audit = func(account string) (breakglass.Audit, error) {
+			// The organisation admin account is read with Keel's own role; members through the access role.
+			var creds common.Provider = &tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region}
+			if account == os.Getenv("KEEL_TENCENT_ORG_ADMIN_UIN") {
+				creds = tencent.Credentials()
+			}
+			return tencent.NewCloudAudit(region, creds)
+		}
+		deps.BreakGlass.Service = bg
+		go every(ctx, time.Hour, "break-glass watch", func(ctx context.Context) error {
+			res, err := bg.Watch(ctx, 2*time.Hour)
+			if err == nil && (res.Uses > 0 || res.DrillsOverdue > 0) {
+				slog.Warn("break-glass", "uses", res.Uses, "drills_overdue", res.DrillsOverdue)
+			}
+			return err
+		})
+		standing := access.Standing{Store: st, Directory: dir, BreakGlass: bg.Names, Users: func(account string) (access.Users, error) {
 			return tencent.NewCAMUsers(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
 		}}
 		go daily(ctx, "standing access", func(ctx context.Context) error {

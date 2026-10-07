@@ -16,6 +16,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/attest"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/breakglass"
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/controls"
@@ -38,12 +39,16 @@ import (
 // contain {tenant} and is attacked below. Adding a route that is neither
 // fails this suite: it is release-blocking (#23).
 var notTenantScoped = map[string]string{
-	"GET /healthz":       "no data",
-	"POST /v1/tenants":   "creates a new Tenant; policy-gated to home platform admins (authz tests)",
-	"GET /auth/login":    "pre-authentication",
-	"GET /auth/callback": "pre-authentication",
-	"POST /auth/logout":  "acts on caller's own session",
-	"GET /auth/me":       "returns caller's own principal",
+	"GET /healthz":                              "no data",
+	"POST /v1/tenants":                          "creates a new Tenant; policy-gated to home platform admins (authz tests)",
+	"GET /auth/login":                           "pre-authentication",
+	"GET /auth/callback":                        "pre-authentication",
+	"POST /auth/logout":                         "acts on caller's own session",
+	"GET /auth/me":                              "returns caller's own principal",
+	"GET /v1/breakglass":                        "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
+	"POST /v1/breakglass":                       "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
+	"POST /v1/breakglass/{identity}/drill":      "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
+	"POST /v1/breakglass/uses/{use}/postmortem": "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
 }
 
 type victim struct {
@@ -66,24 +71,25 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := api.NewRouter(api.Info{Version: "test"}, api.Deps{Auth: headerAuth{}, Sessions: noRoutes{}, Catalog: catalog.New(s, az),
-		Discovery: map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}},
-		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}, Rules: cost.Rules{Store: s}},
-		Budgets:   &api.BudgetDeps{Authz: az, Catalog: catalog.New(s, az), Budgets: budget.Service{Store: s}, Resolve: stubResolve},
-		Authz:     az,
-		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}},
-		Flows:     &api.FlowDeps{Authz: az, Engine: flow.New(s)},
-		Promotion: &api.PromotionDeps{Authz: az, Service: promo},
-		Registry:  &api.RegistryDeps{Authz: az, Store: s},
-		Exception: &api.ExceptionDeps{Authz: az, Service: exceptions.New(s)},
-		Scans:     &api.ScanDeps{Authz: az, Service: scans.Service{Store: s}},
-		Attest:    &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
-		Admission: &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
-		VEX:       &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
-		Access:    &api.AccessDeps{Authz: az, Service: mustAccess(t, s)},
-		Controls:  &api.ControlDeps{Authz: az, Service: controls.Service{Store: s, Registry: mustControls(t)}},
-		SBOM:      &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: s}, Releases: attest.Service{Store: s}},
-		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
-		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
+		Discovery:  map[string]discovery.Source{"tencent": fakeOrg{{Provider: "tencent", ExternalID: "victim-uin-123", Name: "victim-prod"}}},
+		Cost:       &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}, Rules: cost.Rules{Store: s}},
+		Budgets:    &api.BudgetDeps{Authz: az, Catalog: catalog.New(s, az), Budgets: budget.Service{Store: s}, Resolve: stubResolve},
+		Authz:      az,
+		Rightsize:  &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}},
+		Flows:      &api.FlowDeps{Authz: az, Engine: flow.New(s)},
+		Promotion:  &api.PromotionDeps{Authz: az, Service: promo},
+		Registry:   &api.RegistryDeps{Authz: az, Store: s},
+		Exception:  &api.ExceptionDeps{Authz: az, Service: exceptions.New(s)},
+		Scans:      &api.ScanDeps{Authz: az, Service: scans.Service{Store: s}},
+		Attest:     &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
+		Admission:  &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
+		VEX:        &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
+		BreakGlass: &api.BreakGlassDeps{Authz: az, Service: breakglass.Service{Store: s}, Home: func(*http.Request) (string, error) { return home, nil }},
+		Access:     &api.AccessDeps{Authz: az, Service: mustAccess(t, s)},
+		Controls:   &api.ControlDeps{Authz: az, Service: controls.Service{Store: s, Registry: mustControls(t)}},
+		SBOM:       &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: s}, Releases: attest.Service{Store: s}},
+		Templates:  &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
+		Vending:    &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	c := client{t: t, url: srv.URL}

@@ -59,6 +59,7 @@ rules := {
 	"registry.push": {"pipeline"},
 	"sbom.submit": {"platform_admin", "pipeline"},
 	"access.read": read_roles,
+	"breakglass.manage": {"platform_admin", "security_lead"},
 	"access.request_role": {"platform_admin", "team_lead"},
 	"access.approve_role": {"platform_admin", "security_lead"},
 	"access.request_grant": {"platform_admin", "team_lead", "engineer"},
