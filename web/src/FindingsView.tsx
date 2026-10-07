@@ -24,6 +24,26 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
     }
   }, [tenantId, reload])
 
+  const [recs, setRecs] = useState<Record<string, { id: string; pr_url: string | null }>>({})
+  useEffect(() => {
+    finops
+      .recommendations(tenantId)
+      .then((rs) => setRecs(Object.fromEntries(rs.map((r) => [r.finding_id, { id: r.id, pr_url: r.pr_url }]))))
+      .catch(() => setRecs({}))
+  }, [tenantId, reload])
+
+  const openPR = async (f: Finding) => {
+    const r = recs[f.id]
+    if (!r) return
+    try {
+      const { pr_url } = await finops.applyRecommendation(tenantId, r.id)
+      window.open(pr_url, '_blank', 'noopener')
+      setReload((n) => n + 1)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   const resolve = async (f: Finding) => {
     const reason = window.prompt('How was this resolved?')
     if (!reason) return
@@ -63,7 +83,17 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
               </span>
             )}
             <span className="meta">First seen {new Date(f.first_seen_at).toLocaleString()}</span>
-            <div>
+            <div className="toolbar">
+              {f.kind === 'rightsizing' && recs[f.id]?.pr_url && (
+                <a href={recs[f.id].pr_url ?? '#'} target="_blank" rel="noopener noreferrer">
+                  View pull request
+                </a>
+              )}
+              {f.kind === 'rightsizing' && recs[f.id] && !recs[f.id].pr_url && (
+                <button className="primary" onClick={() => openPR(f)}>
+                  Open pull request
+                </button>
+              )}
               <button className="secondary" onClick={() => resolve(f)}>
                 Resolve…
               </button>

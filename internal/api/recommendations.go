@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/hx-thanadej/keel/internal/apply"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
@@ -14,6 +15,7 @@ import (
 type RightsizeDeps struct {
 	Authz   catalog.Authorizer
 	Service rightsize.Service
+	Applier *apply.Applier // nil: pull requests not configured
 }
 
 func (d RightsizeDeps) allow(r *http.Request, p auth.Principal, action, tenant string) error {
@@ -33,7 +35,7 @@ func rightsizeErr(err error) error {
 		return catalog.ErrNotFound
 	case errors.Is(err, rightsize.ErrState):
 		return errors.Join(catalog.ErrConflict, err)
-	case errors.Is(err, rightsize.ErrInvalid):
+	case errors.Is(err, rightsize.ErrInvalid), errors.Is(err, apply.ErrUnsupported):
 		return errors.Join(catalog.ErrInvalid, err)
 	}
 	return err
@@ -70,6 +72,21 @@ func mountRightsize(mux Mux, a auth.Authenticator, d RightsizeDeps) {
 			return rightsizeErr(err)
 		}
 		writeJSON(w, http.StatusOK, out)
+		return nil
+	}))
+	mux.Handle("POST /v1/tenants/{tenant}/recommendations/{recommendation}/apply", authed(a, []string{"tenant", "recommendation"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant := r.PathValue("tenant")
+		if err := d.allow(r, p, "recommendation.decide", tenant); err != nil {
+			return err
+		}
+		if d.Applier == nil {
+			return errors.Join(catalog.ErrInvalid, errors.New("pull requests are not configured (KEEL_GITHUB_WRITE_TOKEN)"))
+		}
+		url, err := d.Applier.Apply(r.Context(), tenant, r.PathValue("recommendation"), actor(p))
+		if err != nil {
+			return rightsizeErr(err)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"pr_url": url})
 		return nil
 	}))
 	mux.Handle("POST /v1/tenants/{tenant}/recommendations/{recommendation}/dismiss", authed(a, []string{"tenant", "recommendation"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {

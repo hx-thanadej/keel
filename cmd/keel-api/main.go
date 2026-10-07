@@ -35,6 +35,7 @@
 //	KEEL_AWS_COH=1      import AWS Cost Optimization Hub recommendations (management account, web identity)
 //	KEEL_WASTE_CLEANUP=1      allow deleting waste in opted-in non-prod Environments after the grace period
 //	KEEL_WASTE_GRACE_DAYS     days a waste recommendation must stay open first (default 7)
+//	KEEL_GITHUB_WRITE_TOKEN   lets Keel open rightsizing pull requests (contents:write, pull_requests:write)
 //	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
@@ -73,6 +74,7 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
+	"github.com/hx-thanadej/keel/internal/apply"
 	"github.com/hx-thanadej/keel/internal/archive"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
@@ -173,6 +175,9 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	deps.Budgets.Catalog = deps.Catalog
 	deps.Authz = az
 	deps.Rightsize = &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: st}}
+	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
+		deps.Rightsize.Applier = &apply.Applier{Recs: rightsize.Service{Store: st}, Git: apply.GitHub{Token: tok}}
+	}
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
 	if err := startUtilisation(ctx, st); err != nil {
@@ -757,6 +762,14 @@ func startUtilisation(ctx context.Context, st *store.Store) error {
 
 // rightsizeAll runs Keel's rightsizing engines over fresh utilisation.
 func rightsizeAll(ctx context.Context, st *store.Store) {
+	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
+		a := apply.Applier{Recs: rightsize.Service{Store: st}, Git: apply.GitHub{Token: tok}}
+		if res, err := a.Sync(ctx); err != nil {
+			slog.Error("rightsizing PR sync", "err", err)
+		} else if res.Applied+res.Reopened > 0 {
+			slog.Info("rightsizing PRs", "applied", res.Applied, "reopened", res.Reopened)
+		}
+	}
 	k8s := rightsize.K8sEngine{Service: rightsize.Service{Store: st}, Utilisation: utilisation.Store{Store: st}}
 	if res, err := k8s.Run(ctx); err != nil {
 		slog.Error("k8s rightsizing failed", "err", err)

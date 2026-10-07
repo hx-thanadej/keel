@@ -173,10 +173,12 @@ describe('finops screens', () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f2', kind: 'rightsizing', severity: 'high', status: 'open',
       title: 'Right-size requests of prod-tke/tat-crm-prod/api/app: save about 21516.00 THB/month',
       detail: { current: { cpu: '2000m', memory: '4096Mi' }, recommended: { cpu: '410m', memory: '1531Mi' }, evidence: { lookback_days: 21, replicas: 2 } },
-      first_seen_at: '2026-09-30T03:00:00Z', resolution: null }] } })
+      first_seen_at: '2026-09-30T03:00:00Z', resolution: null }] },
+      [`/v1/tenants/${tat}/recommendations`]: { items: [{ id: 'r2', finding_id: 'f2', pr_url: null, state: 'open' }] } })
     render(<App />)
     await userEvent.click(await screen.findByRole('tab', { name: 'Findings' }))
     expect(await screen.findByText(/cpu: 2000m → 410m · memory: 4096Mi → 1531Mi · based on 21 days, 2 replica/)).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'Open pull request' })).toBeTruthy()
   })
 
   it('findings tab lists anomalies with severity label and contributors', async () => {

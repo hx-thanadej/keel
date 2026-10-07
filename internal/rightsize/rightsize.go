@@ -242,6 +242,50 @@ func (s Service) decide(ctx context.Context, tenant, id, from, to, reason string
 	return out, err
 }
 
+// Get reads one recommendation.
+func (s Service) Get(ctx context.Context, tenant, id string) (Recommendation, error) {
+	var out Recommendation
+	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		var err error
+		out, err = scan(tx.QueryRow(ctx, `SELECT `+cols+` FROM recommendations WHERE id = $1`, id))
+		return err
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return out, ErrNotFound
+	}
+	return out, err
+}
+
+// SetPR links the pull request that applies a recommendation.
+func (s Service) SetPR(ctx context.Context, tenant, id, url string, by activity.Actor) error {
+	return s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		var finding string
+		if err := tx.QueryRow(ctx, `UPDATE recommendations SET pr_url = $2, updated_at = now() WHERE id = $1 RETURNING coalesce(finding_id::text, '')`, id, url).Scan(&finding); err != nil {
+			return err
+		}
+		if finding != "" {
+			if _, err := tx.Exec(ctx, `UPDATE findings SET detail = detail || jsonb_build_object('pr_url', $2::text) WHERE id = $1`, finding, url); err != nil {
+				return err
+			}
+		}
+		return record(ctx, tx, tenant, id, "keel.recommendation.pr_opened", "OpenPullRequest", activity.Update, by, url)
+	})
+}
+
+// Reopen returns an accepted recommendation to open (its PR was closed).
+func (s Service) Reopen(ctx context.Context, tenant, id, why string, by activity.Actor) error {
+	return s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE recommendations SET state = 'open', pr_url = NULL, updated_at = now() WHERE id = $1 AND state = 'accepted'`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrState
+		}
+		return record(ctx, tx, tenant, id, "keel.recommendation.reopened", "Reopen", activity.Update, by, why)
+	})
+}
+
 // Filter narrows List.
 type Filter struct {
 	State     string // "" = all
