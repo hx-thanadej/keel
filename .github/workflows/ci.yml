@@ -91,4 +91,4 @@ jobs:
           persist-credentials: false
       # Build only. Pushing, signing and provenance arrive with the registry
       # and OIDC work in M3/M4 (ADR-0007, ADR-0010); no registry credentials here.
-      - run: docker build --build-arg VERSION=${GITHUB_SHA} -t keel-api:${GITHUB_SHA} .
+      - run: docker build --build-arg "VERSION=${GITHUB_SHA}" -t "keel-api:${GITHUB_SHA}" .
