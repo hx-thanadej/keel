@@ -180,6 +180,8 @@ github.com/tchap/go-patricia/v2 v2.3.3 h1:xfNEsODumaEcCcY3gI0hYPZ/PcpVv5ju6RMAhg
 github.com/tchap/go-patricia/v2 v2.3.3/go.mod h1:VZRHKAb53DLaG+nA9EaYYiaEx6YztwDlLElMsnSHD4k=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182 h1:N3aUDk/2Vk46JXHRRujkwgTpYrj/gKAhkLquezRcAk4=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182/go.mod h1:rwlA+clAU4TRk++lBnC1OMuQpa1da5v3RGBTIltpNQ4=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cam v1.3.186 h1:tTKvyBO81A3eQ9BBgP3mAbJkGZyLk3hm4sLOxPLSjRQ=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cam v1.3.186/go.mod h1:xgr1vIaAe9NDBdLIL/aDhxamXiFXWAeKKlbk0F9QG04=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cbs v1.3.179 h1:3mHr8yXrTVLUV6UJkJY1yCqbG8xjGXujFj6MscCShFM=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cbs v1.3.179/go.mod h1:BFj7VlliBHNfpga6as2q0iOw0Ji74UlNbkq4o+1EfxA=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb v1.3.187 h1:xib8SM3l6Oa5Bu2DLQ/KzQFoVTV7bFhISuQcVnO/kjU=
@@ -188,6 +190,7 @@ github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.11/go.mod h
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.179/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.182/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.183/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.186/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.187/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.188/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.191 h1:MybHMdLwxStTaz0PO4c3/1dli7W0xMmqa7/HD3O01AQ=

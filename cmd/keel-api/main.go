@@ -82,6 +82,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
+	"github.com/hx-thanadej/keel/internal/ciidentity"
 	awsadapter "github.com/hx-thanadej/keel/internal/cloud/aws"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
@@ -251,8 +252,23 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 		orgAPI := tencent.NewOrgAPI(region, tencent.Credentials())
 		baseline := landingzone.Tencent(landingzone.Options{AutomationRole: os.Getenv("KEEL_TENCENT_AUTOMATION_ROLE")})
 		guardrails := tencent.Guardrails{API: orgAPI}
+		// Fresh member accounts carry the organisation's access role, which
+		// Keel assumes to configure them.
+		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
+		ci := ciidentity.Manager{Store: st, Provider: "tencent", JWKS: ciidentity.GitHubJWKS(nil),
+			IAM: func(account string) (ciidentity.IAM, error) {
+				api, err := tencent.NewCAM(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+				return tencent.CIIdentity{API: api}, err
+			}}
 		out["tencent"] = vending.Vendor{Store: st, Org: tencent.AccountFactory{API: orgAPI},
-			Baseline: []flow.Step{landingzone.Step(st, guardrails, baseline)}}
+			Baseline: []flow.Step{landingzone.Step(st, guardrails, baseline), ci.Step()}}
+		go daily(ctx, "ci identity sync", func(ctx context.Context) error {
+			res, err := ci.Sync(ctx)
+			if err == nil {
+				slog.Info("ci identity sync", "accounts", res.Accounts, "changed", res.Changed, "failed", res.Failed)
+			}
+			return err
+		})
 		w := landingzone.Watcher{Store: st, Provider: "tencent", Org: guardrails, Baseline: baseline, Remediate: os.Getenv("KEEL_LANDING_ZONE_REMEDIATE") == "1"}
 		go daily(ctx, "landing zone drift", func(ctx context.Context) error {
 			res, err := w.Run(ctx)
