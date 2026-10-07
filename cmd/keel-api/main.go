@@ -89,6 +89,8 @@ import (
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/fx"
+	"github.com/hx-thanadej/keel/internal/ghapi"
+	"github.com/hx-thanadej/keel/internal/githubgov"
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/landingzone"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
@@ -201,6 +203,23 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
 	}
+	if tok := os.Getenv("KEEL_GITHUB_ADMIN_TOKEN"); tok != "" && os.Getenv("KEEL_GITHUB_OWNER") != "" {
+		var checks []string
+		for _, c := range strings.Split(os.Getenv("KEEL_GITHUB_REQUIRED_CHECKS"), ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				checks = append(checks, c)
+			}
+		}
+		gov := githubgov.Reconciler{Store: st, Policy: githubgov.Default(checks), Remediate: os.Getenv("KEEL_GITHUB_REMEDIATE") == "1",
+			API: githubgov.GitHub{Client: ghapi.Client{Token: tok}, Login: os.Getenv("KEEL_GITHUB_OWNER"), Org: os.Getenv("KEEL_GITHUB_ORG") == "1"}}
+		go every(ctx, time.Hour, "github governance", func(ctx context.Context) error {
+			rep, err := gov.Run(ctx)
+			if err == nil {
+				slog.Info("github governance", "plan", rep.Plan, "mode", rep.Mode, "repos", rep.Repos, "drift", len(rep.Items))
+			}
+			return err
+		})
+	}
 	if owner := os.Getenv("KEEL_GITHUB_OWNER"); owner != "" {
 		syncer := &catalogsync.Syncer{Store: st, Source: &catalogsync.GitHub{Owner: owner, Org: os.Getenv("KEEL_GITHUB_ORG") == "1", Token: os.Getenv("KEEL_GITHUB_TOKEN")}}
 		go syncer.Every(ctx, 10*time.Minute)
@@ -283,7 +302,12 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 
 // daily runs fn now and then every 24h until ctx ends.
 func daily(ctx context.Context, name string, fn func(context.Context) error) {
-	t := time.NewTicker(24 * time.Hour)
+	every(ctx, 24*time.Hour, name, fn)
+}
+
+// every runs fn now and then every d until ctx ends.
+func every(ctx context.Context, d time.Duration, name string, fn func(context.Context) error) {
+	t := time.NewTicker(d)
 	defer t.Stop()
 	for {
 		if err := fn(ctx); err != nil {
