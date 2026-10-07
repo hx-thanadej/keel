@@ -87,6 +87,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/fx"
 	"github.com/hx-thanadej/keel/internal/ghapi"
@@ -205,6 +206,13 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		res, err := promo.Sync(ctx)
 		if err == nil && res != (promotion.SyncResult{}) {
 			slog.Info("promotion sync", "merged", res.Merged, "closed", res.Closed, "deployed", res.Deployed)
+		}
+		return err
+	})
+	go daily(ctx, "finding SLA", func(ctx context.Context) error {
+		res, err := findings.SLA{Store: st}.Run(ctx)
+		if err == nil {
+			slog.Info("finding SLA", "dated", res.Dated, "overdue", res.Overdue, "unowned", res.Unowned)
 		}
 		return err
 	})

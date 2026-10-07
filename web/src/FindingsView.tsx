@@ -72,6 +72,12 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
               <span aria-hidden>{s.icon}</span> {s.text} · {f.kind.replace('_', ' ')}
             </span>
             <strong>{f.title}</strong>
+            {f.due_at && (
+              <span className={f.overdue_at ? 'status critical' : 'meta'}>
+                {f.overdue_at ? '✕ Overdue since ' : 'Due '}
+                {new Date(f.due_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+              </span>
+            )}
             {top.length > 0 && <span className="meta">Top contributors: {top.map((t) => `${t.resource_id} (+${t.delta})`).join(', ')}</span>}
             {cur && rec && (
               <span className="meta">

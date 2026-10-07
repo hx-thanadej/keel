@@ -237,10 +237,11 @@ describe('finops screens', () => {
   })
 
   it('findings tab lists anomalies with severity label and contributors', async () => {
-    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null }] } })
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null, due_at: '2026-09-18T03:00:00Z', overdue_at: '2026-09-19T00:00:00Z' }] } })
     render(<App />)
     await userEvent.click(await screen.findByRole('tab', { name: 'Findings' }))
     expect(await screen.findByText(/Critical · cost anomaly/)).toBeTruthy()
+    expect(screen.getByText(/Overdue since 18 Sept 2026|Overdue since 18 Sep 2026/)).toBeTruthy()
     expect(screen.getByText(/nat-2 \(\+300.00\)/)).toBeTruthy()
   })
 })

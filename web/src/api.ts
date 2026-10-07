@@ -136,6 +136,8 @@ export type Finding = {
   detail: Record<string, unknown>
   first_seen_at: string
   resolution: string | null
+  due_at?: string | null
+  overdue_at?: string | null
 }
 
 export type Savings = {

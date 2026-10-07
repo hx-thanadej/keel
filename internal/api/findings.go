@@ -29,9 +29,11 @@ type Finding struct {
 	LastSeenAt    time.Time       `json:"last_seen_at"`
 	ResolvedAt    *time.Time      `json:"resolved_at"`
 	Resolution    *string         `json:"resolution"`
+	DueAt         *time.Time      `json:"due_at"`
+	OverdueAt     *time.Time      `json:"overdue_at"`
 }
 
-const findingCols = `id::text, kind, severity, status, title, detail, project_id::text, environment_id::text, owner_team_id::text, first_seen_at, last_seen_at, resolved_at, resolution`
+const findingCols = `id::text, kind, severity, status, title, detail, project_id::text, environment_id::text, owner_team_id::text, first_seen_at, last_seen_at, resolved_at, resolution, due_at, overdue_at`
 
 func mountFindings(mux Mux, a auth.Authenticator, c *catalog.Service, az catalog.Authorizer) {
 	allow := func(r *http.Request, p auth.Principal, action, tenant string) error {
@@ -56,11 +58,19 @@ func mountFindings(mux Mux, a auth.Authenticator, c *catalog.Service, az catalog
 		if status != "open" && status != "resolved" && status != "all" {
 			return errors.Join(catalog.ErrInvalid, errors.New("status is open, resolved or all"))
 		}
+		q := r.URL.Query()
+		owner := q.Get("owner")
+		if owner != "" && !catalog.ValidID(owner) {
+			return errors.Join(catalog.ErrInvalid, errors.New("owner must be a team uuid"))
+		}
+		overdue := q.Get("overdue") == "true"
 		var out []Finding
 		err := c.Store().InTenant(r.Context(), tenant, func(tx pgx.Tx) error {
 			rows, err := tx.Query(r.Context(), `SELECT `+findingCols+` FROM findings
-				WHERE ($1 = 'all' OR status = $1) AND ($2 = '' OR kind = $2)
-				ORDER BY array_position(ARRAY['critical','high','medium','low'], severity), last_seen_at DESC LIMIT 200`, status, r.URL.Query().Get("kind"))
+				WHERE ($1 = 'all' OR status = $1) AND ($2 = '' OR kind = $2) AND ($3 = '' OR owner_team_id::text = $3)
+				  AND (NOT $4 OR (status = 'open' AND due_at < now()))
+				ORDER BY (status = 'open' AND due_at < now()) DESC, array_position(ARRAY['critical','high','medium','low'], severity), due_at NULLS LAST, last_seen_at DESC LIMIT 200`,
+				status, q.Get("kind"), owner, overdue)
 			if err != nil {
 				return err
 			}
@@ -89,7 +99,7 @@ func mountFindings(mux Mux, a auth.Authenticator, c *catalog.Service, az catalog
 		err := c.Store().InTenant(r.Context(), tenant, func(tx pgx.Tx) error {
 			err := tx.QueryRow(r.Context(), `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $2
 				WHERE id = $1 AND status = 'open' RETURNING `+findingCols, id, in.Resolution).
-				Scan(&f.ID, &f.Kind, &f.Severity, &f.Status, &f.Title, &f.Detail, &f.ProjectID, &f.EnvironmentID, &f.OwnerTeamID, &f.FirstSeenAt, &f.LastSeenAt, &f.ResolvedAt, &f.Resolution)
+				Scan(&f.ID, &f.Kind, &f.Severity, &f.Status, &f.Title, &f.Detail, &f.ProjectID, &f.EnvironmentID, &f.OwnerTeamID, &f.FirstSeenAt, &f.LastSeenAt, &f.ResolvedAt, &f.Resolution, &f.DueAt, &f.OverdueAt)
 			if err != nil {
 				return err
 			}
