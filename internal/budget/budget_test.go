@@ -50,7 +50,7 @@ func setup(t *testing.T) world {
 			return err
 		}
 		// USD 1.10 and THB 38.50 per EUR → 1 USD = 35 THB.
-		_, err := tx.Exec(ctx, `INSERT INTO fx_rates (tenant_id, day, currency, per_eur) VALUES ($1, '2026-08-31', 'USD', 1.10), ($1, '2026-08-31', 'THB', 38.50)`, w.home)
+		_, err := tx.Exec(ctx, `INSERT INTO fx_rates (tenant_id, day, currency, per_eur) VALUES ($1, '2026-05-29', 'USD', 1.10), ($1, '2026-05-29', 'THB', 38.50)`, w.home)
 		return err
 	}))
 	must(t, s.InTenant(ctx, w.tat, func(tx pgx.Tx) error {
@@ -110,8 +110,9 @@ func TestStatusMonthSeriesInTenantCurrency(t *testing.T) {
 	if st.Series[2].Actual != "" {
 		t.Errorf("days after as-of must have no actual, got %q", st.Series[2].Actual)
 	}
-	if st.Forecast == "" || st.ForecastMethod != "run_rate" || st.Final {
-		t.Errorf("forecast %s %s final=%v", st.Forecast, st.ForecastMethod, st.Final)
+	// Two days of data: not enough history to forecast; withheld, not guessed.
+	if st.Forecast != "" || st.ForecastMethod != "insufficient_history" || st.HistoryDays != 2 || st.Final {
+		t.Errorf("forecast %q %s history=%d final=%v", st.Forecast, st.ForecastMethod, st.HistoryDays, st.Final)
 	}
 
 	billed := budget.Budget{ProjectID: w.project, EnvironmentID: &w.prod, Name: "billed", Year: 2026, Amount: "365000", CostBasis: "billed", Provider: ptr("tencent")}
@@ -149,7 +150,8 @@ func TestEvaluateRaisesEachThresholdOnce(t *testing.T) {
 	b, err := svc.Create(context.Background(), w.tat, budget.Budget{ProjectID: w.project, EnvironmentID: &w.prod, Name: "tight", Year: 2026, Amount: "36500",
 		Thresholds: []budget.Threshold{{Pct: 10, Basis: "actual"}, {Pct: 90, Basis: "actual"}, {Pct: 50, Basis: "forecast"}}})
 	must(t, err)
-	// Month budget 3000 THB; MTD 434 (14%) crosses 10% actual, not 90%; forecast crosses 50%.
+	// Month budget 3000 THB; MTD 434 (14%) crosses 10% actual, not 90%. Only two
+	// days of history, so there is no forecast and the forecast threshold stays quiet.
 	ev := budget.Evaluator{Service: svc, Now: func() time.Time { return time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC) }}
 	alerts, err := ev.EvaluateAll(context.Background())
 	must(t, err)
@@ -157,7 +159,7 @@ func TestEvaluateRaisesEachThresholdOnce(t *testing.T) {
 	for _, a := range alerts {
 		got[a.Basis+"@"+a.Pct] = true
 	}
-	if !got["actual@10"] || got["actual@90"] || !got["forecast@50"] || len(alerts) != 2 {
+	if !got["actual@10"] || got["actual@90"] || got["forecast@50"] || len(alerts) != 1 {
 		t.Fatalf("alerts %+v", alerts)
 	}
 	again, err := ev.EvaluateAll(context.Background())
@@ -169,7 +171,54 @@ func TestEvaluateRaisesEachThresholdOnce(t *testing.T) {
 	must(t, w.s.InTenant(context.Background(), w.tat, func(tx pgx.Tx) error {
 		return tx.QueryRow(context.Background(), `SELECT count(*) FROM activities WHERE type = 'keel.budget.threshold_crossed' AND subject = $1`, "budget/"+b.ID).Scan(&acts)
 	}))
-	if acts != 2 {
-		t.Errorf("threshold activities = %d, want 2", acts)
+	if acts != 1 {
+		t.Errorf("threshold activities = %d, want 1", acts)
+	}
+}
+
+func TestForecastWithHistory(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	// 90 days of 10 USD/day on prod (June–August), then the September fixture.
+	var lines []cost.Line
+	for d := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC); d.Before(time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)); d = d.AddDate(0, 0, 1) {
+		lines = append(lines, cost.Line{SubAccountID: "200048351622", BillingPeriodStart: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+			ChargePeriodStart: d, ChargePeriodEnd: d.AddDate(0, 0, 1), ChargeCategory: "Usage", BilledCost: "10.00", BillingCurrency: "USD",
+			ServiceName: "Cloud Virtual Machine", Tags: map[string]string{}, Vendor: map[string]string{}})
+	}
+	_, err := (&cost.Ingester{Store: w.s}).Load(ctx, cost.Load{Provider: "tencent", BillingAccountID: "history", BillingPeriod: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), Lines: lines})
+	must(t, err)
+	svc := budget.Service{Store: w.s}
+	b, err := svc.Create(ctx, w.tat, budget.Budget{ProjectID: w.project, EnvironmentID: &w.prod, Name: "prod", Year: 2026, Amount: "365000"})
+	must(t, err)
+	st, err := svc.Status(ctx, w.tat, b.ID, budget.Month, time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC))
+	must(t, err)
+	// 20 days × 350 THB = 7000 so far; 11 more days at 350 → ~10850.
+	if st.ForecastMethod != "seasonal_trend" || st.Actual != "7000.00" || st.Forecast != "10850.00" {
+		t.Fatalf("forecast %s %s actual %s", st.ForecastMethod, st.Forecast, st.Actual)
+	}
+	if st.MissingFX {
+		t.Error("all days have a rate; missing_fx must be false")
+	}
+	if st.ForecastP10 > st.Forecast || st.ForecastP90 < st.Forecast || st.BacktestMAPE == nil || *st.BacktestMAPE > 0.01 {
+		t.Errorf("bands %s..%s, backtest %v", st.ForecastP10, st.ForecastP90, st.BacktestMAPE)
+	}
+}
+
+func TestMissingFXFlagged(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	d := time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC) // before any FX rate
+	_, err := (&cost.Ingester{Store: w.s}).Load(ctx, cost.Load{Provider: "tencent", BillingAccountID: "early", BillingPeriod: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+		Lines: []cost.Line{{SubAccountID: "200048351622", BillingPeriodStart: d, ChargePeriodStart: d, ChargePeriodEnd: d.AddDate(0, 0, 1), ChargeCategory: "Usage",
+			BilledCost: "5", BillingCurrency: "USD", Tags: map[string]string{}, Vendor: map[string]string{}}}})
+	must(t, err)
+	svc := budget.Service{Store: w.s}
+	b, err := svc.Create(ctx, w.tat, budget.Budget{ProjectID: w.project, EnvironmentID: &w.prod, Name: "prod", Year: 2026, Amount: "1000"})
+	must(t, err)
+	st, err := svc.Status(ctx, w.tat, b.ID, budget.Month, d)
+	must(t, err)
+	if !st.MissingFX || st.Actual != "0.00" {
+		t.Fatalf("missing fx %v actual %s", st.MissingFX, st.Actual)
 	}
 }

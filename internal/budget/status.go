@@ -2,10 +2,13 @@ package budget
 
 import (
 	"context"
+	"hash/fnv"
 	"math/big"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/hx-thanadej/keel/internal/forecast"
 )
 
 // Period selects the Status window.
@@ -33,14 +36,18 @@ type Status struct {
 	AsOf           time.Time `json:"as_of"`
 	Currency       string    `json:"currency"`
 	CostBasis      string    `json:"cost_basis"`
-	Budget         string    `json:"budget"`          // whole window
-	BudgetToDate   string    `json:"budget_to_date"`  // prorated to AsOf
-	Actual         string    `json:"actual"`          // to date
-	Forecast       string    `json:"forecast"`        // window end; "" for Day
-	ForecastMethod string    `json:"forecast_method"` // run_rate until #38
-	Variance       string    `json:"variance"`        // actual - budget_to_date
-	Final          bool      `json:"final"`           // every provider month in the window is final
-	MissingFX      bool      `json:"missing_fx"`      // some spend could not be converted
+	Budget         string    `json:"budget"`         // whole window
+	BudgetToDate   string    `json:"budget_to_date"` // prorated to AsOf
+	Actual         string    `json:"actual"`         // to date
+	Forecast       string    `json:"forecast"`       // p50 at window end; "" for Day or without enough history
+	ForecastP10    string    `json:"forecast_p10"`
+	ForecastP90    string    `json:"forecast_p90"`
+	ForecastMethod string    `json:"forecast_method"` // seasonal_trend | insufficient_history
+	HistoryDays    int       `json:"history_days"`
+	BacktestMAPE   *float64  `json:"backtest_mape,omitempty"` // month-total error on up to 3 past months
+	Variance       string    `json:"variance"`                // actual - budget_to_date
+	Final          bool      `json:"final"`                   // every provider month in the window is final
+	MissingFX      bool      `json:"missing_fx"`              // some spend could not be converted
 	Series         []Point   `json:"series"`
 }
 
@@ -107,7 +114,8 @@ func (s Service) Status(ctx context.Context, tenantID, budgetID string, p Period
 		if !asOf.Before(yearEnd) {
 			asOf = yearEnd.AddDate(0, 0, -1)
 		}
-		spend, missing, providers, err := s.daily(ctx, tx, b, yearStart, asOf.AddDate(0, 0, 1))
+		histStart := yearStart.AddDate(0, 0, -forecast.MinHistory*3)
+		spend, missing, providers, err := s.daily(ctx, tx, b, histStart, asOf.AddDate(0, 0, 1))
 		if err != nil {
 			return err
 		}
@@ -164,7 +172,7 @@ func (s Service) Status(ctx context.Context, tenantID, budgetID string, p Period
 		st.Budget, st.BudgetToDate, st.Actual = money(budget), money(toDate), money(actual)
 		st.Variance = money(new(big.Rat).Sub(actual, toDate))
 		if st.Period != Day {
-			st.Forecast, st.ForecastMethod = money(runRate(spend, actual, asOf, end)), "run_rate"
+			s.forecast(&st, b, spend, actual, asOf, end)
 		}
 		st.Final, err = s.final(ctx, tx, providers, start, asOf)
 		return err
@@ -172,23 +180,37 @@ func (s Service) Status(ctx context.Context, tenantID, budgetID string, p Period
 	return st, mapErr(err)
 }
 
-// runRate projects to end: actual so far + mean daily spend over the last
-// (up to) 7 days with data × days remaining. Replaced by a proper model in #38.
-func runRate(spend map[time.Time]*big.Rat, actual *big.Rat, asOf, end time.Time) *big.Rat {
-	sum, n := new(big.Rat), 0
-	for d := asOf; n < 7 && d.After(asOf.AddDate(0, 0, -30)); d = d.AddDate(0, 0, -1) {
-		if v := spend[d]; v != nil {
-			sum.Add(sum, v)
-			n++
+// forecast fills the forecast fields: actual so far plus the model's
+// projection of the remaining days. History starts at the scope's first day
+// with spend; with less than forecast.MinHistory days the forecast is withheld.
+func (s Service) forecast(st *Status, b Budget, spend map[time.Time]*big.Rat, actual *big.Rat, asOf, end time.Time) {
+	first := asOf
+	for d := range spend {
+		if d.Before(first) {
+			first = d
 		}
 	}
-	out := new(big.Rat).Set(actual)
-	remaining := int64(end.Sub(asOf.AddDate(0, 0, 1)).Hours() / 24)
-	if n > 0 && remaining > 0 {
-		avg := new(big.Rat).Quo(sum, big.NewRat(int64(n), 1))
-		out.Add(out, new(big.Rat).Mul(avg, big.NewRat(remaining, 1)))
+	series := forecast.Series{Start: first}
+	for d := first; !d.After(asOf); d = d.AddDate(0, 0, 1) {
+		v := 0.0
+		if r := spend[d]; r != nil {
+			v, _ = r.Float64()
+		}
+		series.Values = append(series.Values, v)
 	}
-	return out
+	horizon := int(end.Sub(asOf.AddDate(0, 0, 1)).Hours() / 24)
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(b.ID))
+	r := forecast.Total(series, horizon, h.Sum64())
+	st.ForecastMethod, st.HistoryDays = r.Method, r.HistoryDays
+	if r.Method != forecast.SeasonalTrend {
+		return
+	}
+	add := func(v float64) string { return money(new(big.Rat).Add(actual, new(big.Rat).SetFloat64(v))) }
+	st.Forecast, st.ForecastP10, st.ForecastP90 = add(r.P50), add(r.P10), add(r.P90)
+	if bt := forecast.Backtest(series, 3); bt.Months > 0 {
+		st.BacktestMAPE = &bt.MAPE
+	}
 }
 
 func (s Service) final(ctx context.Context, tx pgx.Tx, providers []string, start, asOf time.Time) (bool, error) {
