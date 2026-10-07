@@ -32,6 +32,9 @@ rules := {
 	"service.update": {"platform_admin", "team_lead", "engineer"},
 	"service.archive": {"platform_admin", "team_lead"},
 	"activity.read": read_roles,
+	"identity_provider.read": {"platform_admin", "security_lead"},
+	"identity_provider.create": {"platform_admin"},
+	"identity_provider.update": {"platform_admin"},
 }
 
 # A binding is usable only in the principal's own Tenant, unless the principal

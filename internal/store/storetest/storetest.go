@@ -42,7 +42,7 @@ func New(t *testing.T) *store.Store {
 	}
 	defer func() { _ = admin.Close(ctx) }()
 
-	// Roles are cluster-wide; create once, reuse across tests.
+	// Roles are cluster-wide; create once, reuse across tests. Mirrors db/roles.sql.
 	for _, stmt := range []string{
 		`DO $$ BEGIN
 		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '` + ownerRole + `') THEN
@@ -51,6 +51,10 @@ func New(t *testing.T) *store.Store {
 		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '` + appRole + `') THEN
 		     CREATE ROLE ` + appRole + ` LOGIN PASSWORD '` + password + `' NOSUPERUSER NOBYPASSRLS;
 		   END IF;
+		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keel_lookup') THEN
+		     CREATE ROLE keel_lookup NOLOGIN BYPASSRLS;
+		   END IF;
+		   GRANT keel_lookup TO ` + ownerRole + `;
 		 END $$`,
 	} {
 		if _, err := admin.Exec(ctx, stmt); err != nil && !isDuplicateRole(err) {

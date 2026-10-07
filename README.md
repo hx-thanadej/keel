@@ -25,6 +25,31 @@ Database tests create a throwaway database per test, migrate it as
 exercised for real. CI sets `KEEL_REQUIRE_DB=1`, which turns a skip into a
 failure.
 
+## Run
+
+```bash
+# once per Postgres cluster (as superuser), then create the database
+psql -f db/roles.sql && createdb -O keel_owner keel
+
+export KEEL_DATABASE_URL=postgres://keel_app:…@host/keel
+export KEEL_MIGRATE_URL=postgres://keel_owner:…@host/keel
+export KEEL_BASE_URL=https://keel.example.com
+export KEEL_COOKIE_KEY=$(openssl rand -base64 32)
+export HOME_OIDC_SECRET=…      # named by -client-secret-ref below
+
+# once: home Tenant + its identity provider + first admin group
+keel-api bootstrap -slug harmonyx -name HarmonyX \
+  -issuer https://login.example.com -client-id keel \
+  -client-secret-ref HOME_OIDC_SECRET -admin-group keel-admins -email-domain harmonyx.co
+
+keel-api   # sign in at $KEEL_BASE_URL/auth/login?tenant=harmonyx
+```
+
+Each Tenant signs in through its own OIDC provider
+(`/auth/login?tenant=<slug>`); IdP groups map to roles via
+`POST /v1/tenants/{tenant}/identity-providers/{idp}/group-roles`. CLIs and
+pipelines can send `Authorization: Bearer <id_token>` instead of a cookie.
+
 | Read | For |
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | Product scope, architecture, flows, roadmap, open questions |
