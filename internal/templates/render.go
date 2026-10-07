@@ -13,6 +13,7 @@ type Params struct {
 	ReusableWorkflow                           string // owner/repo/.github/workflows/x.yml@<sha>
 	MinReleaseAgeDays                          int
 	KeelURL, TenantID, ServiceID               string
+	AgeProd, AgeNonProd                        string // SOPS age recipients
 }
 
 // Files returns the governed files Keel writes into every new repository,
@@ -70,6 +71,15 @@ Each hard-to-reverse decision gets a numbered file; superseded, never edited.
 		".github/CODEOWNERS": []byte(codeowners),
 		"renovate.json":      append(renovate, '\n'),
 		"docs/decisions/0001-record-architecture-decisions.md": []byte(adr),
+	}
+	if p.AgeProd != "" && p.AgeNonProd != "" {
+		files[".sops.yaml"] = []byte(fmt.Sprintf(`# Managed by Keel: secrets next to manifests are encrypted per Environment class (docs/runbooks/workload-secrets.md).
+creation_rules:
+  - path_regex: envs/prod/.*\.enc\.yaml$
+    age: %s
+  - path_regex: envs/.*\.enc\.yaml$
+    age: %s
+`, p.AgeProd, p.AgeNonProd))
 	}
 	if p.ReusableWorkflow != "" {
 		files[".github/workflows/keel.yml"] = []byte(fmt.Sprintf(`# Managed by Keel: build, sign and attest through the pinned reusable workflow.
