@@ -7,6 +7,7 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/discovery"
 )
 
 // Info is build metadata exposed on /healthz.
@@ -19,6 +20,8 @@ type Deps struct {
 	Auth     auth.Authenticator
 	Sessions Mounter // sign-in routes under /auth
 	Catalog  *catalog.Service
+	// Discovery sources by provider name, e.g. "tencent".
+	Discovery map[string]discovery.Source
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -74,6 +77,7 @@ func NewRouter(info Info, deps Deps) *Router {
 	}
 	if deps.Catalog != nil && deps.Auth != nil {
 		mountCatalog(mux, deps.Catalog, deps.Auth)
+		mountDiscovery(mux, deps.Catalog, deps.Auth, deps.Discovery)
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).
 	r.h = http.NewCrossOriginProtection().Handler(mux.ServeMux)

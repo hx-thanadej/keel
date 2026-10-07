@@ -32,6 +32,7 @@ rules := {
 	"service.update": {"platform_admin", "team_lead", "engineer"},
 	"service.archive": {"platform_admin", "team_lead"},
 	"activity.read": read_roles,
+	"cloud_account.discover": {"platform_admin"},
 	"identity_provider.read": {"platform_admin", "security_lead"},
 	"identity_provider.create": {"platform_admin"},
 	"identity_provider.update": {"platform_admin"},
