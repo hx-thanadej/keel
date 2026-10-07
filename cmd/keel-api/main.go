@@ -114,6 +114,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/pipelineauth"
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/registry"
+	"github.com/hx-thanadej/keel/internal/reports"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/sbom"
 	"github.com/hx-thanadej/keel/internal/scans"
@@ -286,6 +287,18 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	deps.Promotion = &api.PromotionDeps{Authz: az, Service: promo}
 	deps.DORA = &api.DORADeps{Authz: az, Service: dora.Service{Store: st}}
 	deps.Scorecards = &api.ScorecardDeps{Authz: az, Service: scorecard.Service{Store: st}}
+	// Monthly Tenant reports (#152): hourly so a new month's reports appear
+	// early on the first; a run only generates reports that are missing.
+	rep := reports.Service{Store: st, Budgets: budget.Service{Store: st}, DORA: dora.Service{Store: st},
+		Savings: rightsize.Tracker{Service: rightsize.Service{Store: st}}}
+	deps.Reports = &api.ReportDeps{Authz: az, Service: rep}
+	go every(ctx, time.Hour, "monthly reports", func(ctx context.Context) error {
+		n, err := rep.Run(ctx)
+		if n > 0 {
+			slog.Info("monthly reports", "generated", n)
+		}
+		return err
+	})
 	go daily(ctx, "scorecard snapshot", func(ctx context.Context) error {
 		n, err := scorecard.Service{Store: st}.Snapshot(ctx)
 		if err == nil {

@@ -45,6 +45,7 @@ type Deps struct {
 	DORA       *DORADeps
 	Scorecards *ScorecardDeps
 	Evidence   *EvidenceDeps
+	Reports    *ReportDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -164,6 +165,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.DORA != nil {
 			mountDORA(mux, deps.Auth, *deps.DORA)
+		}
+		if deps.Reports != nil {
+			mountReports(mux, deps.Auth, *deps.Reports)
 		}
 		if deps.BreakGlass != nil {
 			mountBreakGlass(mux, deps.Auth, *deps.BreakGlass)
