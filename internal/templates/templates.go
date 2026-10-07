@@ -63,6 +63,7 @@ type Creator struct {
 	Org              string // GitHub organisation that owns new repositories
 	Templates        map[string]Template
 	ReusableWorkflow string
+	KeelURL          string
 }
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -118,9 +119,14 @@ func (c Creator) Def() flow.Def {
 			}
 			return map[string]any{"repository_id": fmt.Sprint(info.ID), "owner_id": fmt.Sprint(info.OwnerID), "branch": info.DefaultBranch}, nil
 		}},
+		{Name: "register", Do: func(ctx context.Context, r *flow.Run) (map[string]any, error) {
+			id, err := c.register(ctx, r)
+			return map[string]any{"service_id": id}, err
+		}},
 		{Name: "files", Do: func(ctx context.Context, r *flow.Run) (map[string]any, error) {
 			files := Files(Params{Tenant: r.Str("tenant_slug"), Project: r.Str("project_slug"), Team: r.Str("team_slug"), Service: r.Str("service_slug"),
-				Title: r.Str("title"), Org: c.Org, Template: r.Str("template"), TemplateVersion: r.Out("template", "version"), ReusableWorkflow: c.ReusableWorkflow})
+				Title: r.Str("title"), Org: c.Org, Template: r.Str("template"), TemplateVersion: r.Out("template", "version"), ReusableWorkflow: c.ReusableWorkflow,
+				KeelURL: c.KeelURL, TenantID: r.Tenant, ServiceID: r.Out("register", "service_id")})
 			written := 0
 			for _, path := range sortedKeys(files) {
 				changed, err := c.Git.PutFile(ctx, r.Out("repo", "full_name"), r.Out("ready", "branch"), path, "chore: Keel governed files ("+path+")", files[path])
@@ -146,10 +152,6 @@ func (c Creator) Def() flow.Def {
 				return nil, fmt.Errorf("team access: %w", err)
 			}
 			return nil, nil
-		}},
-		{Name: "register", Do: func(ctx context.Context, r *flow.Run) (map[string]any, error) {
-			id, err := c.register(ctx, r)
-			return map[string]any{"service_id": id}, err
 		}},
 	}}
 }

@@ -131,6 +131,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/projects/{project}/services":                   {"slug": "pwn", "template": "go"},
 		"POST /v1/tenants/{tenant}/services/{service}/scans":                      {"version": "2.1.0", "runs": []any{}},
 		"POST /v1/tenants/{tenant}/releases/{release}/attestations":               {},
+		"POST /v1/tenants/{tenant}/services/{service}/registry-token":             {},
 		"POST /v1/tenants/{tenant}/exceptions":                                    {"fingerprint": "victim", "reason": "pwned by attacker", "expires_at": "2099-01-01T00:00:00Z"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/approve":                {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/reject":                 {"note": "pwn"},

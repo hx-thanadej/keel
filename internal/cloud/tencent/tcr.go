@@ -3,6 +3,7 @@ package tencent
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
@@ -19,6 +20,25 @@ type TCRAPI interface {
 	CreateImmutableTagRulesWithContext(context.Context, *tcr.CreateImmutableTagRulesRequest) (*tcr.CreateImmutableTagRulesResponse, error)
 	DescribeTagRetentionRulesWithContext(context.Context, *tcr.DescribeTagRetentionRulesRequest) (*tcr.DescribeTagRetentionRulesResponse, error)
 	CreateTagRetentionRuleWithContext(context.Context, *tcr.CreateTagRetentionRuleRequest) (*tcr.CreateTagRetentionRuleResponse, error)
+	CreateInstanceTokenWithContext(context.Context, *tcr.CreateInstanceTokenRequest) (*tcr.CreateInstanceTokenResponse, error)
+}
+
+// TempToken implements registry.Broker: a one-hour TCR login (never longterm).
+func (r Registry) TempToken(ctx context.Context) (string, string, time.Time, error) {
+	req := tcr.NewCreateInstanceTokenRequest()
+	req.RegistryId, req.TokenType = &r.RegistryID, common.StringPtr("temp")
+	res, err := r.API.CreateInstanceTokenWithContext(ctx, req)
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("CreateInstanceToken: %w", err)
+	}
+	if res.Response == nil || res.Response.Username == nil || res.Response.Token == nil {
+		return "", "", time.Time{}, fmt.Errorf("CreateInstanceToken: empty response")
+	}
+	exp := time.Now().Add(time.Hour)
+	if res.Response.ExpTime != nil {
+		exp = time.UnixMilli(*res.Response.ExpTime)
+	}
+	return *res.Response.Username, *res.Response.Token, exp, nil
 }
 
 // NewTCR builds a TCR client.
@@ -36,7 +56,10 @@ type Registry struct {
 	RegistryID string
 }
 
-var _ registry.Registry = Registry{}
+var (
+	_ registry.Registry = Registry{}
+	_ registry.Broker   = Registry{}
+)
 
 // EnsureNamespace implements registry.Registry.
 func (r Registry) EnsureNamespace(ctx context.Context, name string) (int64, bool, error) {

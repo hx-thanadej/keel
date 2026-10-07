@@ -30,6 +30,55 @@ type Registry interface {
 	EnsureRetention(ctx context.Context, name string, id int64, keep int) (bool, error)
 }
 
+// Credential is a short-lived registry login.
+type Credential struct {
+	Registry  string    `json:"registry"`
+	Namespace string    `json:"namespace"`
+	Username  string    `json:"username"`
+	Password  string    `json:"password"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Broker issues short-lived push credentials (#104): the pipeline proves its
+// identity to Keel with OIDC and never holds a stored registry secret.
+type Broker interface {
+	TempToken(ctx context.Context) (username, password string, expires time.Time, err error)
+}
+
+// IssueToken returns a push credential for a Service's pipeline, scoped by
+// policy to the Project's namespace: Releases naming images elsewhere are
+// rejected (promotion.CreateRelease).
+func IssueToken(ctx context.Context, st *store.Store, b Broker, domain, tenant, service string, by activity.Actor) (Credential, error) {
+	var c Credential
+	err := st.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT p.registry_namespace FROM services s JOIN projects p ON p.id = s.project_id WHERE s.id = $1`, service).Scan(&c.Namespace)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	})
+	if err != nil {
+		return c, err
+	}
+	if c.Namespace == "" {
+		return c, fmt.Errorf("%w: the Project has no registry namespace yet (vend an Environment first)", ErrNoNamespace)
+	}
+	if c.Username, c.Password, c.ExpiresAt, err = b.TempToken(ctx); err != nil {
+		return Credential{}, err
+	}
+	c.Registry = domain
+	return c, st.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/registry", Type: "keel.registry.token_issued", Subject: "service/" + service,
+			Operation: "IssueRegistryToken", Kind: activity.Create, Actor: by, Outcome: activity.Success,
+			Resources:    []activity.Resource{{Type: "service", UID: service}},
+			StatusDetail: fmt.Sprintf("push token for %s/%s until %s", domain, c.Namespace, c.ExpiresAt.UTC().Format(time.RFC3339))})
+		return err
+	})
+}
+
+// ErrNoNamespace means the Project's namespace does not exist yet.
+var ErrNoNamespace = errors.New("no registry namespace")
+
 // MaxNameLen is TCR's namespace name limit.
 const MaxNameLen = 30
 

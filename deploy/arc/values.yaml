@@ -1,0 +1,49 @@
+# GitHub Actions Runner Controller scale set for Keel builds (#114).
+# helm install keel-ephemeral oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#   --version 0.15.0 -n arc-runners -f values.yaml
+#
+# Every runner pod takes exactly one job and is deleted afterwards (ARC
+# runners are ephemeral by design). Egress goes only through the allowlist
+# proxy (egress-proxy.yaml); there is no Docker socket: images are built with
+# BuildKit in rootless mode inside the job.
+githubConfigUrl: https://github.com/acme
+githubConfigSecret: arc-github-app # GitHub App credentials, created out of band
+runnerScaleSetName: keel-ephemeral
+minRunners: 0
+maxRunners: 20
+containerMode:
+  type: kubernetes
+  kubernetesModeWorkVolumeClaim:
+    accessModes: ["ReadWriteOnce"]
+    storageClassName: cbs-ssd
+    resources:
+      requests:
+        storage: 20Gi
+template:
+  metadata:
+    labels:
+      keel.dev/runner: ephemeral
+  spec:
+    automountServiceAccountToken: false
+    securityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:2.338.0@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: HTTPS_PROXY
+            value: http://egress-proxy.arc-runners.svc:3128
+          - name: HTTP_PROXY
+            value: http://egress-proxy.arc-runners.svc:3128
+          - name: NO_PROXY
+            value: kubernetes.default.svc,.svc,.cluster.local
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: "1", memory: 2Gi}
+          limits: {cpu: "4", memory: 8Gi}

@@ -300,7 +300,14 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	deps.Flows = &api.FlowDeps{Authz: az, Engine: engine}
 	deps.Exception = &api.ExceptionDeps{Authz: az, Service: excs}
 	deps.Scans = &api.ScanDeps{Authz: az, Service: scans.Service{Store: st}}
-	deps.Registry = &api.RegistryDeps{Authz: az, Store: st}
+	deps.Registry = &api.RegistryDeps{Authz: az, Store: st, Domain: os.Getenv("KEEL_TCR_DOMAIN")}
+	if id := os.Getenv("KEEL_TCR_REGISTRY_ID"); id != "" {
+		if tcrAPI, err := tencent.NewTCR(envOr("KEEL_TENCENT_REGION", "ap-bangkok"), tencent.Credentials()); err != nil {
+			slog.Error("tcr client", "err", err)
+		} else {
+			deps.Registry.Broker = tencent.Registry{API: tcrAPI, RegistryID: id}
+		}
+	}
 	if creator != nil {
 		deps.Templates = &api.TemplateDeps{Authz: az, Engine: engine, Creator: *creator}
 	}
@@ -398,7 +405,7 @@ func templateCreator(st *store.Store) (*templates.Creator, error) {
 		return nil, nil
 	}
 	c := &templates.Creator{Store: st, Git: templates.GitHub{Client: ghapi.Client{Token: tok}}, Org: os.Getenv("KEEL_GITHUB_OWNER"),
-		ReusableWorkflow: os.Getenv("KEEL_REUSABLE_WORKFLOW"), Templates: map[string]templates.Template{}}
+		ReusableWorkflow: os.Getenv("KEEL_REUSABLE_WORKFLOW"), KeelURL: os.Getenv("KEEL_BASE_URL"), Templates: map[string]templates.Template{}}
 	for _, kv := range strings.Split(raw, ",") {
 		name, rest, ok := strings.Cut(strings.TrimSpace(kv), "=")
 		repo, ref, _ := strings.Cut(rest, "@")

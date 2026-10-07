@@ -152,6 +152,17 @@ func (s *Service) CreateRelease(ctx context.Context, tenant, service, version st
 	}
 	var r Release
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		// Images must come from the Project's own registry namespace, so a
+		// push token used elsewhere cannot produce a promotable Release.
+		var ns string
+		if err := tx.QueryRow(ctx, `SELECT p.registry_namespace FROM services s JOIN projects p ON p.id = s.project_id WHERE s.id = $1`, service).Scan(&ns); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		for _, img := range images {
+			if ns != "" && !strings.Contains(img.Name, "/"+ns+"/") {
+				return fmt.Errorf("%w: image %q is outside the Project's registry namespace %s", ErrInvalid, img.Name, ns)
+			}
+		}
 		raw, _ := json.Marshal(images)
 		err := tx.QueryRow(ctx, `INSERT INTO releases (tenant_id, service_id, version, images, commit_sha, created_by)
 			SELECT $1, id, $3, $4, $5, $6 FROM services WHERE id = $2 AND archived_at IS NULL

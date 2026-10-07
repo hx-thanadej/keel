@@ -45,6 +45,22 @@ jobs:
         with:
           version: v2.14.0 # keep in sync with GOLANGCI_LINT in Makefile
 
+  workflows:
+    # Lint every workflow Keel ships or runs: syntax and expressions
+    # (actionlint), injection, dangerous triggers, excessive permissions and
+    # unpinned actions (zizmor). Findings fail the build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/*.yml deploy/github/workflows/*.yml
+      - run: pipx run zizmor==1.30.1 --offline --min-severity low .github/workflows/*.yml deploy/github/workflows/*.yml
+
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 10
