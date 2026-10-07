@@ -136,6 +136,14 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 		writeJSON(w, http.StatusCreated, out)
 		return nil
 	}))
+	mux.Handle("GET /v1/tenants/{tenant}/services", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		out, err := c.ListServices(r.Context(), p, r.PathValue("tenant"))
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
 	mux.Handle("GET /v1/tenants/{tenant}/projects", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		out, err := c.ListProjects(r.Context(), p, r.PathValue("tenant"))
 		if err != nil {

@@ -97,6 +97,27 @@ func mountPromotions(mux Mux, a auth.Authenticator, d PromotionDeps) {
 		writeJSON(w, http.StatusOK, out)
 		return nil
 	}))
+	mux.Handle("POST /v1/tenants/{tenant}/releases/{release}/preview", authed(a, []string{"tenant", "release"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant := r.PathValue("tenant")
+		if err := d.allow(r, p, "promotion.read", "promotion", tenant); err != nil {
+			return err
+		}
+		var in struct {
+			EnvironmentID string `json:"environment_id"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		if !catalog.ValidID(in.EnvironmentID) {
+			return errors.Join(catalog.ErrInvalid, errors.New("environment_id must be a uuid"))
+		}
+		out, err := d.Service.Preview(r.Context(), tenant, r.PathValue("release"), in.EnvironmentID)
+		if err != nil {
+			return promotionErr(err)
+		}
+		writeJSON(w, http.StatusOK, out)
+		return nil
+	}))
 	mux.Handle("GET /v1/tenants/{tenant}/promotions", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tenant := r.PathValue("tenant")
 		if err := d.allow(r, p, "promotion.read", "promotion", tenant); err != nil {

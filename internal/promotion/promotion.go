@@ -276,6 +276,21 @@ func scanPromotion(r pgx.Row) (Promotion, error) {
 	return p, err
 }
 
+// Preview evaluates the policy for a Release and Environment without
+// recording anything, so people see the decision before asking.
+func (s *Service) Preview(ctx context.Context, tenant, releaseID, env string) (Decision, error) {
+	var d Decision
+	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		f, err := s.facts(ctx, tx, releaseID, env)
+		if err != nil {
+			return err
+		}
+		d, err = s.decide(ctx, f, false)
+		return err
+	})
+	return d, err
+}
+
 // Promote asks to move a Release to an Environment. A denied request is
 // recorded with its reasons and opens nothing. Asking again while one is
 // active returns it.

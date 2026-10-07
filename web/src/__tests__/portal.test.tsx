@@ -208,6 +208,34 @@ describe('finops screens', () => {
     expect(line.textContent).not.toMatch(/start:/)
   })
 
+  it('delivery tab previews the policy before promoting, approves, and retries runs', async () => {
+    const d = 'sha256:' + 'a'.repeat(64)
+    const calls = mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/services`]: { items: [{ id: 's1', project_id: 'p1', slug: 'crm-api', name: 'CRM API', repository: '', template: 'go' }] },
+      [`/v1/tenants/${tat}/templates`]: { items: [{ name: 'go-service', repo: 'acme/tmpl', ref: 'abc', description: '' }] },
+      [`/v1/tenants/${tat}/releases`]: { items: [{ id: 'r1', service_id: 's1', version: '1.5.0', images: [{ name: 'ccr/tat/crm-api', digest: d }], created_at: '2026-10-01T00:00:00Z' }] },
+      [`/v1/tenants/${tat}/promotions`]: { items: [{ id: 'pr1', release_id: 'r1', environment_id: 'e1', state: 'pending_approval', decision: { allow: true, reasons: [], needs_approval: true, policy: 'keel-promotion@1' }, pr_url: null, error: null, requested_by: 'user:eng@harmonyx.co', requested_at: '2026-10-02T00:00:00Z' }] },
+      [`/v1/tenants/${tat}/flows`]: { items: [{ id: 'f1', kind: 'vend_environment_tencent', subject: 'environment/e1/tencent', state: 'failed', error: 'account: quota', created_by: 'u', created_at: '2026-10-01T00:00:00Z' }] },
+      [`/v1/tenants/${tat}/flows/f1`]: { id: 'f1', kind: 'vend_environment_tencent', subject: 'environment/e1/tencent', state: 'failed', error: 'account: quota', created_by: 'u', created_at: '2026-10-01T00:00:00Z', steps: [{ seq: 0, name: 'unit', state: 'succeeded', attempts: 1, error: null }, { seq: 1, name: 'account', state: 'failed', attempts: 8, error: 'quota' }] },
+      [`/v1/tenants/${tat}/flows/f1/retry`]: { id: 'f1', state: 'running' },
+      [`/v1/tenants/${tat}/releases/r1/preview`]: { allow: false, reasons: ['release is not deployed to dev yet'], needs_approval: false, policy: 'keel-promotion@1' },
+      [`/v1/tenants/${tat}/promotions/pr1/approve`]: { id: 'pr1', state: 'pr_open' },
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Delivery' }))
+    expect(await screen.findByText('CRM API 1.5.0')).toBeTruthy()
+    await userEvent.selectOptions(screen.getByLabelText('Promote to'), 'e1')
+    expect(await screen.findByText(/Blocked by keel-promotion@1: release is not deployed to dev yet/)).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Promote' }) as HTMLButtonElement).disabled).toBe(true)
+    await userEvent.click(screen.getByRole('button', { name: 'Approve promotion' }))
+    expect(calls).toContain(`/v1/tenants/${tat}/promotions/pr1/approve`)
+    expect(await screen.findByText(/unit ✓ account ✕/)).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry from the failed step' }))
+    expect(calls).toContain(`/v1/tenants/${tat}/flows/f1/retry`)
+    expect(screen.getByRole('button', { name: 'Create repository and service' })).toBeTruthy()
+  })
+
   it('findings tab lists anomalies with severity label and contributors', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null }] } })
     render(<App />)
