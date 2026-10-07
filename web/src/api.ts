@@ -138,6 +138,8 @@ export const finops = {
   dailyCsvUrl: (t: string, from: string, to: string) => `/v1/tenants/${t}/costs/daily?from=${from}&to=${to}&format=csv`,
   findings: (t: string) => list<Finding>(`/v1/tenants/${t}/findings`),
   resolve: (t: string, id: string, resolution: string) => send<Finding>(`/v1/tenants/${t}/findings/${id}/resolve`, 'POST', { resolution }),
+  recommendations: (t: string) => list<{ id: string; finding_id: string; pr_url: string | null; state: string }>(`/v1/tenants/${t}/recommendations`),
+  applyRecommendation: (t: string, id: string) => send<{ pr_url: string }>(`/v1/tenants/${t}/recommendations/${id}/apply`, 'POST', {}),
 }
 
 /** Money for display: grouped, two decimals, currency code after. */
