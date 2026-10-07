@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -193,6 +194,18 @@ func (s *Service) RenameProject(ctx context.Context, p auth.Principal, tenantID,
 		`UPDATE projects SET name = $2 WHERE id = $1 RETURNING `+projectCols, name)
 }
 
+// SetConfigRepo names the Project's GitOps config repository ("owner/name"),
+// where Promotions open pull requests (#93).
+func (s *Service) SetConfigRepo(ctx context.Context, p auth.Principal, tenantID, id, repo, why string) (Project, error) {
+	if repo != "" && !configRepoRe.MatchString(repo) {
+		return Project{}, invalid("config_repo must be owner/name")
+	}
+	return s.mutateProject(ctx, p, tenantID, id, "project.update", "keel.project.config_repo_changed", "SetConfigRepo", activity.Update, fmt.Sprintf("%s (config_repo=%s)", why, repo),
+		`UPDATE projects SET config_repo = $2 WHERE id = $1 RETURNING `+projectCols, repo)
+}
+
+var configRepoRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
 // ArchiveProject hides a Project from lists. Nothing is deleted.
 func (s *Service) ArchiveProject(ctx context.Context, p auth.Principal, tenantID, id, why string) (Project, error) {
 	return s.mutateProject(ctx, p, tenantID, id, "project.archive", "keel.project.archived", "ArchiveProject", activity.Update, why,
@@ -290,6 +303,45 @@ func (s *Service) SetWasteCleanup(ctx context.Context, p auth.Principal, tenantI
 			return id, err
 		})
 	return e, mapErr(err)
+}
+
+// SetPromotionPath places an Environment in its Project's promotion order
+// (nil removes it) and says whether promotions into it need a Tenant
+// Approver. Only a Platform Admin may change the approval requirement.
+func (s *Service) SetPromotionPath(ctx context.Context, p auth.Principal, tenantID, projectID, id string, order *int, requiresApproval *bool, why string) (Environment, error) {
+	team, err := s.projectTeam(ctx, tenantID, projectID)
+	if err != nil {
+		return Environment{}, err
+	}
+	action := "environment.update"
+	if requiresApproval != nil {
+		action = "environment.set_approval"
+	}
+	var e Environment
+	err = s.do(ctx, p, write{action: action, res: authz.Resource{Type: "environment", ID: id, TenantID: tenantID, ProjectID: projectID, TeamID: team},
+		actType: "keel.environment.promotion_path_changed", operation: "SetPromotionPath", kind: activity.Update, why: fmt.Sprintf("%s (order=%v approval=%v)", why, derefInt(order), derefBool(requiresApproval))},
+		func(tx pgx.Tx) (string, error) {
+			err := tx.QueryRow(ctx, `UPDATE environments SET promotion_order = CASE WHEN $3 THEN $4 ELSE promotion_order END,
+					requires_approval = coalesce($5, requires_approval)
+				WHERE id = $1 AND project_id = $2 RETURNING `+envCols, id, projectID, order != nil, order, requiresApproval).
+				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.ArchivedAt)
+			return id, err
+		})
+	return e, mapErr(err)
+}
+
+func derefInt(p *int) any {
+	if p == nil {
+		return "unchanged"
+	}
+	return *p
+}
+
+func derefBool(p *bool) any {
+	if p == nil {
+		return "unchanged"
+	}
+	return *p
 }
 
 // ---------- Cloud Accounts ----------

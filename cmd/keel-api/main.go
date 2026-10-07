@@ -94,6 +94,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/landingzone"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
+	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/utilisation"
@@ -185,6 +186,26 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
 		deps.Rightsize.Applier = &apply.Applier{Recs: rightsize.Service{Store: st}, Git: apply.GitHub{Token: tok}}
 	}
+	promoSvc := promotion.Service{Store: st, PathTemplate: os.Getenv("KEEL_PROMOTION_PATH"), AppTemplate: os.Getenv("KEEL_ARGOCD_APP")}
+	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
+		promoSvc.Git = apply.GitHub{Token: tok}
+	}
+	if u := os.Getenv("KEEL_ARGOCD_URL"); u != "" {
+		promoSvc.Argo = promotion.ArgoCD{BaseURL: u, Token: os.Getenv("KEEL_ARGOCD_TOKEN")}
+	}
+	promo, err := promotion.New(promoSvc)
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	deps.Promotion = &api.PromotionDeps{Authz: az, Service: promo}
+	go every(ctx, 2*time.Minute, "promotion sync", func(ctx context.Context) error {
+		res, err := promo.Sync(ctx)
+		if err == nil && res != (promotion.SyncResult{}) {
+			slog.Info("promotion sync", "merged", res.Merged, "closed", res.Closed, "deployed", res.Deployed)
+		}
+		return err
+	})
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
 	if err := startUtilisation(ctx, st); err != nil {
