@@ -76,6 +76,7 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
             {cur && rec && (
               <span className="meta">
                 {Object.keys(rec)
+                  .filter((k) => k in cur)
                   .map((k) => `${k}: ${cur[k] ?? '—'} → ${rec[k]}`)
                   .join(' · ')}
                 {ev?.lookback_days !== undefined && ` · based on ${String(ev.lookback_days)} days`}

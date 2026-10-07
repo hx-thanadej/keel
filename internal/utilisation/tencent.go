@@ -67,17 +67,23 @@ func (c TencentCVM) Day(ctx context.Context, instances []string, day time.Time) 
 						id = *d.Value
 					}
 				}
-				var xs []float64
-				for _, v := range dp.Values {
-					if v != nil {
-						xs = append(xs, *v)
+				var xs, ts []float64
+				for i, v := range dp.Values {
+					if v == nil {
+						continue
 					}
+					at := float64(day.UTC().Unix() + int64(i)*60) // positional if Timestamps is absent
+					if i < len(dp.Timestamps) && dp.Timestamps[i] != nil {
+						at = *dp.Timestamps[i]
+					}
+					xs, ts = append(xs, *v), append(ts, at)
 				}
 				if id == "" || len(xs) == 0 {
 					continue
 				}
 				s := Summarize(xs)
 				s.Provider, s.ResourceType, s.ResourceID, s.Metric, s.Day = "tencent", "vm", id, metric.ours, day
+				s.Hourly = HourlyMax(day, ts, xs)
 				out = append(out, s)
 			}
 		}

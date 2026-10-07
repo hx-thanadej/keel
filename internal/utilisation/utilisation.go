@@ -29,6 +29,9 @@ type Summary struct {
 	Samples      int       `json:"samples"`
 	Request      *float64  `json:"request,omitempty"`  // k8s: current request
 	Capacity     *float64  `json:"capacity,omitempty"` // vm: provisioned capacity
+	// Hourly is the maximum in each UTC hour of Day (24 entries; -1 where
+	// there was no sample), the input to off-hours scheduling (#73).
+	Hourly []float64 `json:"hourly,omitempty"`
 	// Kubernetes identity (for allocation and pull requests).
 	Cluster   string `json:"cluster,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
@@ -48,6 +51,39 @@ func Summarize(xs []float64) Summary {
 		return s[max(0, min(i, len(s)-1))]
 	}
 	return Summary{P50: q(0.50), P95: q(0.95), P99: q(0.99), Max: s[len(s)-1], Samples: len(s)}
+}
+
+// HourlyMax buckets samples taken at unix-second timestamps into the 24
+// UTC hours of day, keeping each hour's maximum.
+func HourlyMax(day time.Time, unix, xs []float64) []float64 {
+	out := make([]float64, 24)
+	for i := range out {
+		out[i] = -1
+	}
+	start := day.UTC().Unix()
+	for i, x := range xs {
+		if i >= len(unix) || x != x {
+			continue
+		}
+		h := int((int64(unix[i]) - start) / 3600)
+		if h >= 0 && h < 24 && x > out[h] {
+			out[h] = x
+		}
+	}
+	return out
+}
+
+// mergeHourly keeps the per-hour maximum of two hourly series.
+func mergeHourly(a, b []float64) []float64 {
+	if a == nil {
+		return b
+	}
+	for i := range a {
+		if i < len(b) && b[i] > a[i] {
+			a[i] = b[i]
+		}
+	}
+	return a
 }
 
 var (
@@ -78,12 +114,12 @@ func (s Store) Save(ctx context.Context, tenant string, project, env *string, su
 		b := &pgx.Batch{}
 		for _, x := range sums {
 			labels, _ := json.Marshal(map[string]string{"cluster": x.Cluster, "namespace": x.Namespace, "workload": x.Workload, "container": x.Container})
-			b.Queue(`INSERT INTO utilisation_daily (tenant_id, provider, resource_id, resource_type, metric, day, p50, p95, p99, max, samples, request, capacity, project_id, environment_id, labels)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			b.Queue(`INSERT INTO utilisation_daily (tenant_id, provider, resource_id, resource_type, metric, day, p50, p95, p99, max, samples, request, capacity, project_id, environment_id, labels, hourly_max)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 				ON CONFLICT (tenant_id, provider, resource_id, metric, day) DO UPDATE SET p50 = excluded.p50, p95 = excluded.p95, p99 = excluded.p99,
 				    max = excluded.max, samples = excluded.samples, request = excluded.request, capacity = excluded.capacity,
-				    project_id = excluded.project_id, environment_id = excluded.environment_id, labels = excluded.labels, collected_at = now()`,
-				tenant, x.Provider, x.ResourceID, x.ResourceType, x.Metric, x.Day, x.P50, x.P95, x.P99, x.Max, x.Samples, x.Request, x.Capacity, project, env, labels)
+				    project_id = excluded.project_id, environment_id = excluded.environment_id, labels = excluded.labels, hourly_max = excluded.hourly_max, collected_at = now()`,
+				tenant, x.Provider, x.ResourceID, x.ResourceType, x.Metric, x.Day, x.P50, x.P95, x.P99, x.Max, x.Samples, x.Request, x.Capacity, project, env, labels, x.Hourly)
 		}
 		return tx.SendBatch(ctx, b).Close()
 	})

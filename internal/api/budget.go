@@ -112,13 +112,27 @@ func mountBudgets(mux Mux, a auth.Authenticator, d BudgetDeps) {
 	tb := []string{"tenant", "budget"}
 
 	mux.Handle("PATCH /v1/tenants/{tenant}", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-		var in struct{ Currency, Why string }
+		var in struct {
+			Currency, Why string
+			TimeZone      string `json:"time_zone"`
+		}
 		if err := decode(r, &in); err != nil {
 			return err
 		}
-		out, err := d.Catalog.SetTenantCurrency(r.Context(), p, r.PathValue("tenant"), in.Currency, in.Why)
-		if err != nil {
-			return err
+		if in.Currency == "" && in.TimeZone == "" {
+			return errors.Join(catalog.ErrInvalid, errors.New("set currency or time_zone"))
+		}
+		var out catalog.Tenant
+		var err error
+		if in.Currency != "" {
+			if out, err = d.Catalog.SetTenantCurrency(r.Context(), p, r.PathValue("tenant"), in.Currency, in.Why); err != nil {
+				return err
+			}
+		}
+		if in.TimeZone != "" {
+			if out, err = d.Catalog.SetTenantTimeZone(r.Context(), p, r.PathValue("tenant"), in.TimeZone, in.Why); err != nil {
+				return err
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 		return nil

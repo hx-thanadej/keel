@@ -377,6 +377,8 @@ func actionVerb(a string) string {
 		return "Right-size requests of"
 	case "resize", "change_family":
 		return "Resize"
+	case "schedule":
+		return "Schedule off-hours stop for"
 	case "delete":
 		return "Delete"
 	case "stop", "schedule_offhours":

@@ -114,6 +114,10 @@ func TestBudgetsEndToEnd(t *testing.T) {
 	if len(items(t, body)) != 0 {
 		t.Errorf("archived budget still listed")
 	}
+	st, body = inTAT.do("PATCH", "/v1/tenants/"+tat, map[string]any{"time_zone": "Mars/Olympus"})
+	mustStatus(t, st, 400, body)
+	st, body = inTAT.do("PATCH", "/v1/tenants/"+tat, map[string]any{"time_zone": "Asia/Tokyo", "why": "client team in Tokyo"})
+	mustStatus(t, st, 200, body)
 	st, body = viewer.do("PATCH", "/v1/tenants/"+tat, map[string]any{"currency": "USD"})
 	mustStatus(t, st, 403, body)
 }

@@ -64,15 +64,21 @@ func (p Prometheus) rangeQuery(ctx context.Context, q string, day time.Time) ([]
 }
 
 func values(s series) []float64 {
-	out := make([]float64, 0, len(s.Values))
+	out, _ := timedValues(s)
+	return out
+}
+
+// timedValues returns samples with their unix-second timestamps.
+func timedValues(s series) (xs, ts []float64) {
 	for _, v := range s.Values {
-		if str, ok := v[1].(string); ok {
+		t, okT := v[0].(float64)
+		if str, ok := v[1].(string); ok && okT {
 			if f, err := strconv.ParseFloat(str, 64); err == nil && !isNaN(f) {
-				out = append(out, f)
+				xs, ts = append(xs, f), append(ts, t)
 			}
 		}
 	}
-	return out
+	return xs, ts
 }
 
 func isNaN(f float64) bool { return f != f }
@@ -81,6 +87,7 @@ func isNaN(f float64) bool { return f != f }
 func (p Prometheus) Day(ctx context.Context, day time.Time) ([]Summary, error) {
 	type key struct{ ns, wl, ctr string }
 	samples := map[string]map[key][]float64{"cpu_cores": {}, "memory_bytes": {}}
+	hourly := map[string]map[key][]float64{"cpu_cores": {}, "memory_bytes": {}}
 	for metric, q := range map[string]string{"cpu_cores": cpuQuery, "memory_bytes": memQuery} {
 		ss, err := p.rangeQuery(ctx, q, day)
 		if err != nil {
@@ -88,7 +95,9 @@ func (p Prometheus) Day(ctx context.Context, day time.Time) ([]Summary, error) {
 		}
 		for _, s := range ss {
 			k := key{s.Metric["namespace"], WorkloadFromPod(s.Metric["pod"]), s.Metric["container"]}
-			samples[metric][k] = append(samples[metric][k], values(s)...)
+			xs, ts := timedValues(s)
+			samples[metric][k] = append(samples[metric][k], xs...)
+			hourly[metric][k] = mergeHourly(hourly[metric][k], HourlyMax(day, ts, xs))
 		}
 	}
 	requests := map[string]map[key]float64{"cpu_cores": {}, "memory_bytes": {}}
@@ -112,6 +121,7 @@ func (p Prometheus) Day(ctx context.Context, day time.Time) ([]Summary, error) {
 			s.Provider, s.ResourceType, s.Metric, s.Day = "k8s", "k8s_container", metric, day
 			s.Cluster, s.Namespace, s.Workload, s.Container = p.Cluster, k.ns, k.wl, k.ctr
 			s.ResourceID = strings.Join([]string{p.Cluster, k.ns, k.wl, k.ctr}, "/")
+			s.Hourly = hourly[metric][k]
 			if r, ok := requests[metric][k]; ok {
 				r := r
 				s.Request = &r

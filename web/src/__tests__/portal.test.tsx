@@ -197,6 +197,17 @@ describe('finops screens', () => {
     expect(calls).toContain(`/v1/tenants/${tat}/savings?project=p1`)
   })
 
+  it('findings tab shows an off-hours schedule without its machine fields', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f3', kind: 'rightsizing', severity: 'high', status: 'open',
+      title: 'Schedule off-hours stop for ins-dev: save about 1770.00 THB/month',
+      detail: { current: { schedule: 'always on' }, recommended: { schedule: 'Mon–Fri 08:00–18:00 Asia/Bangkok, off at weekends', start: '08:00', stop: '18:00' }, evidence: { lookback_days: 14 } },
+      first_seen_at: '2026-09-30T03:00:00Z', resolution: null }] } })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Findings' }))
+    const line = await screen.findByText(/schedule: always on → Mon–Fri 08:00–18:00 Asia\/Bangkok, off at weekends/)
+    expect(line.textContent).not.toMatch(/start:/)
+  })
+
   it('findings tab lists anomalies with severity label and contributors', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null }] } })
     render(<App />)
