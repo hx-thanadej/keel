@@ -18,6 +18,11 @@
 //	KEEL_ARCHIVE_BUCKET   S3-compatible bucket for the WORM Activity Log archive (with KEEL_DIGEST_KEY)
 //	KEEL_ARCHIVE_ENDPOINT e.g. cos.ap-bangkok.myqcloud.com
 //	KEEL_ARCHIVE_REGION   e.g. ap-bangkok; credentials are Tencent STS (keyless)
+//	KEEL_TENCENT_BILL_BUCKET   COS bucket where the payer's Bill Storage delivers FOCUS bills
+//	KEEL_TENCENT_BILL_PREFIX   object prefix of the FOCUS bill files
+//	KEEL_TENCENT_PAYER_UIN     payer account id (FOCUS BillingAccountId)
+//	KEEL_TENCENT_BILL_MODE     per-day (default) | cumulative; confirm on first delivery
+//	KEEL_TENCENT_REGION        region for billing API and COS (default ap-bangkok)
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
@@ -149,6 +154,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if owner := os.Getenv("KEEL_GITHUB_OWNER"); owner != "" {
 		syncer := &catalogsync.Syncer{Store: st, Source: &catalogsync.GitHub{Owner: owner, Org: os.Getenv("KEEL_GITHUB_ORG") == "1", Token: os.Getenv("KEEL_GITHUB_TOKEN")}}
 		go syncer.Every(ctx, 10*time.Minute)
+	}
+	if err := startBillSync(ctx, st); err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
 	}
 	if err := startSealer(ctx, st); err != nil {
 		pool.Close()
@@ -384,5 +393,58 @@ func printReport(r integrity.Report) error {
 		return errors.New("activity log failed verification")
 	}
 	fmt.Println("OK")
+	return nil
+}
+
+// startBillSync loads the Tencent payer's FOCUS bills hourly and reconciles
+// them against the billing API (#31–#33).
+func startBillSync(ctx context.Context, st *store.Store) error {
+	bucket := os.Getenv("KEEL_TENCENT_BILL_BUCKET")
+	if bucket == "" {
+		return nil
+	}
+	payer := os.Getenv("KEEL_TENCENT_PAYER_UIN")
+	if payer == "" {
+		return errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_BUCKET")
+	}
+	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
+	creds := tencent.Credentials()
+	objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
+		Creds: archive.Refreshing(tencent.STS{Creds: creds}, 10*time.Minute)})
+	if err != nil {
+		return err
+	}
+	mode := cost.PerDayFiles
+	switch os.Getenv("KEEL_TENCENT_BILL_MODE") {
+	case "", "per-day":
+	case "cumulative":
+		mode = cost.CumulativeFiles
+	default:
+		return errors.New("KEEL_TENCENT_BILL_MODE must be per-day or cumulative")
+	}
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: st}, Objects: objs, Provider: "tencent", BillingAccountID: payer,
+		Prefix: os.Getenv("KEEL_TENCENT_BILL_PREFIX"), Mode: mode, Invoices: tencent.Invoices{Region: region, Creds: creds}}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			rep, err := bs.Run(ctx)
+			if err != nil {
+				slog.Error("ALERT tencent bill sync failed", "err", err)
+			} else {
+				slog.Info("tencent bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads), "skipped", len(rep.Skipped))
+				for _, l := range rep.Loads {
+					if l.Reconcile == "mismatch" {
+						slog.Error("ALERT tencent bill does not reconcile with invoice", "period", l.Period.Format("2006-01"), "load", l.LoadID)
+					}
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
 	return nil
 }

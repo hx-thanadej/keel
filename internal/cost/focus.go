@@ -30,6 +30,8 @@ type Line struct {
 	PricingQuantity, PricingUnit                   string
 	ConsumedQuantity, ConsumedUnit                 string
 	ListCost, BilledCost, EffectiveCost            string
+	EffectiveCostMethod                            string // source | billed | amortized | amortization
+	InvoiceID                                      string
 	ContractedCost, BillingCurrency                string
 	CommitmentDiscountID, CommitmentDiscountType   string
 	CommitmentDiscountStatus                       string
@@ -93,8 +95,8 @@ func ParseFOCUS(raw []byte) ([]Line, error) {
 			ListCost: get("ListCost"), BilledCost: get("BilledCost"), EffectiveCost: get("EffectiveCost"),
 			ContractedCost: get("ContractedCost"), BillingCurrency: get("BillingCurrency"),
 			CommitmentDiscountID: get("CommitmentDiscountId"), CommitmentDiscountType: get("CommitmentDiscountType"),
-			CommitmentDiscountStatus: get("CommitmentDiscountStatus"),
-			Tags:                     map[string]string{}, Vendor: map[string]string{},
+			CommitmentDiscountStatus: get("CommitmentDiscountStatus"), InvoiceID: get("InvoiceId"),
+			Tags: map[string]string{}, Vendor: map[string]string{},
 		}
 		for _, f := range []struct {
 			name string

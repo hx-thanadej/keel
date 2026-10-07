@@ -51,6 +51,7 @@ var actor = activity.Actor{Type: activity.ActorKeel, UID: "keel:cost-ingest"}
 // superseding earlier loads of the same period.
 func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 	period := time.Date(l.BillingPeriod.Year(), l.BillingPeriod.Month(), 1, 0, 0, 0, 0, time.UTC)
+	l.Lines = Normalize(l.Provider, l.Lines)
 	pool := in.Store.AppPool()
 	var home *string
 	if err := pool.QueryRow(ctx, `SELECT home_tenant_id()::text`).Scan(&home); err != nil || home == nil {
@@ -85,7 +86,7 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 	// Group lines by Tenant and total them.
 	byTenant := map[string][]int{}
 	total, unalloc := new(big.Rat), new(big.Rat)
-	res := LoadResult{Lines: len(l.Lines)}
+	res := LoadResult{Lines: len(l.Lines)} // includes derived amortization rows
 	currency := ""
 	for i, ln := range l.Lines {
 		amt, _ := new(big.Rat).SetString(ln.BilledCost)
@@ -154,15 +155,15 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 					allocation_method, billing_period, charge_period_start, charge_period_end, charge_category, charge_class, charge_frequency,
 					service_category, service_name, service_subcategory, sku_id, region_id, availability_zone, resource_id, resource_name, resource_type,
 					pricing_quantity, pricing_unit, consumed_quantity, consumed_unit, list_cost, billed_cost, effective_cost, contracted_cost, billing_currency,
-					commitment_discount_id, commitment_discount_type, commitment_discount_status, tags, vendor)
+					commitment_discount_id, commitment_discount_type, commitment_discount_status, tags, vendor, effective_cost_method)
 					VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
 					        nullif($25,'')::numeric,$26,nullif($27,'')::numeric,$28,nullif($29,'')::numeric,$30::numeric,nullif($31,'')::numeric,nullif($32,'')::numeric,$33,
-					        $34,$35,$36,$37,$38)`,
+					        $34,$35,$36,$37,$38,coalesce(nullif($39,''),'source'))`,
 					res.LoadID, tenant, l.Provider, l.BillingAccountID, ln.SubAccountID, o.account, o.project, o.env,
 					method, period, ln.ChargePeriodStart, ln.ChargePeriodEnd, ln.ChargeCategory, ln.ChargeClass, ln.ChargeFrequency,
 					ln.ServiceCategory, ln.ServiceName, ln.ServiceSubcat, ln.SkuID, ln.RegionID, ln.AvailabilityZone, ln.ResourceID, ln.ResourceName, ln.ResourceType,
 					ln.PricingQuantity, ln.PricingUnit, ln.ConsumedQuantity, ln.ConsumedUnit, ln.ListCost, ln.BilledCost, ln.EffectiveCost, ln.ContractedCost, ln.BillingCurrency,
-					ln.CommitmentDiscountID, ln.CommitmentDiscountType, ln.CommitmentDiscountStatus, tags, vendor)
+					ln.CommitmentDiscountID, ln.CommitmentDiscountType, ln.CommitmentDiscountStatus, tags, vendor, ln.EffectiveCostMethod)
 			}
 			return tx.SendBatch(ctx, b).Close()
 		})
