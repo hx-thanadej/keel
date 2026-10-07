@@ -158,6 +158,13 @@ func TestPromotionPathDevThenApprovedProd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The preview shows the same decision without recording it.
+	if d, err := s.Preview(ctx, w.tenant, rel.ID, w.prod); err != nil || d.Allow || d.Reasons[0] != "release is not deployed to dev yet" {
+		t.Fatalf("preview %+v %v", d, err)
+	}
+	if ps, _ := s.List(ctx, w.tenant, rel.ID); len(ps) != 0 {
+		t.Fatal("preview recorded a promotion")
+	}
 	// Straight to prod: denied, nothing opened.
 	p, err := s.Promote(ctx, w.tenant, rel.ID, w.prod, eng)
 	if err != nil || p.State != "denied" || p.Decision.Reasons[0] != "release is not deployed to dev yet" || len(g.prs) != 0 {

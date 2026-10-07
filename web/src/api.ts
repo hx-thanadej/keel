@@ -17,6 +17,24 @@ export type Activity = {
   event: { data: { status_id: number; status_detail?: string; why?: { reason?: string } } }
 }
 
+export type FlowStep = { seq: number; name: string; state: string; attempts: number; error: string | null }
+export type Flow = { id: string; kind: string; subject: string; state: string; error: string | null; created_by: string; created_at: string; steps?: FlowStep[] }
+export type ServiceEntry = { id: string; project_id: string; slug: string; name: string; repository: string; template: string }
+export type Template = { name: string; repo: string; ref: string; description: string }
+export type Release = { id: string; service_id: string; version: string; images: { name: string; digest: string }[]; created_at: string }
+export type Decision = { allow: boolean; reasons: string[]; needs_approval: boolean; policy: string }
+export type Promotion = {
+  id: string
+  release_id: string
+  environment_id: string
+  state: string
+  decision: Decision
+  pr_url: string | null
+  error: string | null
+  requested_by: string
+  requested_at: string
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {
@@ -161,6 +179,23 @@ export const finops = {
   recommendations: (t: string) => list<{ id: string; finding_id: string; pr_url: string | null; state: string }>(`/v1/tenants/${t}/recommendations`),
   savings: (t: string, project?: string) => request<Savings>(`/v1/tenants/${t}/savings${project ? `?project=${project}` : ''}`),
   applyRecommendation: (t: string, id: string) => send<{ pr_url: string }>(`/v1/tenants/${t}/recommendations/${id}/apply`, 'POST', {}),
+}
+
+const post = <T,>(path: string, body: unknown) => request<T>(path, { method: 'POST', body: JSON.stringify(body) })
+
+export const delivery = {
+  flows: (t: string) => list<Flow>(`/v1/tenants/${t}/flows`),
+  flow: (t: string, id: string) => request<Flow>(`/v1/tenants/${t}/flows/${id}`),
+  retryFlow: (t: string, id: string) => post<Flow>(`/v1/tenants/${t}/flows/${id}/retry`, {}),
+  services: (t: string) => list<ServiceEntry>(`/v1/tenants/${t}/services`),
+  templates: (t: string) => list<Template>(`/v1/tenants/${t}/templates`),
+  createService: (t: string, project: string, b: { slug: string; title: string; template: string; tier: string }) =>
+    post<Flow>(`/v1/tenants/${t}/projects/${project}/services`, b),
+  releases: (t: string) => list<Release>(`/v1/tenants/${t}/releases`),
+  promotions: (t: string) => list<Promotion>(`/v1/tenants/${t}/promotions`),
+  preview: (t: string, release: string, env: string) => post<Decision>(`/v1/tenants/${t}/releases/${release}/preview`, { environment_id: env }),
+  promote: (t: string, release: string, env: string) => post<Promotion>(`/v1/tenants/${t}/releases/${release}/promote`, { environment_id: env }),
+  approve: (t: string, id: string) => post<Promotion>(`/v1/tenants/${t}/promotions/${id}/approve`, {}),
 }
 
 /** Money for display: grouped, two decimals, currency code after. */

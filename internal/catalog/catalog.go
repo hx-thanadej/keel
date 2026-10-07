@@ -68,6 +68,16 @@ type (
 		Name       string     `json:"name"`
 		ArchivedAt *time.Time `json:"archived_at,omitempty"`
 	}
+	ServiceEntry struct {
+		ID              string `json:"id"`
+		ProjectID       string `json:"project_id"`
+		TeamID          string `json:"team_id"`
+		Slug            string `json:"slug"`
+		Name            string `json:"name"`
+		Repository      string `json:"repository"`
+		Template        string `json:"template"`
+		TemplateVersion string `json:"template_version"`
+	}
 	Environment struct {
 		ID         string     `json:"id"`
 		TenantID   string     `json:"tenant_id"`

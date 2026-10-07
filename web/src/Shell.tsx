@@ -6,13 +6,15 @@ import { BudgetsView } from './BudgetsView'
 import { CostsView } from './CostsView'
 import { FindingsView } from './FindingsView'
 import { SavingsView } from './SavingsView'
+import { DeliveryView } from './DeliveryView'
 
-type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'catalog' | 'activity'
+type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'delivery' | 'catalog' | 'activity'
 const tabs: [Tab, string][] = [
   ['budgets', 'Budgets'],
   ['costs', 'Costs'],
   ['findings', 'Findings'],
   ['savings', 'Savings'],
+  ['delivery', 'Delivery'],
   ['catalog', 'Projects'],
   ['activity', 'Activity'],
 ]
@@ -78,6 +80,7 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
             {tab === 'costs' && <CostsView key={current.id} tenantId={current.id} />}
             {tab === 'findings' && <FindingsView key={current.id} tenantId={current.id} />}
             {tab === 'savings' && <SavingsView key={current.id} tenantId={current.id} />}
+            {tab === 'delivery' && <DeliveryView key={current.id} tenantId={current.id} />}
             {tab === 'catalog' && <TenantView key={current.id} tenant={current} />}
             {tab === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
           </>
