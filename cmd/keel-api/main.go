@@ -14,7 +14,12 @@
 // Identity-provider client secrets are read from the environment variable
 // named by each provider's client_secret_ref.
 //
-// Subcommand:
+//	KEEL_DIGEST_KEY     base64 32-byte Ed25519 seed; enables hourly Activity Log sealing
+//
+// Subcommands:
+//
+//	keel-api digest-pubkey                 print the public key for KEEL_DIGEST_KEY
+//	keel-api verify-log -tenant ID -pubkey BASE64[,BASE64...]
 //
 //	keel-api bootstrap -slug harmonyx -name HarmonyX -issuer URL -client-id ID \
 //	    -client-secret-ref ENV_NAME -admin-group keel-admins [-email-domain harmonyx.co]
@@ -22,6 +27,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -30,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,6 +46,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/store"
 )
@@ -47,12 +55,15 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "bootstrap" {
-		if err := bootstrap(os.Args[2:]); err != nil {
-			slog.Error("bootstrap", "err", err)
-			os.Exit(1)
+	if len(os.Args) > 1 {
+		cmds := map[string]func([]string) error{"bootstrap": bootstrap, "digest-pubkey": digestPubkey, "verify-log": verifyLog}
+		if cmd, ok := cmds[os.Args[1]]; ok {
+			if err := cmd(os.Args[2:]); err != nil {
+				slog.Error(os.Args[1], "err", err)
+				os.Exit(1)
+			}
+			return
 		}
-		return
 	}
 	if err := run(); err != nil {
 		slog.Error("keel-api", "err", err)
@@ -117,6 +128,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	st := store.New(pool)
 	deps := api.Deps{Catalog: catalog.New(st, az)}
+	if err := startSealer(ctx, st); err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
 	if raw := os.Getenv("KEEL_DEV_PRINCIPAL"); raw != "" {
 		authn, err := devAuthenticator(raw)
 		if err != nil {
@@ -203,4 +218,91 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func digestKey() (ed25519.PrivateKey, error) {
+	raw := os.Getenv("KEEL_DIGEST_KEY")
+	if raw == "" {
+		return nil, nil
+	}
+	seed, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return nil, errors.New("KEEL_DIGEST_KEY must be base64 of a 32-byte Ed25519 seed (openssl rand -base64 32)")
+	}
+	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// startSealer seals every Tenant's Activity Log hourly. Postgres advisory
+// locks make concurrent replicas safe.
+func startSealer(ctx context.Context, st *store.Store) error {
+	key, err := digestKey()
+	if err != nil {
+		return err
+	}
+	if key == nil {
+		slog.Warn("KEEL_DIGEST_KEY not set; Activity Log is not being sealed")
+		return nil
+	}
+	sealer := &integrity.Sealer{Store: st, Signer: integrity.NewEd25519(key)}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			if err := sealer.SealAll(ctx); err != nil {
+				slog.Error("ALERT activity log sealing failed", "err", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return nil
+}
+
+func digestPubkey([]string) error {
+	key, err := digestKey()
+	if err != nil || key == nil {
+		return errors.New("set KEEL_DIGEST_KEY")
+	}
+	pub := key.Public().(ed25519.PublicKey)
+	fmt.Printf("key_id=%s pubkey=%s\n", integrity.KeyID(pub), base64.StdEncoding.EncodeToString(pub))
+	return nil
+}
+
+func verifyLog(args []string) error {
+	fs := flag.NewFlagSet("verify-log", flag.ContinueOnError)
+	tenant := fs.String("tenant", "", "tenant id")
+	pubs := fs.String("pubkey", "", "comma-separated base64 Ed25519 public keys")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	keys := map[string]ed25519.PublicKey{}
+	for _, p := range strings.Split(*pubs, ",") {
+		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(p))
+		if err != nil || len(b) != ed25519.PublicKeySize {
+			return fmt.Errorf("bad public key %q", p)
+		}
+		keys[integrity.KeyID(b)] = b
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("KEEL_DATABASE_URL"))
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	r, err := integrity.Verify(ctx, store.New(pool), *tenant, keys)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("digests=%d covered=%d unsealed=%d\n", r.Digests, r.Covered, r.Unsealed)
+	for _, p := range r.Problems {
+		fmt.Println("PROBLEM:", p)
+	}
+	if !r.OK() {
+		return errors.New("activity log failed verification")
+	}
+	fmt.Println("OK")
+	return nil
 }

@@ -18,7 +18,7 @@ import (
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -61,6 +61,10 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO sessions (id_hash, tenant_id, principal, expires_at) VALUES (sha256($2::bytea), $1, '{}', now() + interval '1 hour')`, f.tenant, slug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO activity_digests (tenant_id, seq_from, seq_to, count, batch_sha256, cutoff, sealed_at, key_id, signature)
+			VALUES ($1, 0, 0, 0, '\x00', now(), now(), 'k', '\x00')`, f.tenant); err != nil {
 			return err
 		}
 		_, err := activity.Record(ctx, tx, activity.Activity{

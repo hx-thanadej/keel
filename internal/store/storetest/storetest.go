@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -87,7 +88,37 @@ func New(t *testing.T) *store.Store {
 		t.Fatalf("app pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	return store.New(pool)
+	s := store.New(pool)
+	superURLs.Store(s, superURL(t, adminURL, dbName))
+	return s
+}
+
+var superURLs sync.Map // *store.Store → superuser URL of its database
+
+// Superuser connects to s's database as the admin (superuser) role, to
+// simulate an attacker with full database access. Tests only.
+func Superuser(t *testing.T, s *store.Store) *pgx.Conn {
+	t.Helper()
+	u, ok := superURLs.Load(s)
+	if !ok {
+		t.Fatal("store not created by storetest.New")
+	}
+	c, err := pgx.Connect(context.Background(), u.(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	return c
+}
+
+func superURL(t *testing.T, base, db string) string {
+	t.Helper()
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + db
+	return u.String()
 }
 
 func withUser(t *testing.T, base, user, db string) string {
