@@ -206,3 +206,39 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
   COS bill delivery (then confirm per-day vs month-to-date files); #8 GitHub
   plan; #15 COS object lock; IdP client registrations; AWS management-account
   role if AWS is used. See `docs/runbooks/connect-billing.md`.
+
+## 2026-10-07 — Claude — M2 built: rightsizing, waste, apply-as-PR, savings
+
+- **Merged / in review:** #76 Recommendation record + Findings (#67) · #77
+  utilisation store, Prometheus and Tencent Cloud Monitor collectors (#68) ·
+  #78 Kubernetes request rightsizing (#69) · #79 Tencent CVM engine (#70) · #80
+  AWS Cost Optimization Hub import (#71) · #81 idle/orphaned Waste with gated
+  cleanup (#72) · #82 accepted advice → pull request (#74) · #83 savings
+  tracker (#75) · #84 off-hours schedules for non-prod VMs (#73).
+- **Decisions taken while building** (in PRs, not ADR-worthy):
+  - One `recommendations` table for every source; identity is
+    provider|resource|action; dismissals stick unless savings move >20% or the
+    proposed size changes.
+  - Utilisation is summarised per day (p50/p95/p99/max + per-hour maxima), not
+    stored raw. Tencent Cloud Monitor is read at period=60 only: period=3600
+    returns each hour's maximum, which would inflate every percentile.
+  - Kubernetes: CPU = highest daily p95, memory = max × 1.15; ≥14 days of
+    history (21 and confidence ≥0.8 in production); priced from the
+    Environment's own compute spend.
+  - Keel never changes cloud resources to rightsize them. Changes arrive as
+    pull requests (Kubernetes requests) or are done by people; the only
+    automatic action is Waste cleanup, off unless globally enabled, opted in
+    per Environment, never production, and after a grace period.
+  - Realised savings are measured from the resource's own cost lines (14 days
+    after vs before); shared-cost resources (Kubernetes) keep the estimate and
+    say so. Regressions (newer advice to grow, or requests >95% used) are
+    flagged on the Finding for 30 days.
+  - Off-hours schedules are proposed in the Tenant's time zone (new setting,
+    default Asia/Bangkok) and only priced on usage-based charges.
+- **Follow-ups filed:** TencentDB rightsizing (from #70), Kubernetes off-hours
+  schedules (#85).
+- **Still needs the user / real accounts:** everything listed for M1, plus a
+  `KEEL_TENCENT_MEMBER_ROLE` role in each member account (read-only Cloud
+  Monitor + CVM/CBS/CLB/VPC describe; delete only where Waste cleanup is
+  wanted), Prometheus URLs per cluster, and a GitHub token for pull requests.
+  See `docs/runbooks/rightsizing.md`.

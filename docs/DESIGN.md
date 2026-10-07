@@ -336,7 +336,7 @@ milestone is shippable on the existing Tencent estate before the next starts
 
 | Milestone | Scope | Why this order |
 |---|---|---|
-| | **Status 2026-10-07:** M0 ✅ built · M1 ✅ built (real billing connection pending #29) · M2–M6 not started | |
+| | **Status 2026-10-07:** M0 ✅ built · M1 ✅ built (real billing connection pending #29) · M2 ✅ built (needs member roles, Prometheus, GitHub token) · M3–M6 not started | |
 | **M0 Foundations** | Repo + Keel CI; Tenancy & Catalog (Tenant/Project/Env/Account, import existing Tencent accounts); SSO incl. per-Tenant IdP; Keel authZ; Activity Log v1 (write path, hash chain) | Everything keys off ownership and the log |
 | **M1 Cost visibility** | Tencent payer connector (FOCUS + native gap-fill), AWS connector; cost facts; allocation; Budgets (day/month/year per Project × Env); forecast; anomaly alerts; Tenant cost view | Highest stated priority; works on today's estate |
 | **M2 Rightsizing & waste** | K8s workload rightsizing (KRR-style on Prometheus); Tencent CVM/DB engine; AWS COH ingest; Custodian idle/orphan; Recommendation → PR; savings tracking | Turns visibility into savings |
