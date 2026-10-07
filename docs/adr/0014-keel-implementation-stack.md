@@ -1,33 +1,40 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-06
+deciders: thanadej@harmonyx.co
 ---
 
-# Keel's own stack: Go services, Postgres with row-level security, ClickHouse for facts, Temporal for workflows
+# Keel's own stack: Go + Postgres (RLS) + River; no separate workflow engine
 
-- **Go** for the control plane and adapters: first-class SDKs for Tencent,
-  AWS, GCP, Azure, Alibaba and the Kubernetes/Sigstore/OPA ecosystems.
+- **Go** for the API, control plane and adapters: first-class SDKs for Tencent,
+  AWS and the Kubernetes/Sigstore/OPA ecosystems.
 - **TypeScript + React** for the portal.
-- **PostgreSQL with row-level security** keyed on `tenant_id` as the system of
-  record (Catalog, Budgets, Findings, Exceptions, Access Grants). Tenant
-  isolation is enforced by the database, not by application filters
+- **PostgreSQL with row-level security** keyed on `tenant_id` is the only
+  datastore in phase 1: Catalog, Budgets, Findings, Exceptions, Access Grants,
+  the Activity Log and cost facts (partitioned by provider and billing period).
+  Tenant isolation is enforced by the database, not application filters
   ([ADR-0001](./0001-tenant-is-a-client-organisation.md)).
-- **ClickHouse** for high-volume append-only data: cost facts (hourly,
-  resource-level lines across all accounts), utilisation samples for
-  rightsizing, and the queryable copy of the Activity Log.
-- **Temporal** for durable, long-running workflows: account vending, Access
-  Grant expiry, Exception expiry, ingest/finality loops, recommendation apply.
+- **River** (Postgres-backed job queue, MPL-2.0) for everything that must
+  survive restarts: scheduled ingest, retries, timers (Access Grant and
+  Exception expiry) and multi-step flows (account vending) modelled as an
+  explicit step-state table driven by River jobs. Jobs are enqueued in the same
+  transaction as the state change that causes them.
 
 ## Considered Options
 
-- **TypeScript end-to-end + trigger.dev** (already used in this workspace):
-  faster for a TS-heavy team; weaker cloud-SDK coverage for Tencent/Alibaba
-  and the Kubernetes ecosystem.
-- **Postgres only** (no ClickHouse): simpler to start with; cost and
-  utilisation volume at hourly, resource-level grain across many Tenants will
-  outgrow it. Acceptable for phase 1 behind a repository interface.
+- **Temporal** for durable workflows: the strongest model for long multi-step
+  sagas, but a separate cluster (its own services and database) to operate and
+  secure. Rejected for now; revisit if multi-step flows become hard to reason
+  about as step tables.
+- **trigger.dev** (already used in this workspace): another hosted/self-hosted
+  service, TypeScript-only.
+- **TypeScript end-to-end + pg-boss**: one language, weaker Tencent/K8s SDKs.
+- **ClickHouse** for cost facts and utilisation from day one: deferred. Cost and
+  utilisation access goes through a repository interface so it can move to a
+  columnar store when Postgres partitions stop keeping up.
 
-## Status note
+## Consequences
 
-Proposed, pending confirmation of the team's language skills. This is the
-most reversible ADR in the set until the first service ships.
+- One stateful dependency (Postgres) to run, back up and secure.
+- Workflow logic is plain Go code + step tables, testable without a workflow
+  server; the cost is writing idempotency and compensation by hand.

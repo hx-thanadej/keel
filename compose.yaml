@@ -1,0 +1,18 @@
+# Local development dependencies. Not used in any deployed Environment.
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_USER: keel
+      POSTGRES_PASSWORD: keel-local-only
+      POSTGRES_DB: keel
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "keel"]
+      interval: 2s
+      retries: 15
+volumes:
+  pgdata:

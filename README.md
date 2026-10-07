@@ -5,7 +5,18 @@ security, policy and findings, permission boundaries and just-in-time access,
 multi-cloud FinOps (budgets per Project × Environment per day/month/year,
 forecasting, rightsizing), all recorded in one tamper-evident Activity Log.
 
-**Status:** design phase. No code yet.
+**Status:** M0 in progress — repo scaffold (Go API + React portal).
+
+## Develop
+
+Requires Go ≥ 1.26 (auto-downloaded via `GOTOOLCHAIN`), Node 22, pnpm 10, Docker.
+
+```bash
+make dev    # API on :8080 + portal on :5173
+make test   # go test -race
+make lint   # go vet, gofmt, oxlint
+docker compose up -d postgres   # local Postgres (used from #17 onwards)
+```
 
 | Read | For |
 |---|---|
