@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
@@ -19,6 +21,7 @@ type CostDeps struct {
 	Authz    catalog.Authorizer
 	Queries  cost.Queries
 	Ingester *cost.Ingester
+	Rules    cost.Rules
 }
 
 const maxBillUpload = 512 << 20
@@ -141,6 +144,88 @@ func mountCost(mux Mux, a auth.Authenticator, d CostDeps) {
 			return err
 		}
 		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
+	// Shared-cost allocation rules (#35): home Tenant only.
+	home := func(r *http.Request, p auth.Principal) (string, error) {
+		tenant := r.PathValue("tenant")
+		if err := d.allow(r, p, "cost.allocate", tenant); err != nil {
+			return "", err
+		}
+		if !p.Home || p.TenantID != tenant {
+			return "", catalog.ErrForbidden
+		}
+		return tenant, nil
+	}
+	ruleErr := func(err error) error {
+		switch {
+		case errors.Is(err, cost.ErrInvalidRule):
+			return errors.Join(catalog.ErrInvalid, err)
+		case errors.Is(err, cost.ErrRuleExists):
+			return errors.Join(catalog.ErrConflict, err)
+		case errors.Is(err, pgx.ErrNoRows):
+			return catalog.ErrNotFound
+		}
+		return err
+	}
+	mux.Handle("GET /v1/tenants/{tenant}/allocation-rules", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant, err := home(r, p)
+		if err != nil {
+			return err
+		}
+		out, err := d.Rules.List(r.Context(), tenant)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
+	mux.Handle("POST /v1/tenants/{tenant}/allocation-rules", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant, err := home(r, p)
+		if err != nil {
+			return err
+		}
+		var in cost.Rule
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		out, err := d.Rules.Create(r.Context(), tenant, in)
+		if err != nil {
+			return ruleErr(err)
+		}
+		writeJSON(w, http.StatusCreated, out)
+		return nil
+	}))
+	mux.Handle("POST /v1/tenants/{tenant}/allocation-rules/{rule}/archive", authed(a, []string{"tenant", "rule"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant, err := home(r, p)
+		if err != nil {
+			return err
+		}
+		if err := d.Rules.Archive(r.Context(), tenant, r.PathValue("rule")); err != nil {
+			return ruleErr(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return nil
+	}))
+	mux.Handle("PUT /v1/tenants/{tenant}/k8s-namespaces/{cluster}/{namespace}", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant, err := home(r, p)
+		if err != nil {
+			return err
+		}
+		var in struct {
+			ProjectID     string  `json:"project_id"`
+			EnvironmentID *string `json:"environment_id"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		if !catalog.ValidID(in.ProjectID) || (in.EnvironmentID != nil && !catalog.ValidID(*in.EnvironmentID)) {
+			return errors.Join(catalog.ErrInvalid, errors.New("project_id (and environment_id) must be uuids"))
+		}
+		if err := d.Rules.MapNamespace(r.Context(), tenant, r.PathValue("cluster"), r.PathValue("namespace"), in.ProjectID, in.EnvironmentID); err != nil {
+			return ruleErr(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return nil
 	}))
 	// Manual load of a FOCUS export (CSV, .gz or .zip body). Lines are

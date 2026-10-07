@@ -42,6 +42,7 @@ rules := {
 	"budget.update": {"platform_admin", "finops_lead", "team_lead"},
 	"budget.archive": {"platform_admin", "finops_lead", "team_lead"},
 	"cost.load": {"platform_admin", "finops_lead"},
+	"cost.allocate": {"platform_admin", "finops_lead"},
 	"cost.read_unallocated": {"platform_admin", "finops_lead"},
 	"identity_provider.read": {"platform_admin", "security_lead"},
 	"identity_provider.create": {"platform_admin"},
