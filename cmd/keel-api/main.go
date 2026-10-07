@@ -15,6 +15,8 @@
 // named by each provider's client_secret_ref.
 //
 //	KEEL_DIGEST_KEY     base64 32-byte Ed25519 seed; enables hourly Activity Log sealing
+//	KEEL_TENCENT_ORG_REGION  enables Tencent organisation discovery (e.g. ap-bangkok);
+//	                    credentials: TKE pod identity or CVM role (env keys only with KEEL_ENV=dev)
 //
 // Subcommands:
 //
@@ -46,6 +48,8 @@ import (
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/cloud/tencent"
+	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/store"
@@ -127,7 +131,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	st := store.New(pool)
-	deps := api.Deps{Catalog: catalog.New(st, az)}
+	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{}}
+	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
+		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
+	}
 	if err := startSealer(ctx, st); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
