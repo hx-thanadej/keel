@@ -29,6 +29,7 @@ type OrgAPI interface {
 func NewOrgAPI(region string, creds common.Provider) interface {
 	OrgAPI
 	PolicyAPI
+	CICAPI
 } {
 	return lazyOrg{region: region, creds: creds}
 }
@@ -281,4 +282,60 @@ func (l lazyOrg) AttachPolicyWithContext(ctx context.Context, r *org.AttachPolic
 		return nil, err
 	}
 	return c.AttachPolicyWithContext(ctx, r)
+}
+
+func (l lazyOrg) ListRoleConfigurationsWithContext(ctx context.Context, r *org.ListRoleConfigurationsRequest) (*org.ListRoleConfigurationsResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListRoleConfigurationsWithContext(ctx, r)
+}
+
+func (l lazyOrg) CreateRoleConfigurationWithContext(ctx context.Context, r *org.CreateRoleConfigurationRequest) (*org.CreateRoleConfigurationResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.CreateRoleConfigurationWithContext(ctx, r)
+}
+
+func (l lazyOrg) AddPermissionPolicyToRoleConfigurationWithContext(ctx context.Context, r *org.AddPermissionPolicyToRoleConfigurationRequest) (*org.AddPermissionPolicyToRoleConfigurationResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.AddPermissionPolicyToRoleConfigurationWithContext(ctx, r)
+}
+
+func (l lazyOrg) ListUsersWithContext(ctx context.Context, r *org.ListUsersRequest) (*org.ListUsersResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListUsersWithContext(ctx, r)
+}
+
+func (l lazyOrg) CreateRoleAssignmentWithContext(ctx context.Context, r *org.CreateRoleAssignmentRequest) (*org.CreateRoleAssignmentResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.CreateRoleAssignmentWithContext(ctx, r)
+}
+
+func (l lazyOrg) DeleteRoleAssignmentWithContext(ctx context.Context, r *org.DeleteRoleAssignmentRequest) (*org.DeleteRoleAssignmentResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.DeleteRoleAssignmentWithContext(ctx, r)
+}
+
+func (l lazyOrg) ListRoleAssignmentsWithContext(ctx context.Context, r *org.ListRoleAssignmentsRequest) (*org.ListRoleAssignmentsResponse, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListRoleAssignmentsWithContext(ctx, r)
 }
