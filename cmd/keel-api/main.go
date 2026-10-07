@@ -93,6 +93,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/utilisation"
+	"github.com/hx-thanadej/keel/internal/vending"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -214,12 +215,14 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	engine, stopJobs, err := startFlows(ctx, st)
+	vendors := vendors(st)
+	engine, stopJobs, err := startFlows(ctx, st, flowDefs(vendors))
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
 	deps.Flows = &api.FlowDeps{Authz: az, Engine: engine}
+	deps.Vending = &api.VendingDeps{Authz: az, Engine: engine, Vendors: vendors}
 	cleanup := func() { stopJobs(); pool.Close() }
 	if raw := os.Getenv("KEEL_DEV_PRINCIPAL"); raw != "" {
 		authn, err := devAuthenticator(raw)
@@ -239,13 +242,29 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	return deps, cleanup, nil
 }
 
+// vendors are the account factories per provider (#88). Tencent vending
+// needs organisation-admin credentials: KEEL_TENCENT_ORG_REGION.
+func vendors(st *store.Store) map[string]vending.Vendor {
+	out := map[string]vending.Vendor{}
+	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
+		out["tencent"] = vending.Vendor{Store: st, Org: tencent.AccountFactory{API: tencent.NewOrgAPI(region, tencent.Credentials())}}
+	}
+	return out
+}
+
 // flowDefs lists the durable flows Keel runs (#87).
-func flowDefs(*store.Store) []flow.Def { return nil }
+func flowDefs(vs map[string]vending.Vendor) []flow.Def {
+	var defs []flow.Def
+	for _, v := range vs {
+		defs = append(defs, v.Def())
+	}
+	return defs
+}
 
 // startFlows runs River (ADR-0014) for durable flows. The returned func stops
 // it, letting running steps finish for up to 30s.
-func startFlows(ctx context.Context, st *store.Store) (*flow.Engine, func(), error) {
-	engine := flow.New(st, flowDefs(st)...)
+func startFlows(ctx context.Context, st *store.Store, defs []flow.Def) (*flow.Engine, func(), error) {
+	engine := flow.New(st, defs...)
 	workers := river.NewWorkers()
 	engine.Register(workers)
 	client, err := flow.NewClient(st.AppPool(), workers, flow.ClientOptions{Logger: slog.Default()})
