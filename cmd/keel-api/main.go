@@ -30,6 +30,8 @@
 //	KEEL_TENCENT_BUDGETS=1    mirror opted-in Budgets to Tencent Cloud budgets (payer credentials)
 //	KEEL_AWS_BUDGET_ACCOUNT   mirror opted-in Budgets to AWS Budgets in this management account
 //	KEEL_AWS_BUDGET_EMAIL     optional subscriber so AWS budgets also carry the thresholds
+//	KEEL_PROMETHEUS     cluster=url[@tenant/project/env][,…]: per-container utilisation for rightsizing
+//	KEEL_TENCENT_MEMBER_ROLE  role Keel assumes in member accounts to read Cloud Monitor (CVM utilisation)
 //	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
@@ -82,6 +84,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store"
+	"github.com/hx-thanadej/keel/internal/utilisation"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -168,6 +171,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	deps.Rightsize = &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: st}}
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
+	if err := startUtilisation(ctx, st); err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
 	if err := startOpenCost(ctx, st); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
@@ -676,6 +683,66 @@ func startMirrors(ctx context.Context, st *store.Store) error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+			}
+		}
+	}()
+	return nil
+}
+
+// startUtilisation collects rightsizing evidence (#68): a 14-day backfill at
+// start, then every 6h the last two days (late samples settle).
+func startUtilisation(ctx context.Context, st *store.Store) error {
+	job := utilisation.Job{Store: utilisation.Store{Store: st}}
+	if raw := os.Getenv("KEEL_PROMETHEUS"); raw != "" {
+		for _, kv := range strings.Split(raw, ",") {
+			name, rest, ok := strings.Cut(strings.TrimSpace(kv), "=")
+			if !ok || name == "" || rest == "" {
+				return fmt.Errorf("KEEL_PROMETHEUS entry %q is not cluster=url[@tenant/project/env]", kv)
+			}
+			url, scope, _ := strings.Cut(rest, "@")
+			job.Clusters = append(job.Clusters, utilisation.Cluster{Prometheus: utilisation.Prometheus{Cluster: name, URL: url}, DefaultScope: scope})
+		}
+	}
+	if role := os.Getenv("KEEL_TENCENT_MEMBER_ROLE"); role != "" {
+		region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
+		base := tencent.Credentials()
+		roles := map[string]*tencent.MemberRole{}
+		job.CVM = func(account string) (*utilisation.TencentCVM, error) {
+			r, ok := roles[account]
+			if !ok {
+				r = &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region}
+				roles[account] = r
+			}
+			api, err := utilisation.NewMonitorClient(region, r)
+			if err != nil {
+				return nil, err
+			}
+			return &utilisation.TencentCVM{API: api}, nil
+		}
+	}
+	if len(job.Clusters) == 0 && job.CVM == nil {
+		return nil
+	}
+	go func() {
+		today := time.Now().UTC()
+		for d := 14; d >= 1; d-- {
+			if err := job.Run(ctx, today.AddDate(0, 0, -d)); err != nil {
+				slog.Error("utilisation backfill", "day", today.AddDate(0, 0, -d).Format("2006-01-02"), "err", err)
+			}
+		}
+		t := time.NewTicker(6 * time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			now := time.Now().UTC()
+			for _, d := range []int{2, 1} {
+				if err := job.Run(ctx, now.AddDate(0, 0, -d)); err != nil {
+					slog.Error("utilisation collection", "err", err)
+				}
 			}
 		}
 	}()
