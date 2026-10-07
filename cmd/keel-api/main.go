@@ -90,6 +90,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/ciidentity"
 	awsadapter "github.com/hx-thanadej/keel/internal/cloud/aws"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
+	"github.com/hx-thanadej/keel/internal/controls"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/exceptions"
@@ -207,6 +208,12 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Attest = &api.AttestDeps{Authz: az, Service: att}
+	reg, err := controls.Load()
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	deps.Controls = &api.ControlDeps{Authz: az, Service: controls.Service{Store: st, Registry: reg}}
 	deps.VEX = &api.VEXDeps{Authz: az, Service: vex.Service{Store: st}, Author: os.Getenv("KEEL_BASE_URL")}
 	deps.SBOM = &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: st}, Releases: att}
 	if os.Getenv("KEEL_OSV") != "0" {

@@ -1,0 +1,50 @@
+# keel-controls@1: Controls Keel is measured against, and the Keel Policies
+# (each at one Enforcement Point) that satisfy them. Versioned data: change
+# by pull request, bump the version.
+version: keel-controls@1
+policies:
+  - {name: keel-authz@1, point: api, description: "Every API call decided by OPA; default deny; Tenant isolation"}
+  - {name: keel-github@1, point: pr, description: "Rulesets (review, CODEOWNERS, checks), secret scanning + push protection, Actions SHA pinning, read-only token"}
+  - {name: keel-scans@1, point: pipeline, description: "SARIF from secrets/SAST/SCA/IaC scanners → owned Findings"}
+  - {name: keel-release@1, point: pipeline, description: "Sigstore-verified SLSA provenance from Keel's builder; VSA per image"}
+  - {name: keel-sbom@1, point: pipeline, description: "SBOM per Release; CISA 2026 minimum elements; daily OSV re-match"}
+  - {name: keel-promotion@1, point: promotion, description: "Digests only, previous Environment first, VSA, no unexcepted critical Findings, budget, approval"}
+  - {name: keel-admission@1, point: admission, description: "Kyverno IVP signature + provenance; digest-only VAP"}
+  - {name: keel-baseline@1, point: cloud, description: "Organisation SCPs: stay in org, protect CloudAudit, identities only via Keel"}
+  - {name: keel-ci-identity@1, point: cloud, description: "Keyless CI: OIDC role pinned to repository id + environment, no access keys"}
+  - {name: keel-findings@1, point: platform, description: "Owner, severity and SLA on every Finding; Exceptions time-boxed and approved"}
+  - {name: keel-vex@1, point: platform, description: "VEX statements with justification applied at gates"}
+  - {name: keel-activity@1, point: platform, description: "Signed, chained, archived Activity Log"}
+controls:
+  # NIST SSDF 1.2 (SP 800-218r1)
+  - {id: "PO.3.2", framework: SSDF, title: "Follow recommended security practices to deploy, operate and maintain toolchains", policies: [keel-github@1, keel-ci-identity@1]}
+  - {id: "PO.5.1", framework: SSDF, title: "Separate and protect each environment involved in software development", policies: [keel-baseline@1, keel-ci-identity@1]}
+  - {id: "PS.1.1", framework: SSDF, title: "Store all forms of code based on least privilege and protect from tampering", policies: [keel-github@1]}
+  - {id: "PS.2.1", framework: SSDF, title: "Make software integrity verification information available", policies: [keel-release@1]}
+  - {id: "PS.3.2", framework: SSDF, title: "Collect, safeguard, maintain and share provenance data (SBOM)", policies: [keel-sbom@1, keel-release@1]}
+  - {id: "PW.4.4", framework: SSDF, title: "Verify that acquired components comply with requirements throughout their life", policies: [keel-sbom@1, keel-scans@1]}
+  - {id: "PW.7.2", framework: SSDF, title: "Review and analyse code for vulnerabilities (automated)", policies: [keel-scans@1]}
+  - {id: "PW.9.1", framework: SSDF, title: "Secure the build and deployment configuration by default", policies: [keel-admission@1, keel-promotion@1]}
+  - {id: "RV.1.1", framework: SSDF, title: "Gather information about potential vulnerabilities in released software", policies: [keel-sbom@1, keel-scans@1]}
+  - {id: "RV.2.2", framework: SSDF, title: "Plan and implement risk responses for vulnerabilities", policies: [keel-findings@1, keel-vex@1]}
+  # SLSA v1.2 build track
+  - {id: "SLSA-BUILD-L1", framework: SLSA, title: "Provenance exists", policies: [keel-release@1]}
+  - {id: "SLSA-BUILD-L2", framework: SLSA, title: "Hosted build platform, signed provenance", policies: [keel-release@1]}
+  - {id: "SLSA-BUILD-L3", framework: SLSA, title: "Hardened build: isolated, provenance unforgeable by tenants", policies: [keel-release@1, keel-admission@1]}
+  # EU Cyber Resilience Act, Annex I
+  - {id: "CRA-I.1.2c", framework: CRA, title: "Vulnerabilities addressed by security updates", policies: [keel-findings@1, keel-promotion@1]}
+  - {id: "CRA-I.2.1", framework: CRA, title: "Identify and document components, including an SBOM", policies: [keel-sbom@1]}
+  - {id: "CRA-I.2.2", framework: CRA, title: "Address and remediate vulnerabilities without delay", policies: [keel-findings@1, keel-sbom@1]}
+  - {id: "CRA-I.2.4", framework: CRA, title: "Publicly disclose fixed vulnerabilities (VEX/advisories)", policies: [keel-vex@1]}
+  - {id: "CRA-I.1.2f", framework: CRA, title: "Protection of integrity of data, programs and configuration", policies: [keel-release@1, keel-admission@1, keel-activity@1]}
+  # OWASP Top 10 CI/CD Security Risks
+  - {id: "CICD-SEC-1", framework: OWASP-CICD, title: "Insufficient flow control mechanisms", policies: [keel-github@1, keel-promotion@1]}
+  - {id: "CICD-SEC-2", framework: OWASP-CICD, title: "Inadequate identity and access management", policies: [keel-authz@1, keel-ci-identity@1]}
+  - {id: "CICD-SEC-3", framework: OWASP-CICD, title: "Dependency chain abuse", policies: [keel-sbom@1, keel-scans@1]}
+  - {id: "CICD-SEC-4", framework: OWASP-CICD, title: "Poisoned pipeline execution", policies: [keel-github@1, keel-release@1]}
+  - {id: "CICD-SEC-6", framework: OWASP-CICD, title: "Insufficient credential hygiene", policies: [keel-ci-identity@1, keel-github@1]}
+  - {id: "CICD-SEC-9", framework: OWASP-CICD, title: "Improper artifact integrity validation", policies: [keel-release@1, keel-admission@1]}
+  - {id: "CICD-SEC-10", framework: OWASP-CICD, title: "Insufficient logging and visibility", policies: [keel-activity@1]}
+  # Not yet covered by any Keel policy (listed so the gap is visible)
+  - {id: "PO.1.1", framework: SSDF, title: "Identify and document security requirements for software development", policies: []}
+  - {id: "CICD-SEC-7", framework: OWASP-CICD, title: "Insecure system configuration (CI/CD systems themselves)", policies: []}
