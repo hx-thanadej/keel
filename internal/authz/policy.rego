@@ -58,6 +58,7 @@ rules := {
 	"attestation.submit": {"platform_admin", "pipeline"},
 	"registry.push": {"pipeline"},
 	"sbom.submit": {"platform_admin", "pipeline"},
+	"vex.record": {"platform_admin", "security_lead", "team_lead", "engineer"},
 	"promotion.read": read_roles,
 	"promotion.request": {"platform_admin", "team_lead", "engineer"},
 	"promotion.approve": {"platform_admin", "tenant_approver"},

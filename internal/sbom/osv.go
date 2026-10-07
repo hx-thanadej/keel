@@ -231,6 +231,13 @@ func (m Matcher) Run(ctx context.Context) (MatchResult, error) {
 			current := map[string][]string{}
 			for fp, h := range hits {
 				current[h.d.service] = append(current[h.d.service], fp)
+				var suppressed bool
+				if err := tx.QueryRow(ctx, `SELECT vex_suppressed($1, $2)`, preferredID(h.v), h.d.service).Scan(&suppressed); err != nil {
+					return err
+				}
+				if suppressed {
+					continue
+				}
 				detail, _ := json.Marshal(map[string]any{"tools": []string{"osv"}, "osv_id": h.v.ID, "aliases": h.v.Aliases, "components": keys(h.purls), "environments": keys(h.envs), "service": h.d.slug})
 				title := fmt.Sprintf("%s in %s: %s", preferredID(h.v), h.d.slug, h.v.Summary)
 				var inserted bool

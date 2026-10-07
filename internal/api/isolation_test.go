@@ -28,6 +28,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 	"github.com/hx-thanadej/keel/internal/templates"
 	"github.com/hx-thanadej/keel/internal/vending"
+	"github.com/hx-thanadej/keel/internal/vex"
 )
 
 // Routes that are not Tenant-scoped, with the reason. Every other route must
@@ -74,6 +75,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Scans:     &api.ScanDeps{Authz: az, Service: scans.Service{Store: s}},
 		Attest:    &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission: &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
+		VEX:       &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
 		SBOM:      &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: s}, Releases: attest.Service{Store: s}},
 		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
 		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
@@ -136,6 +138,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/services/{service}/scans":                        {"version": "2.1.0", "runs": []any{}},
 		"POST /v1/tenants/{tenant}/releases/{release}/attestations":                 {},
 		"POST /v1/tenants/{tenant}/services/{service}/registry-token":               {},
+		"POST /v1/tenants/{tenant}/vex":                                             {"vulnerability": "CVE-2026-0001", "service_id": "set below", "status": "under_investigation"},
 		"POST /v1/tenants/{tenant}/releases/{release}/sbom":                         {"bomFormat": "CycloneDX", "specVersion": "1.6"},
 		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/admission": {"mode": "warn", "why": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions":                                      {"fingerprint": "victim", "reason": "pwned by attacker", "expires_at": "2099-01-01T00:00:00Z"},
@@ -177,6 +180,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	bodies["POST /v1/tenants/{tenant}/vex"]["service_id"] = victimService
 	v := victim{
 		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException},
 		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason"},
