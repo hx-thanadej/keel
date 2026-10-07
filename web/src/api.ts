@@ -243,6 +243,35 @@ export const security = {
   attestations: (t: string, release: string) => list<Attestation>(`/v1/tenants/${t}/releases/${release}/attestations`),
 }
 
+export type AccessTemplate = { name: string; description: string; write: boolean; max_hours: number }
+export type AccessRole = { id: string; environment_id: string; team_id: string; template: string; state: string; requested_by: string }
+export type AccessGrant = {
+  id: string
+  role_id: string
+  requester: string
+  reason: string
+  hours: number
+  state: string
+  decision: { allow: boolean; reasons: string[]; approvals: string[]; policy: string }
+  approvals: { role: string; by: string; at: string }[]
+  error: string | null
+  expires_at: string | null
+}
+export type Team = { id: string; slug: string; name: string }
+
+export const accessApi = {
+  templates: (t: string) => list<AccessTemplate>(`/v1/tenants/${t}/access/templates`),
+  roles: (t: string) => list<AccessRole>(`/v1/tenants/${t}/access/roles`),
+  requestRole: (t: string, b: { environment_id: string; team_id: string; template: string }) => post<AccessRole>(`/v1/tenants/${t}/access/roles`, b),
+  decideRole: (t: string, id: string, approve: boolean) => post<AccessRole>(`/v1/tenants/${t}/access/roles/${id}/decide`, { approve }),
+  grants: (t: string) => list<AccessGrant>(`/v1/tenants/${t}/access/grants`),
+  requestGrant: (t: string, b: { role_id: string; hours: number; reason: string }) => post<AccessGrant>(`/v1/tenants/${t}/access/grants`, b),
+  approve: (t: string, id: string) => post<AccessGrant>(`/v1/tenants/${t}/access/grants/${id}/approve`, {}),
+  reject: (t: string, id: string, reason: string) => post<AccessGrant>(`/v1/tenants/${t}/access/grants/${id}/reject`, { reason }),
+  revoke: (t: string, id: string, reason: string) => post<AccessGrant>(`/v1/tenants/${t}/access/grants/${id}/revoke`, { reason }),
+  teams: (t: string) => list<Team>(`/v1/tenants/${t}/teams`),
+}
+
 /** Money for display: grouped, two decimals, currency code after. */
 export function fmtMoney(v: string | number | null | undefined, currency?: string): string {
   if (v === null || v === undefined || v === '') return '—'
