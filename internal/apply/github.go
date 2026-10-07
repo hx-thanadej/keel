@@ -125,9 +125,13 @@ func (g GitHub) Branch(ctx context.Context, repo, base, branch string) error {
 }
 
 // Commit writes one file on a branch.
+// An empty sha creates the file.
 func (g GitHub) Commit(ctx context.Context, repo, branch, path, sha, message string, content []byte) error {
-	return g.do(ctx, http.MethodPut, "/repos/"+repo+"/contents/"+path, map[string]string{
-		"message": message, "content": base64.StdEncoding.EncodeToString(content), "sha": sha, "branch": branch}, nil)
+	body := map[string]string{"message": message, "content": base64.StdEncoding.EncodeToString(content), "branch": branch}
+	if sha != "" {
+		body["sha"] = sha
+	}
+	return g.do(ctx, http.MethodPut, "/repos/"+repo+"/contents/"+path, body, nil)
 }
 
 // PullRequest is the part of a PR Keel tracks.
