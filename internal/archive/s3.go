@@ -119,3 +119,19 @@ func (r *refreshing) IsExpired() bool {
 	defer r.mu.Unlock()
 	return time.Since(r.at) > r.every
 }
+
+// ListWithETag lists keys with their ETags, so rewritten files are detected.
+func (s *S3) ListWithETag(ctx context.Context, prefix string) ([]ObjectVersion, error) {
+	var out []ObjectVersion
+	for o := range s.c.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if o.Err != nil {
+			return nil, o.Err
+		}
+		out = append(out, ObjectVersion{Key: o.Key, ETag: o.ETag})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// ObjectVersion is a key and its ETag.
+type ObjectVersion struct{ Key, ETag string }

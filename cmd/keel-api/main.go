@@ -23,6 +23,10 @@
 //	KEEL_TENCENT_PAYER_UIN     payer account id (FOCUS BillingAccountId)
 //	KEEL_TENCENT_BILL_MODE     per-day (default) | cumulative; confirm on first delivery
 //	KEEL_TENCENT_REGION        region for billing API and COS (default ap-bangkok)
+//	KEEL_AWS_BILL_BUCKET      S3 bucket of the AWS Data Exports FOCUS 1.2 export (CSV)
+//	KEEL_AWS_BILL_PREFIX      export prefix
+//	KEEL_AWS_PAYER_ACCOUNT    management account id (FOCUS BillingAccountId)
+//	KEEL_AWS_REGION           bucket region; credentials: AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
@@ -55,6 +59,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	awscreds "github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
@@ -165,6 +170,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		go syncer.Every(ctx, 10*time.Minute)
 	}
 	if err := startBillSync(ctx, st, evaluator); err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	if err := startAWSBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
@@ -431,7 +440,7 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 	default:
 		return errors.New("KEEL_TENCENT_BILL_MODE must be per-day or cumulative")
 	}
-	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: st}, Objects: objs, Provider: "tencent", BillingAccountID: payer,
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: st}, Objects: billObjects{objs}, Provider: "tencent", BillingAccountID: payer,
 		Prefix: os.Getenv("KEEL_TENCENT_BILL_PREFIX"), Mode: mode, Invoices: tencent.Invoices{Region: region, Creds: creds}}
 	go func() {
 		t := time.NewTicker(time.Hour)
@@ -516,4 +525,58 @@ func evaluate(ctx context.Context, ev budget.Evaluator) {
 	for _, a := range alerts {
 		slog.Warn("budget threshold crossed", "tenant", a.TenantID, "budget", a.Name, "basis", a.Basis, "pct", a.Pct, "value", a.Value, "currency", a.Currency)
 	}
+}
+
+// billObjects adapts an S3 bucket to cost.Objects with ETag versioning.
+type billObjects struct{ *archive.S3 }
+
+func (b billObjects) ListWithETag(ctx context.Context, prefix string) ([]cost.ObjectInfo, error) {
+	vs, err := b.S3.ListWithETag(ctx, prefix)
+	out := make([]cost.ObjectInfo, len(vs))
+	for i, v := range vs {
+		out[i] = cost.ObjectInfo{Key: v.Key, ETag: v.ETag}
+	}
+	return out, err
+}
+
+// startAWSBillSync loads AWS Data Exports FOCUS 1.2 (CSV) from the management
+// account's S3 bucket hourly (#44). Credentials are keyless: web identity
+// (AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE) or the instance role.
+func startAWSBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) error {
+	bucket := os.Getenv("KEEL_AWS_BILL_BUCKET")
+	if bucket == "" {
+		return nil
+	}
+	account := os.Getenv("KEEL_AWS_PAYER_ACCOUNT")
+	if account == "" {
+		return errors.New("KEEL_AWS_PAYER_ACCOUNT is required with KEEL_AWS_BILL_BUCKET")
+	}
+	region := envOr("KEEL_AWS_REGION", "us-east-1")
+	objs, err := archive.NewS3(archive.S3Config{Endpoint: "s3." + region + ".amazonaws.com", Region: region, Bucket: bucket, Creds: awscreds.NewIAM("")})
+	if err != nil {
+		return err
+	}
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: st}, Objects: billObjects{objs}, Provider: "aws", BillingAccountID: account,
+		Prefix: os.Getenv("KEEL_AWS_BILL_PREFIX"), Mode: cost.LatestExportFolder}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			rep, err := bs.Run(ctx)
+			if err != nil {
+				slog.Error("ALERT aws bill sync failed", "err", err)
+			} else {
+				slog.Info("aws bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads))
+				if len(rep.Loads) > 0 {
+					evaluate(ctx, ev)
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return nil
 }

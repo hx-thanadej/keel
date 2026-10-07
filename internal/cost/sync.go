@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -23,7 +24,22 @@ const (
 	PerDayFiles FileMode = iota
 	// CumulativeFiles: each file is month-to-date; a period is its newest file.
 	CumulativeFiles
+	// LatestExportFolder: an export run writes one or more part files to a
+	// folder, overwriting in place or in a new folder (AWS Data Exports); a
+	// period is the current version of every file in its newest folder.
+	LatestExportFolder
 )
+
+// ObjectInfo is an object key and its ETag (content version).
+type ObjectInfo struct {
+	Key, ETag string
+}
+
+// ETagLister is implemented by stores that report ETags (S3, COS). With it,
+// a file rewritten under the same key is picked up as a new version.
+type ETagLister interface {
+	ListWithETag(ctx context.Context, prefix string) ([]ObjectInfo, error)
+}
 
 // Objects lists and reads bill files (e.g. a COS bucket via archive.S3).
 type Objects interface {
@@ -78,24 +94,34 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	keys, err := b.Objects.List(ctx, b.Prefix)
+	var objects []ObjectInfo
+	if el, ok := b.Objects.(ETagLister); ok {
+		objects, err = el.ListWithETag(ctx, b.Prefix)
+	} else {
+		var keys []string
+		keys, err = b.Objects.List(ctx, b.Prefix)
+		for _, k := range keys {
+			objects = append(objects, ObjectInfo{Key: k})
+		}
+	}
 	if err != nil {
 		return rep, fmt.Errorf("list bills: %w", err)
 	}
 	type fileInfo struct {
-		key    string
-		period time.Time
+		key, etag string
+		period    time.Time
+		seen      time.Time
 	}
 	var known []fileInfo
 	finalPeriods := map[time.Time]bool{}
 	err = b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT object_key, billing_period FROM cost_source_files WHERE provider = $1 AND billing_account_id = $2`, b.Provider, b.BillingAccountID)
+		rows, err := tx.Query(ctx, `SELECT object_key, etag, billing_period, seen_at FROM cost_source_files WHERE provider = $1 AND billing_account_id = $2 ORDER BY seen_at`, b.Provider, b.BillingAccountID)
 		if err != nil {
 			return err
 		}
 		known, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (fileInfo, error) {
 			var f fileInfo
-			err := r.Scan(&f.key, &f.period)
+			err := r.Scan(&f.key, &f.etag, &f.period, &f.seen)
 			f.period = f.period.UTC()
 			return f, err
 		})
@@ -117,13 +143,18 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	}
 	seen := map[string]bool{}
 	for _, f := range known {
-		seen[f.key] = true
+		seen[f.key+"\x00"+f.etag] = true
+	}
+	current := map[string]string{} // key → ETag as listed now
+	for _, o := range objects {
+		current[o.Key] = o.ETag
 	}
 
-	// Register new files under the billing periods their lines belong to.
+	// Register new files (or new versions) under the periods their lines belong to.
 	touched := map[time.Time]bool{}
-	for _, key := range keys {
-		if seen[key] || !slices.ContainsFunc(billExt, func(e string) bool { return strings.HasSuffix(strings.ToLower(key), e) }) {
+	for _, o := range objects {
+		key := o.Key
+		if seen[key+"\x00"+o.ETag] || !slices.ContainsFunc(billExt, func(e string) bool { return strings.HasSuffix(strings.ToLower(key), e) }) {
 			continue
 		}
 		raw, err := b.Objects.Get(ctx, key)
@@ -140,8 +171,8 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 		err = b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
 			for p, n := range counts {
-				if _, err := tx.Exec(ctx, `INSERT INTO cost_source_files (tenant_id, provider, billing_account_id, object_key, billing_period, line_count) VALUES ($1, $2, $3, $4, $5, $6)`,
-					home, b.Provider, b.BillingAccountID, key, p, n); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO cost_source_files (tenant_id, provider, billing_account_id, object_key, etag, billing_period, line_count) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+					home, b.Provider, b.BillingAccountID, key, o.ETag, p, n); err != nil {
 					return err
 				}
 			}
@@ -152,7 +183,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 		rep.NewFiles++
 		for p := range counts {
-			known = append(known, fileInfo{key: key, period: p})
+			known = append(known, fileInfo{key: key, etag: o.ETag, period: p, seen: now()})
 			if finalPeriods[p] {
 				rep.Skipped = append(rep.Skipped, key)
 			} else {
@@ -173,15 +204,25 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	}
 	slices.SortFunc(periods, func(a, b time.Time) int { return a.Compare(b) })
 	for _, p := range periods {
+		// Files of this period that still exist, each at its current version.
 		var files []string
 		for _, f := range known {
-			if f.period.Equal(p) {
-				files = append(files, f.key)
+			if f.period.Equal(p) && !slices.Contains(files, f.key) {
+				if etag, ok := current[f.key]; ok && etag == f.etag {
+					files = append(files, f.key)
+				}
 			}
 		}
 		slices.Sort(files)
-		if b.Mode == CumulativeFiles {
+		if len(files) == 0 {
+			continue
+		}
+		switch b.Mode {
+		case CumulativeFiles:
 			files = files[len(files)-1:]
+		case LatestExportFolder:
+			newest := path.Dir(files[len(files)-1])
+			files = slices.DeleteFunc(files, func(k string) bool { return path.Dir(k) != newest })
 		}
 		var lines []Line
 		invoiced := true
