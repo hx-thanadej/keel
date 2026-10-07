@@ -116,7 +116,7 @@ func setup(t *testing.T) world {
 var eng = activity.Actor{Type: activity.ActorHuman, UID: "user:eng@harmonyx.co"}
 
 func creator(w world, g *fakeGit, ref string) templates.Creator {
-	return templates.Creator{Store: w.s, Git: g, Org: "acme", ReusableWorkflow: "acme/keel-workflows/.github/workflows/build.yml@abc123",
+	return templates.Creator{Store: w.s, Git: g, Org: "acme", ReusableWorkflow: "acme/keel-workflows/.github/workflows/build.yml@abc123", KeelURL: "https://keel.example.com",
 		Templates: map[string]templates.Template{"go-service": {Name: "go-service", Repo: "acme/tmpl-go", Ref: ref}}}
 }
 
@@ -146,6 +146,15 @@ func TestCreateServiceFromTemplate(t *testing.T) {
 	comps, err := catalogsync.Parse([]byte(g.files["acme/crm-api/catalog-info.yaml"]))
 	if err != nil || len(comps) != 1 || comps[0].Name != "crm-api" || comps[0].Owner != "crm" || comps[0].System != "tat-crm" || comps[0].Tenant != "tat" {
 		t.Fatalf("catalog-info %+v %v", comps, err)
+	}
+	var svcID string
+	if err := w.s.InTenant(ctx, w.tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id::text FROM services WHERE slug = 'crm-api'`).Scan(&svcID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if wf := g.files["acme/crm-api/.github/workflows/keel.yml"]; !strings.Contains(wf, "service: "+svcID) || !strings.Contains(wf, "tenant: "+w.tenant) || !strings.Contains(wf, "keel-url: https://keel.example.com") {
+		t.Fatalf("workflow inputs:\n%s", wf)
 	}
 	if !strings.Contains(g.files["acme/crm-api/.github/workflows/keel.yml"], "uses: acme/keel-workflows/.github/workflows/build.yml@abc123") ||
 		!strings.Contains(g.files["acme/crm-api/renovate.json"], `"minimumReleaseAge": "3 days"`) ||

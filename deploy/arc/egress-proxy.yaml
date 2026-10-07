@@ -1,0 +1,79 @@
+# Default-deny egress for runner pods, except to an allowlisting proxy (#114).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runners-egress
+  namespace: arc-runners
+spec:
+  podSelector:
+    matchLabels:
+      keel.dev/runner: ephemeral
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: egress-proxy
+      ports:
+        - {protocol: TCP, port: 3128}
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: egress-proxy
+  namespace: arc-runners
+data:
+  squid.conf: |
+    # Only what builds need. Package registries go through the dependency
+    # proxy (minimum release age), not directly.
+    acl allowed dstdomain .github.com .githubusercontent.com .actions.githubusercontent.com .blob.core.windows.net
+    acl allowed dstdomain .sigstore.dev .tencentcloudcr.com .tencentcloudapi.com
+    acl allowed dstdomain keel.example.com deps.example.com
+    acl CONNECT method CONNECT
+    http_access allow CONNECT allowed
+    http_access allow allowed
+    http_access deny all
+    http_port 3128
+    access_log stdio:/dev/stdout
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-proxy
+  namespace: arc-runners
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: egress-proxy}
+  template:
+    metadata:
+      labels: {app: egress-proxy}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: squid
+          image: ubuntu/squid:6.10-24.10_beta@sha256:c9f5212b147a766529c7b026e2bebed37b998d33d0066b658596af5eba7cc65c
+          ports: [{containerPort: 3128}]
+          volumeMounts:
+            - {name: conf, mountPath: /etc/squid/squid.conf, subPath: squid.conf}
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: conf
+          configMap: {name: egress-proxy}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-proxy
+  namespace: arc-runners
+spec:
+  selector: {app: egress-proxy}
+  ports: [{port: 3128, targetPort: 3128}]

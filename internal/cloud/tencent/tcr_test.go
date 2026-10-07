@@ -51,6 +51,22 @@ func (f *fakeTCR) CreateTagRetentionRuleWithContext(_ context.Context, q *tcr.Cr
 	return tcr.NewCreateTagRetentionRuleResponse(), nil
 }
 
+func (f *fakeTCR) CreateInstanceTokenWithContext(_ context.Context, q *tcr.CreateInstanceTokenRequest) (*tcr.CreateInstanceTokenResponse, error) {
+	if *q.TokenType != "temp" {
+		panic("only temporary tokens")
+	}
+	r := tcr.NewCreateInstanceTokenResponse()
+	r.Response = &tcr.CreateInstanceTokenResponseParams{Username: common.StringPtr("tcr$keel"), Token: common.StringPtr("t0k3n"), ExpTime: common.Int64Ptr(1893456000000)}
+	return r, nil
+}
+
+func TestTCRTempToken(t *testing.T) {
+	u, p, exp, err := tencent.Registry{API: &fakeTCR{}, RegistryID: "tcr-abc"}.TempToken(context.Background())
+	if err != nil || u != "tcr$keel" || p != "t0k3n" || exp.Year() != 2030 {
+		t.Fatal(u, p, exp, err)
+	}
+}
+
 func TestTCRRegistryIsIdempotent(t *testing.T) {
 	f := &fakeTCR{}
 	r := tencent.Registry{API: f, RegistryID: "tcr-abc"}

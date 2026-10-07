@@ -1,0 +1,184 @@
+# Keel's reusable build workflow (#114, ADR-0007, ADR-0010).
+#
+# Copy into the organisation's keel-workflows repository and pin callers to a
+# commit SHA. Service Templates call it from .github/workflows/keel.yml.
+#
+# Two jobs on ephemeral runners:
+#   build   — untrusted code runs here; it has NO id-token and no registry
+#             access. It produces an OCI archive, a CycloneDX SBOM and a
+#             vulnerability scan as artifacts.
+#   publish — never runs project code. Only it can mint the OIDC token: it
+#             gets a short-lived registry token from Keel, pushes by digest,
+#             attests SLSA provenance and the SBOM (Sigstore), then tells Keel:
+#             Release, provenance bundle, scan results.
+name: keel-build
+
+on:
+  workflow_call:
+    inputs:
+      keel-url:
+        description: Keel API base URL
+        required: true
+        type: string
+      tenant:
+        description: Keel Tenant id
+        required: true
+        type: string
+      service:
+        description: Keel Service id
+        required: true
+        type: string
+      image:
+        description: Repository name inside the Project's registry namespace
+        required: true
+        type: string
+      version:
+        description: Release version (defaults to the commit SHA)
+        required: false
+        type: string
+      context:
+        required: false
+        type: string
+        default: .
+      dockerfile:
+        required: false
+        type: string
+        default: Dockerfile
+      runner:
+        description: Runner label (Keel's ephemeral scale set)
+        required: false
+        type: string
+        default: keel-ephemeral
+    outputs:
+      digest:
+        description: Image digest
+        value: ${{ jobs.publish.outputs.digest }}
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse untrusted triggers
+        if: github.event_name == 'pull_request_target' || github.event_name == 'workflow_run'
+        run: |
+          echo "keel-build does not run for ${GITHUB_EVENT_NAME}" >&2
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build to an OCI archive (no registry access in this job)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: false
+          provenance: false
+          outputs: type=oci,dest=image.tar
+          # Untrusted triggers never write caches release builds read.
+          cache-from: type=gha,scope=keel-${{ github.ref_name }}
+          cache-to: ${{ github.event_name == 'push' && format('type=gha,mode=max,scope=keel-{0}', github.ref_name) || '' }}
+      - name: SBOM (CycloneDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          file: image.tar
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: false
+      - name: Vulnerability scan (SARIF for Keel)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        id: scan
+        with:
+          sbom: sbom.cdx.json
+          output-format: sarif
+          fail-build: false
+      - name: Keep the SARIF
+        env:
+          SARIF: ${{ steps.scan.outputs.sarif }}
+        run: cp "${SARIF}" scan.sarif
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: keel-build
+          path: |
+            image.tar
+            sbom.cdx.json
+            scan.sarif
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # only this job may prove its identity
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      KEEL: ${{ inputs.keel-url }}
+      TENANT: ${{ inputs.tenant }}
+      SERVICE: ${{ inputs.service }}
+      IMAGE: ${{ inputs.image }}
+      VERSION: ${{ inputs.version || github.sha }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: keel-build
+      - name: Keel token (OIDC, audience keel)
+        id: oidc
+        run: |
+          token=$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=keel" | jq -r .value)
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+      - name: Short-lived registry login from Keel
+        id: registry
+        env:
+          TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          creds=$(curl -sSf -X POST -H "Authorization: Bearer ${TOKEN}" "${KEEL}/v1/tenants/${TENANT}/services/${SERVICE}/registry-token")
+          user=$(jq -r .username <<<"$creds"); pass=$(jq -r .password <<<"$creds")
+          echo "::add-mask::${pass}"
+          echo "registry=$(jq -r .registry <<<"$creds")" >> "$GITHUB_OUTPUT"
+          echo "namespace=$(jq -r .namespace <<<"$creds")" >> "$GITHUB_OUTPUT"
+          echo "${pass}" | skopeo login --username "${user}" --password-stdin "$(jq -r .registry <<<"$creds")"
+      - name: Push by digest
+        id: push
+        env:
+          REF: ${{ steps.registry.outputs.registry }}/${{ steps.registry.outputs.namespace }}/${{ inputs.image }}
+        run: |
+          skopeo copy --digestfile digest oci-archive:image.tar "docker://${REF}:${VERSION}"
+          echo "digest=$(cat digest)" >> "$GITHUB_OUTPUT"
+          echo "name=${REF}" >> "$GITHUB_OUTPUT"
+      - name: SLSA provenance (Sigstore)
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: SBOM attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+      - name: Tell Keel (release, provenance, scan)
+        env:
+          TOKEN: ${{ steps.oidc.outputs.token }}
+          NAME: ${{ steps.push.outputs.name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          auth=(-H "Authorization: Bearer ${TOKEN}")
+          release=$(jq -n --arg v "$VERSION" --arg n "$NAME" --arg d "$DIGEST" '{version: $v, images: [{name: $n, digest: $d}]}' |
+            curl -sSf "${auth[@]}" -H 'Content-Type: application/json' -d @- "${KEEL}/v1/tenants/${TENANT}/services/${SERVICE}/releases" | jq -r .id)
+          curl -sSf "${auth[@]}" -H 'Content-Type: application/json' --data-binary "@${BUNDLE}" "${KEEL}/v1/tenants/${TENANT}/releases/${release}/attestations" > /dev/null
+          curl -sSf "${auth[@]}" -H 'Content-Type: application/sarif+json' --data-binary @scan.sarif "${KEEL}/v1/tenants/${TENANT}/services/${SERVICE}/scans?scope=full" > /dev/null
+          echo "Keel release ${release} for ${NAME}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"

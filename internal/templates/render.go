@@ -12,6 +12,7 @@ type Params struct {
 	Template, TemplateVersion                  string
 	ReusableWorkflow                           string // owner/repo/.github/workflows/x.yml@<sha>
 	MinReleaseAgeDays                          int
+	KeelURL, TenantID, ServiceID               string
 }
 
 // Files returns the governed files Keel writes into every new repository,
@@ -76,18 +77,21 @@ name: keel
 on:
   push:
     branches: [main]
-  pull_request:
-permissions:
-  contents: read
+    tags: ["v*"]
+permissions: {}
 jobs:
   keel:
     permissions:
       contents: read
       id-token: write
-      packages: write
       attestations: write
     uses: %s
-`, p.ReusableWorkflow))
+    with:
+      keel-url: %s
+      tenant: %s
+      service: %s
+      image: %s
+`, p.ReusableWorkflow, p.KeelURL, p.TenantID, p.ServiceID, p.Service))
 	}
 	return files
 }
