@@ -36,6 +36,8 @@ rules := {
 	"catalog_sync.read": {"platform_admin", "security_lead"},
 	"cost.read": read_roles,
 	"budget.read": read_roles,
+	"finding.read": read_roles,
+	"finding.resolve": {"platform_admin", "security_lead", "finops_lead", "team_lead", "engineer"},
 	"budget.create": {"platform_admin", "finops_lead", "team_lead"},
 	"budget.update": {"platform_admin", "finops_lead", "team_lead"},
 	"budget.archive": {"platform_admin", "finops_lead", "team_lead"},

@@ -56,6 +56,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/archive"
 	"github.com/hx-thanadej/keel/internal/auth"
@@ -152,6 +153,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		Cost:    &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}},
 		Budgets: &api.BudgetDeps{Authz: az, Budgets: budget.Service{Store: st}}}
 	deps.Budgets.Catalog = deps.Catalog
+	deps.Authz = az
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
 	go evaluateLoop(ctx, evaluator)
@@ -496,6 +498,11 @@ func evaluateLoop(ctx context.Context, ev budget.Evaluator) {
 }
 
 func evaluate(ctx context.Context, ev budget.Evaluator) {
+	if res, err := (&anomaly.Runner{Store: ev.Service.Store}).Run(ctx); err != nil {
+		slog.Error("cost anomaly scan failed", "err", err)
+	} else if res.Raised+res.Resolved > 0 {
+		slog.Warn("cost anomalies", "raised", res.Raised, "updated", res.Updated, "resolved", res.Resolved)
+	}
 	alerts, err := ev.EvaluateAll(ctx)
 	if err != nil {
 		slog.Error("budget evaluation failed", "err", err)
