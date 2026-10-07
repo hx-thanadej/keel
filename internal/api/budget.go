@@ -99,11 +99,12 @@ type budgetBody struct {
 	CostBasis      string             `json:"cost_basis"`
 	Thresholds     []budget.Threshold `json:"thresholds"`
 	WebhookURL     *string            `json:"webhook_url"`
+	MirrorNative   bool               `json:"mirror_native"`
 }
 
 func (b budgetBody) budget() budget.Budget {
 	return budget.Budget{ProjectID: b.ProjectID, EnvironmentID: b.EnvironmentID, Provider: b.Provider, Name: b.Name, Year: b.Year, Amount: b.Amount,
-		MonthlyWeights: b.MonthlyWeights, CostBasis: b.CostBasis, Thresholds: b.Thresholds, WebhookURL: b.WebhookURL}
+		MonthlyWeights: b.MonthlyWeights, CostBasis: b.CostBasis, Thresholds: b.Thresholds, WebhookURL: b.WebhookURL, MirrorNative: b.MirrorNative}
 }
 
 func mountBudgets(mux Mux, a auth.Authenticator, d BudgetDeps) {
@@ -169,7 +170,7 @@ func mountBudgets(mux Mux, a auth.Authenticator, d BudgetDeps) {
 		if cur.ID == "" {
 			return catalog.ErrNotFound
 		}
-		in := budgetBody{Name: cur.Name, Amount: cur.Amount, MonthlyWeights: cur.MonthlyWeights, CostBasis: cur.CostBasis, Thresholds: cur.Thresholds, WebhookURL: cur.WebhookURL, Year: cur.Year}
+		in := budgetBody{Name: cur.Name, Amount: cur.Amount, MonthlyWeights: cur.MonthlyWeights, CostBasis: cur.CostBasis, Thresholds: cur.Thresholds, WebhookURL: cur.WebhookURL, Year: cur.Year, MirrorNative: cur.MirrorNative}
 		if err := decode(r, &in); err != nil {
 			return err
 		}
@@ -195,6 +196,17 @@ func mountBudgets(mux Mux, a auth.Authenticator, d BudgetDeps) {
 			return budgetErr(err)
 		}
 		w.WriteHeader(http.StatusNoContent)
+		return nil
+	}))
+	mux.Handle("GET /v1/tenants/{tenant}/budgets/{budget}/mirrors", authed(a, tb, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		if err := d.allow(r, p, "budget.read", r.PathValue("tenant"), ""); err != nil {
+			return err
+		}
+		out, err := d.Budgets.Mirrors(r.Context(), r.PathValue("tenant"), r.PathValue("budget"))
+		if err != nil {
+			return budgetErr(err)
+		}
+		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
 	mux.Handle("GET /v1/tenants/{tenant}/budgets/{budget}/status", authed(a, tb, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {

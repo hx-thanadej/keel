@@ -48,6 +48,7 @@ type Budget struct {
 	CostBasis      string      `json:"cost_basis"`      // effective | billed
 	Thresholds     []Threshold `json:"thresholds"`
 	WebhookURL     *string     `json:"webhook_url,omitempty"`
+	MirrorNative   bool        `json:"mirror_native"` // keep a native provider budget in step (#39)
 	CreatedAt      time.Time   `json:"created_at"`
 }
 
@@ -128,13 +129,13 @@ type Service struct {
 }
 
 const cols = `id::text, tenant_id::text, project_id::text, environment_id::text, provider, name, year, amount::text, currency,
-	monthly_weights::text[], cost_basis, thresholds, webhook_url, created_at`
+	monthly_weights::text[], cost_basis, thresholds, webhook_url, created_at, mirror_native`
 
 func scan(r pgx.Row) (Budget, error) {
 	var b Budget
 	var th []byte
 	err := r.Scan(&b.ID, &b.TenantID, &b.ProjectID, &b.EnvironmentID, &b.Provider, &b.Name, &b.Year, &b.Amount, &b.Currency,
-		&b.MonthlyWeights, &b.CostBasis, &th, &b.WebhookURL, &b.CreatedAt)
+		&b.MonthlyWeights, &b.CostBasis, &th, &b.WebhookURL, &b.CreatedAt, &b.MirrorNative)
 	if err == nil {
 		err = json.Unmarshal(th, &b.Thresholds)
 	}
@@ -150,9 +151,9 @@ func (s Service) Create(ctx context.Context, tenantID string, b Budget, by ...ac
 	var out Budget
 	err := s.Store.InTenant(ctx, tenantID, func(tx pgx.Tx) error {
 		var err error
-		out, err = scan(tx.QueryRow(ctx, `INSERT INTO budgets (tenant_id, project_id, environment_id, provider, name, year, amount, currency, monthly_weights, cost_basis, thresholds, webhook_url)
-			VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, (SELECT currency FROM tenants WHERE id = $1), $8::numeric[], $9, $10, $11) RETURNING `+cols,
-			tenantID, b.ProjectID, b.EnvironmentID, b.Provider, b.Name, b.Year, b.Amount, b.MonthlyWeights, b.CostBasis, th, b.WebhookURL))
+		out, err = scan(tx.QueryRow(ctx, `INSERT INTO budgets (tenant_id, project_id, environment_id, provider, name, year, amount, currency, monthly_weights, cost_basis, thresholds, webhook_url, mirror_native)
+			VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, (SELECT currency FROM tenants WHERE id = $1), $8::numeric[], $9, $10, $11, $12) RETURNING `+cols,
+			tenantID, b.ProjectID, b.EnvironmentID, b.Provider, b.Name, b.Year, b.Amount, b.MonthlyWeights, b.CostBasis, th, b.WebhookURL, b.MirrorNative))
 		if err != nil {
 			return err
 		}
@@ -171,8 +172,8 @@ func (s Service) Update(ctx context.Context, tenantID, id string, b Budget, by .
 	var out Budget
 	err := s.Store.InTenant(ctx, tenantID, func(tx pgx.Tx) error {
 		var err error
-		out, err = scan(tx.QueryRow(ctx, `UPDATE budgets SET name = $2, amount = $3::numeric, monthly_weights = $4::numeric[], cost_basis = $5, thresholds = $6, webhook_url = $7
-			WHERE id = $1 AND archived_at IS NULL RETURNING `+cols, id, b.Name, b.Amount, b.MonthlyWeights, b.CostBasis, th, b.WebhookURL))
+		out, err = scan(tx.QueryRow(ctx, `UPDATE budgets SET name = $2, amount = $3::numeric, monthly_weights = $4::numeric[], cost_basis = $5, thresholds = $6, webhook_url = $7, mirror_native = $8
+			WHERE id = $1 AND archived_at IS NULL RETURNING `+cols, id, b.Name, b.Amount, b.MonthlyWeights, b.CostBasis, th, b.WebhookURL, b.MirrorNative))
 		if err != nil {
 			return err
 		}

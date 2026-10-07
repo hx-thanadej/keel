@@ -27,6 +27,9 @@
 //	KEEL_AWS_BILL_PREFIX      export prefix
 //	KEEL_AWS_PAYER_ACCOUNT    management account id (FOCUS BillingAccountId)
 //	KEEL_AWS_REGION           bucket region; credentials: AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE
+//	KEEL_TENCENT_BUDGETS=1    mirror opted-in Budgets to Tencent Cloud budgets (payer credentials)
+//	KEEL_AWS_BUDGET_ACCOUNT   mirror opted-in Budgets to AWS Budgets in this management account
+//	KEEL_AWS_BUDGET_EMAIL     optional subscriber so AWS budgets also carry the thresholds
 //	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
@@ -70,6 +73,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
+	awsadapter "github.com/hx-thanadej/keel/internal/cloud/aws"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
@@ -167,6 +171,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	go evaluateLoop(ctx, evaluator)
+	if err := startMirrors(ctx, st); err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
 	}
@@ -622,6 +630,45 @@ func startOpenCost(ctx context.Context, st *store.Store) error {
 						}
 					}
 				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return nil
+}
+
+// startMirrors keeps native provider budgets in step with opted-in Budgets
+// hourly (#39). Provider budgets alert even if Keel is down.
+func startMirrors(ctx context.Context, st *store.Store) error {
+	natives := map[string]budget.Native{}
+	if os.Getenv("KEEL_TENCENT_BUDGETS") == "1" {
+		natives["tencent"] = tencent.Budgets{Region: envOr("KEEL_TENCENT_REGION", "ap-bangkok"), Creds: tencent.Credentials()}
+	}
+	if acct := os.Getenv("KEEL_AWS_BUDGET_ACCOUNT"); acct != "" {
+		b, err := awsadapter.New(ctx, acct, os.Getenv("KEEL_AWS_BUDGET_EMAIL"))
+		if err != nil {
+			return err
+		}
+		natives["aws"] = b
+	}
+	if len(natives) == 0 {
+		return nil
+	}
+	m := budget.Mirror{Service: budget.Service{Store: st}, Natives: natives, BillingCurrency: map[string]string{"tencent": "USD", "aws": "USD"}}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			rep, err := m.SyncAll(ctx)
+			if err != nil {
+				slog.Error("budget mirror sync failed", "err", err)
+			}
+			for _, d := range rep.Drift {
+				slog.Warn("native budget drift corrected", "detail", d)
 			}
 			select {
 			case <-ctx.Done():
