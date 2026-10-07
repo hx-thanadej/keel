@@ -16,6 +16,7 @@ web:
 
 test:
 	go test -race ./...
+	cd web && pnpm test
 
 lint:
 	go vet ./...

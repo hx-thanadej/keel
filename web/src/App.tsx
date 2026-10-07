@@ -1,26 +1,21 @@
 import { useEffect, useState } from 'react'
-
-type Health = { status: string; version: string }
+import { api, ApiError, type Principal } from './api'
+import { SignIn } from './SignIn'
+import { Shell } from './Shell'
 
 export default function App() {
-  const [health, setHealth] = useState<Health | null>(null)
+  const [me, setMe] = useState<Principal | null | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/healthz')
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then(setHealth)
-      .catch((e: Error) => setError(e.message))
+    api
+      .me()
+      .then(setMe)
+      .catch((e) => (e instanceof ApiError && e.status === 401 ? setMe(null) : setError(String(e.message ?? e))))
   }, [])
 
-  return (
-    <main>
-      <h1>Keel</h1>
-      <p>DevSecOps platform — portal scaffold.</p>
-      <p>
-        API:{' '}
-        {error ? `unreachable (${error})` : health ? `${health.status}, version ${health.version}` : 'checking…'}
-      </p>
-    </main>
-  )
+  if (error) return <p className="notice error">Keel is unreachable: {error}</p>
+  if (me === undefined) return <p className="notice">Loading…</p>
+  if (me === null) return <SignIn />
+  return <Shell me={me} onSignedOut={() => setMe(null)} />
 }
