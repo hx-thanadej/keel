@@ -71,6 +71,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	awscreds "github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/riverqueue/river"
 
 	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
@@ -85,6 +86,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/fx"
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
@@ -212,22 +214,55 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	if raw := os.Getenv("KEEL_DEV_PRINCIPAL"); raw != "" {
-		authn, err := devAuthenticator(raw)
-		if err != nil {
-			pool.Close()
-			return api.Deps{}, noop, err
-		}
-		deps.Auth, deps.Sessions = authn, authn
-		return deps, pool.Close, nil
-	}
-	sessions, err := signIn(st)
+	engine, stopJobs, err := startFlows(ctx, st)
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
+	deps.Flows = &api.FlowDeps{Authz: az, Engine: engine}
+	cleanup := func() { stopJobs(); pool.Close() }
+	if raw := os.Getenv("KEEL_DEV_PRINCIPAL"); raw != "" {
+		authn, err := devAuthenticator(raw)
+		if err != nil {
+			cleanup()
+			return api.Deps{}, noop, err
+		}
+		deps.Auth, deps.Sessions = authn, authn
+		return deps, cleanup, nil
+	}
+	sessions, err := signIn(st)
+	if err != nil {
+		cleanup()
+		return api.Deps{}, noop, err
+	}
 	deps.Auth, deps.Sessions = sessions, sessions
-	return deps, pool.Close, nil
+	return deps, cleanup, nil
+}
+
+// flowDefs lists the durable flows Keel runs (#87).
+func flowDefs(*store.Store) []flow.Def { return nil }
+
+// startFlows runs River (ADR-0014) for durable flows. The returned func stops
+// it, letting running steps finish for up to 30s.
+func startFlows(ctx context.Context, st *store.Store) (*flow.Engine, func(), error) {
+	engine := flow.New(st, flowDefs(st)...)
+	workers := river.NewWorkers()
+	engine.Register(workers)
+	client, err := flow.NewClient(st.AppPool(), workers, flow.ClientOptions{Logger: slog.Default()})
+	if err != nil {
+		return nil, nil, fmt.Errorf("river: %w", err)
+	}
+	engine.SetClient(client)
+	if err := client.Start(ctx); err != nil {
+		return nil, nil, fmt.Errorf("river: %w", err)
+	}
+	return engine, func() {
+		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := client.Stop(c); err != nil {
+			slog.Error("river stop", "err", err)
+		}
+	}, nil
 }
 
 func signIn(st *store.Store) (*oidcauth.Service, error) {

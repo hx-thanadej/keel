@@ -46,6 +46,8 @@ rules := {
 	"cost.load": {"platform_admin", "finops_lead"},
 	"cost.allocate": {"platform_admin", "finops_lead"},
 	"cost.read_unallocated": {"platform_admin", "finops_lead"},
+	"flow.read": read_roles,
+	"flow.operate": {"platform_admin"},
 	"identity_provider.read": {"platform_admin", "security_lead"},
 	"identity_provider.create": {"platform_admin"},
 	"identity_provider.update": {"platform_admin"},

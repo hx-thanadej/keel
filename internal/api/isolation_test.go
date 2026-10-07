@@ -17,6 +17,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
@@ -53,7 +54,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Cost:      &api.CostDeps{Authz: az, Queries: cost.Queries{Store: s}, Ingester: &cost.Ingester{Store: s}, Rules: cost.Rules{Store: s}},
 		Budgets:   &api.BudgetDeps{Authz: az, Catalog: catalog.New(s, az), Budgets: budget.Service{Store: s}, Resolve: stubResolve},
 		Authz:     az,
-		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}}})
+		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}},
+		Flows:     &api.FlowDeps{Authz: az, Engine: flow.New(s)}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	c := client{t: t, url: srv.URL}
@@ -102,6 +104,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/recommendations/{recommendation}/apply":        {},
 		"PATCH /v1/tenants/{tenant}/projects/{project}/environments/{env}":        {"waste_cleanup": false},
 		"POST /v1/tenants/{tenant}/recommendations/{recommendation}/dismiss":      {"reason": "pwn"},
+		"POST /v1/tenants/{tenant}/flows/{flow}/retry":                            {},
+		"POST /v1/tenants/{tenant}/flows/{flow}/cancel":                           {"reason": "pwn"},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)
@@ -116,9 +120,15 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var victimFlow string
+	if err := s.InTenant(t.Context(), a, func(tx pgx.Tx) error {
+		return tx.QueryRow(t.Context(), `INSERT INTO flows (tenant_id, kind, subject, input, state, created_by) VALUES ($1, 'vend_environment', 'environment/victim-flow-subject', '{"name":"victim-flow-input"}', 'failed', 'user:victim') RETURNING id::text`, a).Scan(&victimFlow)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload"},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input"},
 	}
 
 	attackers := map[string]auth.Principal{

@@ -27,6 +27,7 @@ type Deps struct {
 	// Authz enables the Findings inbox (shared by cost, rightsizing, security).
 	Authz     catalog.Authorizer
 	Rightsize *RightsizeDeps
+	Flows     *FlowDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -94,6 +95,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Rightsize != nil {
 			mountRightsize(mux, deps.Auth, *deps.Rightsize)
+		}
+		if deps.Flows != nil {
+			mountFlows(mux, deps.Auth, *deps.Flows)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).
