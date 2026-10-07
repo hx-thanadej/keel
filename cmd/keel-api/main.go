@@ -57,6 +57,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -99,6 +100,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/decisions"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/dora"
+	"github.com/hx-thanadej/keel/internal/evidence"
 	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/flow"
@@ -128,7 +130,7 @@ var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 {
-		cmds := map[string]func([]string) error{"bootstrap": bootstrap, "digest-pubkey": digestPubkey, "verify-log": verifyLog, "verify-archive": verifyArchive}
+		cmds := map[string]func([]string) error{"bootstrap": bootstrap, "digest-pubkey": digestPubkey, "verify-log": verifyLog, "verify-archive": verifyArchive, "verify-evidence": verifyEvidence}
 		if cmd, ok := cmds[os.Args[1]]; ok {
 			if err := cmd(os.Args[2:]); err != nil {
 				slog.Error(os.Args[1], "err", err)
@@ -222,6 +224,22 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Controls = &api.ControlDeps{Authz: az, Service: controls.Service{Store: st, Registry: reg}}
+	evKey, err := digestKey()
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	deps.Evidence = &api.EvidenceDeps{Authz: az, Exporter: evidence.Exporter{Store: st, Controls: controls.Service{Store: st, Registry: reg}, Key: evKey}}
+	if os.Getenv("KEEL_KEV") != "0" {
+		cra := evidence.CRA{Store: st, KEV: evidence.CISAKEV{URL: os.Getenv("KEEL_KEV_URL")}}
+		go every(ctx, 6*time.Hour, "CRA clock", func(ctx context.Context) error {
+			n, err := cra.Run(ctx)
+			if err == nil && n > 0 {
+				slog.Warn("CRA reporting clock started", "vulnerabilities", n)
+			}
+			return err
+		})
+	}
 	deps.VEX = &api.VEXDeps{Authz: az, Service: vex.Service{Store: st}, Author: os.Getenv("KEEL_BASE_URL")}
 	deps.SBOM = &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: st}, Releases: att}
 	if os.Getenv("KEEL_OSV") != "0" {
@@ -758,6 +776,31 @@ func startSealer(ctx context.Context, st *store.Store) error {
 			}
 		}
 	}()
+	return nil
+}
+
+// verifyEvidence checks an exported bundle offline:
+// keel-api verify-evidence <bundle.json> <base64 public key>.
+func verifyEvidence(args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: keel-api verify-evidence <bundle.json> <base64 ed25519 public key>")
+	}
+	raw, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	var b evidence.Bundle
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return err
+	}
+	pub, err := base64.StdEncoding.DecodeString(args[1])
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return errors.New("public key must be base64 of 32 bytes")
+	}
+	if err := evidence.Verify(pub, b); err != nil {
+		return err
+	}
+	fmt.Printf("OK: %s for tenant %s, %s → %s, %d sections\n", b.Manifest.Format, b.Manifest.Tenant, b.Manifest.From.Format("2006-01-02"), b.Manifest.To.Format("2006-01-02"), len(b.Sections))
 	return nil
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/dora"
+	"github.com/hx-thanadej/keel/internal/evidence"
 	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/leaks"
@@ -88,6 +89,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Attest:     &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission:  &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
 		VEX:        &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
+		Evidence:   &api.EvidenceDeps{Authz: az, Exporter: evidence.Exporter{Store: s, Controls: controls.Service{Store: s, Registry: mustControls(t)}}},
 		Scorecards: &api.ScorecardDeps{Authz: az, Service: scorecard.Service{Store: s}},
 		DORA:       &api.DORADeps{Authz: az, Service: dora.Service{Store: s}},
 		Webhooks:   &api.WebhookDeps{Leaks: &leaks.Service{Store: s}},
