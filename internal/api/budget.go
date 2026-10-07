@@ -85,7 +85,14 @@ func budgetErr(err error) error {
 }
 
 func actor(p auth.Principal) activity.Actor {
-	return activity.Actor{Type: activity.ActorHuman, UID: p.Subject, Session: &activity.Session{Issuer: p.Issuer, MFA: p.MFA}}
+	kind := activity.ActorHuman
+	switch p.Kind {
+	case auth.KindPipeline:
+		kind = activity.ActorPipeline
+	case auth.KindWorkload:
+		kind = activity.ActorWorkload
+	}
+	return activity.Actor{Type: kind, UID: p.Subject, Session: &activity.Session{Issuer: p.Issuer, MFA: p.MFA}}
 }
 
 type budgetBody struct {

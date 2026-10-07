@@ -51,7 +51,9 @@ rules := {
 	"environment.vend": {"platform_admin"},
 	"environment.set_approval": {"platform_admin"},
 	"release.read": read_roles,
-	"release.create": {"platform_admin", "team_lead", "engineer"},
+	"release.create": {"platform_admin", "team_lead", "engineer", "pipeline"},
+	"scan.upload": {"platform_admin", "security_lead", "pipeline"},
+	"scan.read": read_roles,
 	"promotion.read": read_roles,
 	"promotion.request": {"platform_admin", "team_lead", "engineer"},
 	"promotion.approve": {"platform_admin", "tenant_approver"},
@@ -70,6 +72,15 @@ usable(b) if b.tenant_id == input.principal.tenant_id
 
 team_ok(b) if count(object.get(b, "team_ids", [])) == 0
 team_ok(b) if input.resource.team_id in b.team_ids
+
+# Pipelines (GitHub Actions OIDC) hold no bindings: they may perform
+# pipeline actions on their own Services in their own Tenant only.
+allow_reasons contains "pipeline acting on its own service" if {
+	input.principal.kind == "pipeline"
+	"pipeline" in rules[input.action]
+	input.resource.tenant_id == input.principal.tenant_id
+	input.resource.id in object.get(input.principal, "service_ids", [])
+}
 
 # Creating a Tenant: only a platform admin of the home Tenant.
 allow_reasons contains "home platform_admin may create tenants" if {

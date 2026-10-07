@@ -16,8 +16,12 @@ type PromotionDeps struct {
 	Service *promotion.Service
 }
 
-func (d PromotionDeps) allow(r *http.Request, p auth.Principal, action, typ, tenant string) error {
-	dec, err := d.Authz.Decide(r.Context(), authz.Request{Principal: p, Action: action, Resource: authz.Resource{Type: typ, TenantID: tenant}})
+func (d PromotionDeps) allow(r *http.Request, p auth.Principal, action, typ, tenant string, id ...string) error {
+	res := authz.Resource{Type: typ, TenantID: tenant}
+	if len(id) > 0 {
+		res.ID = id[0]
+	}
+	dec, err := d.Authz.Decide(r.Context(), authz.Request{Principal: p, Action: action, Resource: res})
 	if err != nil {
 		return err
 	}
@@ -42,7 +46,7 @@ func promotionErr(err error) error {
 func mountPromotions(mux Mux, a auth.Authenticator, d PromotionDeps) {
 	mux.Handle("POST /v1/tenants/{tenant}/services/{service}/releases", authed(a, []string{"tenant", "service"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tenant := r.PathValue("tenant")
-		if err := d.allow(r, p, "release.create", "release", tenant); err != nil {
+		if err := d.allow(r, p, "release.create", "release", tenant, r.PathValue("service")); err != nil {
 			return err
 		}
 		var in struct {
@@ -52,6 +56,9 @@ func mountPromotions(mux Mux, a auth.Authenticator, d PromotionDeps) {
 		}
 		if err := decode(r, &in); err != nil {
 			return err
+		}
+		if p.Pipeline != nil {
+			in.CommitSHA = p.Pipeline.SHA // the token, not the caller, says which commit was built
 		}
 		out, err := d.Service.CreateRelease(r.Context(), tenant, r.PathValue("service"), in.Version, in.Images, in.CommitSHA, actor(p))
 		if err != nil {
