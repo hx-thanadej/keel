@@ -117,9 +117,18 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 	return run, err
 }
 
+// ResolveAbsent is resolveAbsent for other sources of vulnerability
+// Findings (OSV re-matching) that report under their own tool name.
+func ResolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string) (int, error) {
+	return resolveAbsent(ctx, tx, service, tool, current)
+}
+
 // resolveAbsent: a full scan by tool that no longer reports a Finding removes
 // the tool from it; with no tool left reporting, the Finding is resolved.
 func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string) (int, error) {
+	if current == nil {
+		current = []string{} // a nil slice is SQL NULL, and "x = ANY(NULL)" is never false
+	}
 	if _, err := tx.Exec(ctx, `UPDATE findings SET detail = jsonb_set(detail, '{tools}', (detail->'tools') - $2)
 		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND NOT (fingerprint = ANY ($3::text[]))`, service, tool, current); err != nil {
 		return 0, err

@@ -105,6 +105,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/registry"
 	"github.com/hx-thanadej/keel/internal/rightsize"
+	"github.com/hx-thanadej/keel/internal/sbom"
 	"github.com/hx-thanadej/keel/internal/scans"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/templates"
@@ -205,6 +206,23 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Attest = &api.AttestDeps{Authz: az, Service: att}
+	deps.SBOM = &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: st}, Releases: att}
+	if os.Getenv("KEEL_OSV") != "0" {
+		m := sbom.Matcher{Store: st, OSV: sbom.OSVClient{BaseURL: os.Getenv("KEEL_OSV_URL")}, Tenants: func(ctx context.Context) ([]string, error) {
+			rows, err := st.AppPool().Query(ctx, `SELECT t::text FROM tenant_ids() AS t`)
+			if err != nil {
+				return nil, err
+			}
+			return pgx.CollectRows(rows, pgx.RowTo[string])
+		}}
+		go daily(ctx, "osv re-match", func(ctx context.Context) error {
+			res, err := m.Run(ctx)
+			if err == nil {
+				slog.Info("osv re-match", "components", res.Components, "raised", res.Raised, "resolved", res.Resolved)
+			}
+			return err
+		})
+	}
 	adm := admission.Service{Store: st, Registry: os.Getenv("KEEL_TCR_DOMAIN"), BuilderSubject: os.Getenv("KEEL_TRUSTED_BUILDER") + "*", RekorURL: os.Getenv("KEEL_REKOR_URL")}
 	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
 		adm.Git = apply.GitHub{Token: tok}
