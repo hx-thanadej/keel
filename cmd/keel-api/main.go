@@ -58,6 +58,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
+	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
@@ -140,7 +141,8 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	st := store.New(pool)
-	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{}}
+	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{},
+		Cost: &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}}}
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
 	}

@@ -137,3 +137,39 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
   bypass RLS). The composite-FK pattern is therefore load-bearing.
 - CI now runs Postgres 18 as a service and fails, not skips, if DB tests can't
   run.
+
+## 2026-10-07 — thanadej@harmonyx.co → Claude — "Continue all things until finished": M0 built
+
+- **Authorised:** continue through all tickets; Claude merges its own PRs once
+  CI is green (squash), one PR per ticket, stacked where dependent.
+- **Merged / open:** #45 scaffold, #46 RLS schema (#17), #47 Activity Log (#18),
+  #48 OPA authz (#20), #49 Catalog API (#19), #50 OIDC sign-in (#21, #22),
+  #51 isolation suite (#23), #52 signed digest chain (#24), #53 Tencent account
+  discovery (#26), #54 catalog-info sync (#27), #55 portal (#28), #56 WORM
+  archive export + offline verify (#25).
+- **Decisions made while building** (recorded in PRs/commits, not ADR-worthy):
+  OPA over cedar-go (same engine as Conftest/Gatekeeper); River deferred —
+  hourly jobs use ticker + advisory locks; `keel_lookup` NOLOGIN BYPASSRLS
+  role owns the only cross-Tenant lookup functions (FORCE RLS applies to
+  owners, so SECURITY DEFINER alone sees nothing); per-Tenant digest chains so
+  clients can verify their own log.
+- **Bugs caught by tests/mutation/smoke runs:** OPA eval_conflict on multiple
+  bindings; plain FKs bypass RLS (composite FKs now); gofmt version skew between
+  PATH and toolchain; `tenant_ids()` column name; Postgres microsecond rounding
+  breaking signatures; `json.Marshal` compacting RawMessage in the archive;
+  portal overflow at 375px.
+- **Blocked on the user:** #8 GitHub plan (main is unprotected on Free),
+  #9 Tencent payer billing access, #15 COS object-lock allowlist, real IdP
+  client registrations, archive account setup (runbook).
+
+## 2026-10-07 — Claude — M1 started: cost ingest (#30, #31, #34)
+
+- Verified Tencent's FOCUS 1.0 column list from its docs: EffectiveCost,
+  ServiceCategory, SkuId, SkuPriceId, ResourceType, CapacityReservationStatus
+  are empty; vendor columns x_ComponentName/Type, x_ExportTime, x_OwnerAccountID.
+- Loads are append-only: a re-ingest is a new load whose facts become current
+  only when fully written; a final load freezes the period. Facts are attributed
+  by member account → Cloud Account → Environment/Project; unknown accounts go
+  to the home Tenant as `unallocated` and are reported as a KPI.
+- Open: whether Tencent daily bill files are per-day or month-to-date decides
+  how files combine into a load; must be checked on the first real delivery (#29).
