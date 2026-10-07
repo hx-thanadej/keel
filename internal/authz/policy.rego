@@ -57,6 +57,7 @@ rules := {
 	"scan.read": read_roles,
 	"attestation.submit": {"platform_admin", "pipeline"},
 	"registry.push": {"pipeline"},
+	"sbom.submit": {"platform_admin", "pipeline"},
 	"promotion.read": read_roles,
 	"promotion.request": {"platform_admin", "team_lead", "engineer"},
 	"promotion.approve": {"platform_admin", "tenant_approver"},

@@ -23,6 +23,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/rightsize"
+	"github.com/hx-thanadej/keel/internal/sbom"
 	"github.com/hx-thanadej/keel/internal/scans"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 	"github.com/hx-thanadej/keel/internal/templates"
@@ -73,6 +74,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Scans:     &api.ScanDeps{Authz: az, Service: scans.Service{Store: s}},
 		Attest:    &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission: &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
+		SBOM:      &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: s}, Releases: attest.Service{Store: s}},
 		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
 		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
 	srv := httptest.NewServer(router)
@@ -134,6 +136,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/services/{service}/scans":                        {"version": "2.1.0", "runs": []any{}},
 		"POST /v1/tenants/{tenant}/releases/{release}/attestations":                 {},
 		"POST /v1/tenants/{tenant}/services/{service}/registry-token":               {},
+		"POST /v1/tenants/{tenant}/releases/{release}/sbom":                         {"bomFormat": "CycloneDX", "specVersion": "1.6"},
 		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/admission": {"mode": "warn", "why": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions":                                      {"fingerprint": "victim", "reason": "pwned by attacker", "expires_at": "2099-01-01T00:00:00Z"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/approve":                  {"note": "pwn"},

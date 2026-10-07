@@ -180,5 +180,6 @@ jobs:
           release=$(jq -n --arg v "$VERSION" --arg n "$NAME" --arg d "$DIGEST" '{version: $v, images: [{name: $n, digest: $d}]}' |
             curl -sSf "${auth[@]}" -H 'Content-Type: application/json' -d @- "${KEEL}/v1/tenants/${TENANT}/services/${SERVICE}/releases" | jq -r .id)
           curl -sSf "${auth[@]}" -H 'Content-Type: application/json' --data-binary "@${BUNDLE}" "${KEEL}/v1/tenants/${TENANT}/releases/${release}/attestations" > /dev/null
+          curl -sSf "${auth[@]}" -H 'Content-Type: application/json' --data-binary @sbom.cdx.json "${KEEL}/v1/tenants/${TENANT}/releases/${release}/sbom" > /dev/null
           curl -sSf "${auth[@]}" -H 'Content-Type: application/sarif+json' --data-binary @scan.sarif "${KEEL}/v1/tenants/${TENANT}/services/${SERVICE}/scans?scope=full" > /dev/null
           echo "Keel release ${release} for ${NAME}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
