@@ -21,6 +21,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
+	"github.com/hx-thanadej/keel/internal/templates"
 	"github.com/hx-thanadej/keel/internal/vending"
 )
 
@@ -63,6 +64,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}},
 		Flows:     &api.FlowDeps{Authz: az, Engine: flow.New(s)},
 		Promotion: &api.PromotionDeps{Authz: az, Service: promo},
+		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
 		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
@@ -118,6 +120,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/services/{service}/releases":                   {"version": "pwn", "images": []map[string]string{{"name": "x", "digest": "sha256:" + strings.Repeat("a", 64)}}},
 		"POST /v1/tenants/{tenant}/releases/{release}/promote":                    {"environment_id": env},
 		"POST /v1/tenants/{tenant}/promotions/{promotion}/approve":                {},
+		"POST /v1/tenants/{tenant}/projects/{project}/services":                   {"slug": "pwn", "template": "go"},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)

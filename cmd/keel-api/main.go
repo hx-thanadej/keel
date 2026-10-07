@@ -97,6 +97,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store"
+	"github.com/hx-thanadej/keel/internal/templates"
 	"github.com/hx-thanadej/keel/internal/utilisation"
 	"github.com/hx-thanadej/keel/internal/vending"
 )
@@ -258,12 +259,24 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	vendors := vendors(ctx, st)
-	engine, stopJobs, err := startFlows(ctx, st, flowDefs(vendors))
+	creator, err := templateCreator(st)
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	defs := flowDefs(vendors)
+	if creator != nil {
+		defs = append(defs, creator.Def())
+	}
+	engine, stopJobs, err := startFlows(ctx, st, defs)
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
 	deps.Flows = &api.FlowDeps{Authz: az, Engine: engine}
+	if creator != nil {
+		deps.Templates = &api.TemplateDeps{Authz: az, Engine: engine, Creator: *creator}
+	}
 	deps.Vending = &api.VendingDeps{Authz: az, Engine: engine, Vendors: vendors}
 	cleanup := func() { stopJobs(); pool.Close() }
 	if raw := os.Getenv("KEEL_DEV_PRINCIPAL"); raw != "" {
@@ -340,6 +353,26 @@ func every(ctx context.Context, d time.Duration, name string, fn func(context.Co
 		case <-t.C:
 		}
 	}
+}
+
+// templateCreator configures Service Templates (#92) from
+// KEEL_TEMPLATES="name=owner/repo@sha,..." in the KEEL_GITHUB_OWNER org.
+func templateCreator(st *store.Store) (*templates.Creator, error) {
+	raw, tok := os.Getenv("KEEL_TEMPLATES"), os.Getenv("KEEL_GITHUB_ADMIN_TOKEN")
+	if raw == "" || tok == "" {
+		return nil, nil
+	}
+	c := &templates.Creator{Store: st, Git: templates.GitHub{Client: ghapi.Client{Token: tok}}, Org: os.Getenv("KEEL_GITHUB_OWNER"),
+		ReusableWorkflow: os.Getenv("KEEL_REUSABLE_WORKFLOW"), Templates: map[string]templates.Template{}}
+	for _, kv := range strings.Split(raw, ",") {
+		name, rest, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		repo, ref, _ := strings.Cut(rest, "@")
+		if !ok || name == "" || !strings.Contains(repo, "/") {
+			return nil, fmt.Errorf("KEEL_TEMPLATES entry %q is not name=owner/repo@sha", kv)
+		}
+		c.Templates[name] = templates.Template{Name: name, Repo: repo, Ref: ref}
+	}
+	return c, nil
 }
 
 // flowDefs lists the durable flows Keel runs (#87).
