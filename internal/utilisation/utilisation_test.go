@@ -117,6 +117,9 @@ func TestPrometheusCollector(t *testing.T) {
 		t.Fatalf("cpu request %v", cpu.Request)
 	}
 	mem := byKey["shared-tke/tat-crm-prod/api/app#memory_bytes"]
+	if len(cpu.Hourly) != 24 || cpu.Hourly[23] < 0 || cpu.Hourly[0] > cpu.Max {
+		t.Fatalf("hourly %v", cpu.Hourly)
+	}
 	if mem.Max != 700e6 || mem.Request == nil || *mem.Request != float64(4<<30) {
 		t.Fatalf("mem %+v", mem)
 	}

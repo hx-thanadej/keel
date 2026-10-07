@@ -787,6 +787,11 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 			slog.Info("aws recommendations", "raised", res.Raised, "kept", res.Kept, "unowned", res.Unowned)
 		}
 	}
+	if res, err := (rightsize.OffHoursEngine{Service: rightsize.Service{Store: st}}).Run(ctx); err != nil {
+		slog.Error("off-hours scheduling failed", "err", err)
+	} else {
+		slog.Info("off-hours scheduling", "raised", res.Raised, "kept", res.Kept, "skipped", res.Skipped)
+	}
 	// Realised savings and regressions; advice from engines below is seen on the next run.
 	if res, err := (rightsize.Tracker{Service: rightsize.Service{Store: st}}).Run(ctx); err != nil {
 		slog.Error("savings tracker failed", "err", err)

@@ -58,7 +58,7 @@ func TestTencentCVMCollector(t *testing.T) {
 		t.Fatalf("summaries %d", len(sums))
 	}
 	for _, s := range sums {
-		if s.Max != 29 || s.Samples != 1440 || s.ResourceType != "vm" {
+		if s.Max != 29 || s.Samples != 1440 || s.ResourceType != "vm" || len(s.Hourly) != 24 || s.Hourly[23] != 29 {
 			t.Fatalf("summary %+v", s)
 		}
 	}

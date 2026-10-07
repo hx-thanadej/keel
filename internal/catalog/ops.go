@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -137,6 +138,22 @@ func (s *Service) SetTenantCurrency(ctx context.Context, p auth.Principal, tenan
 		actType: "keel.tenant.currency_changed", operation: "SetTenantCurrency", kind: activity.Update, why: why + " → " + currency},
 		func(tx pgx.Tx) (string, error) {
 			err := tx.QueryRow(ctx, `UPDATE tenants SET currency = $2 WHERE id = $1 RETURNING id::text, slug, name, is_home, created_at`, tenantID, currency).
+				Scan(&t.ID, &t.Slug, &t.Name, &t.IsHome, &t.CreatedAt)
+			return tenantID, err
+		})
+	return t, mapErr(err)
+}
+
+// SetTenantTimeZone sets the IANA time zone schedules are expressed in.
+func (s *Service) SetTenantTimeZone(ctx context.Context, p auth.Principal, tenantID, zone, why string) (Tenant, error) {
+	if _, err := time.LoadLocation(zone); err != nil || zone == "" || zone == "Local" {
+		return Tenant{}, invalid("time_zone must be an IANA time zone such as Asia/Bangkok")
+	}
+	var t Tenant
+	err := s.do(ctx, p, write{action: "tenant.update", res: authz.Resource{Type: "tenant", ID: tenantID, TenantID: tenantID},
+		actType: "keel.tenant.time_zone_changed", operation: "SetTenantTimeZone", kind: activity.Update, why: why + " → " + zone},
+		func(tx pgx.Tx) (string, error) {
+			err := tx.QueryRow(ctx, `UPDATE tenants SET time_zone = $2 WHERE id = $1 RETURNING id::text, slug, name, is_home, created_at`, tenantID, zone).
 				Scan(&t.ID, &t.Slug, &t.Name, &t.IsHome, &t.CreatedAt)
 			return tenantID, err
 		})
