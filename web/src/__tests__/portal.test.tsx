@@ -71,6 +71,7 @@ describe('portal', () => {
     render(<App />)
     expect(await screen.findByRole('button', { name: /HarmonyX/ })).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: 'TAT' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Projects' }))
     expect(await screen.findByText('TAT CRM')).toBeTruthy()
     expect(screen.getByText(/tat-crm-prod/)).toBeTruthy()
     expect(screen.getByText('no cloud account')).toBeTruthy() // dev has none
@@ -80,6 +81,7 @@ describe('portal', () => {
   it('tenant member sees only their own tenant', async () => {
     const calls = mockFetch({ '/auth/me': member, ...tenantRoutes })
     render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Projects' }))
     expect(await screen.findByText('TAT CRM')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /HarmonyX/ })).toBeNull()
     expect(calls.some((c) => c.startsWith(`/v1/tenants/${home}`))).toBe(false)
@@ -111,6 +113,68 @@ describe('portal', () => {
 
     await userEvent.type(screen.getByLabelText('Actor'), 'user:x')
     await waitFor(() => expect(calls.some((c) => c.includes('actor=user%3Ax'))).toBe(true))
+  })
+})
+
+describe('finops screens', () => {
+  const budget = { id: 'b1', project_id: 'p1', environment_id: 'e1', provider: null, name: 'tat-crm-prod 2026', year: 2026, amount: '365000', currency: 'THB', cost_basis: 'effective', thresholds: [] }
+  const monthStatus = {
+    period: 'month', start: '2026-09-01T00:00:00Z', as_of: '2026-09-02T00:00:00Z', currency: 'THB', cost_basis: 'effective',
+    budget: '30000.00', budget_to_date: '2000.00', actual: '2600.00', forecast: '39000.00', forecast_p10: '35000.00', forecast_p90: '43000.00',
+    forecast_method: 'seasonal_trend', history_days: 90, backtest_mape: 0.031, variance: '600.00', final: false,
+    providers: [{ provider: 'tencent', final: false }], missing_fx: false,
+    series: Array.from({ length: 30 }, (_, i) => ({ start: `2026-09-${String(i + 1).padStart(2, '0')}T00:00:00Z`, budget: '1000.00', actual: i < 2 ? '1300.00' : '' })),
+  }
+  const routes = (statusCalls: string[]) => ({
+    '/auth/me': member,
+    ...tenantRoutes,
+    [`/v1/tenants/${tat}/budgets`]: { items: [budget] },
+    [`/v1/tenants/${tat}/budgets/b1/status`]: (u: URL) => {
+      statusCalls.push(u.searchParams.get('period') ?? '')
+      if (u.searchParams.get('period') === 'day') return { ...monthStatus, period: 'day', budget: '1000.00', actual: '1300.00', forecast: '', series: null }
+      if (u.searchParams.get('period') === 'year') return { ...monthStatus, period: 'year', budget: '365000.00', forecast: '', forecast_method: 'insufficient_history', history_days: 12, series: [] }
+      return monthStatus
+    },
+    [`/v1/tenants/${tat}/costs/breakdown`]: { items: [{ key: 'Cloud Virtual Machine', service: 'Cloud Virtual Machine', billed: '2000.00', effective: '2000.00', currency: 'THB' }] },
+  })
+
+  it('budget screen shows tiles, finality, chart and switches Day/Month/Year', async () => {
+    const statusCalls: string[] = []
+    mockFetch(routes(statusCalls))
+    render(<App />)
+    expect(await screen.findByText('30,000.00 THB')).toBeTruthy()
+    expect(screen.getByText(/Slightly over|Over budget|Well over/)).toBeTruthy() // variance carries a label, not colour alone
+    expect(screen.getByText('tencent: data not final')).toBeTruthy()
+    expect(screen.getByText('39,000.00 THB')).toBeTruthy()
+    expect(screen.getByText(/35,000.00 – 43,000.00/)).toBeTruthy()
+    expect(screen.getByRole('img')).toBeTruthy() // the chart
+    expect(await screen.findByText('Cloud Virtual Machine')).toBeTruthy()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Show table' }))
+    expect(screen.getAllByRole('row').length).toBe(31)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Day' }))
+    expect(await screen.findByText('Switch to Month or Year')).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Year' }))
+    expect(await screen.findByText(/Needs 28 days of history \(12 so far\)/)).toBeTruthy()
+    expect(statusCalls).toEqual(expect.arrayContaining(['month', 'day', 'year']))
+  })
+
+  it('costs tab offers a CSV of the tenant\'s own daily costs', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/costs/daily`]: { items: [{ day: '2026-09-01T00:00:00Z', project_slug: 'tat-crm', environment_name: 'prod', provider: 'tencent', currency: 'USD', billed: '35.20', effective: '6.20' }] } })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Costs' }))
+    const link = (await screen.findByRole('link', { name: 'Download CSV' })) as HTMLAnchorElement
+    expect(link.getAttribute('href')).toMatch(new RegExp(`^/v1/tenants/${tat}/costs/daily\\?from=\\d{4}-\\d{2}-01&to=.*&format=csv$`))
+    expect(await screen.findByText('tat-crm · prod · tencent')).toBeTruthy()
+  })
+
+  it('findings tab lists anomalies with severity label and contributors', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null }] } })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Findings' }))
+    expect(await screen.findByText(/Critical · cost anomaly/)).toBeTruthy()
+    expect(screen.getByText(/nat-2 \(\+300.00\)/)).toBeTruthy()
   })
 })
 

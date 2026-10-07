@@ -63,3 +63,96 @@ export const api = {
 export function visibleTenantIds(p: Principal): string[] {
   return [...new Set([p.tenant_id, ...p.bindings.map((b) => b.tenant_id)])]
 }
+
+export type Threshold = { pct: number; basis: 'actual' | 'forecast' }
+export type Budget = {
+  id: string
+  project_id: string
+  environment_id: string | null
+  provider: string | null
+  name: string
+  year: number
+  amount: string
+  currency: string
+  cost_basis: 'effective' | 'billed'
+  thresholds: Threshold[]
+}
+export type Period = 'day' | 'month' | 'year'
+export type BudgetStatus = {
+  period: Period
+  start: string
+  as_of: string
+  currency: string
+  cost_basis: string
+  budget: string
+  budget_to_date: string
+  actual: string
+  forecast: string
+  forecast_p10: string
+  forecast_p90: string
+  forecast_method: string
+  history_days: number
+  backtest_mape?: number
+  variance: string
+  final: boolean
+  providers: { provider: string; final: boolean }[]
+  missing_fx: boolean
+  series: { start: string; budget: string; actual: string }[] | null
+}
+export type BreakdownRow = { key: string; service: string; billed: string; effective: string; currency: string }
+export type DailyCost = {
+  day: string
+  project_slug: string | null
+  environment_name: string
+  provider: string
+  currency: string
+  billed: string
+  effective: string | null
+}
+export type Finding = {
+  id: string
+  kind: string
+  severity: 'low' | 'medium' | 'high' | 'critical'
+  status: string
+  title: string
+  detail: Record<string, unknown>
+  first_seen_at: string
+  resolution: string | null
+}
+
+const send = <T,>(path: string, method: string, body: unknown) => request<T>(path, { method, body: JSON.stringify(body) })
+
+export const finops = {
+  budgets: (t: string) => list<Budget>(`/v1/tenants/${t}/budgets`),
+  createBudget: (t: string, b: { project_id: string; environment_id?: string; name: string; year: number; amount: string }) =>
+    send<Budget>(`/v1/tenants/${t}/budgets`, 'POST', b),
+  status: (t: string, b: string, period: Period, date: string) =>
+    request<BudgetStatus>(`/v1/tenants/${t}/budgets/${b}/status?period=${period}&date=${date}`),
+  breakdown: (t: string, q: { from: string; to: string; by: 'service' | 'resource'; project?: string; environment?: string }) => {
+    const p = new URLSearchParams({ from: q.from, to: q.to, by: q.by, limit: '10' })
+    if (q.project) p.set('project', q.project)
+    if (q.environment) p.set('environment', q.environment)
+    return list<BreakdownRow>(`/v1/tenants/${t}/costs/breakdown?${p}`)
+  },
+  daily: (t: string, from: string, to: string) => list<DailyCost>(`/v1/tenants/${t}/costs/daily?from=${from}&to=${to}`),
+  dailyCsvUrl: (t: string, from: string, to: string) => `/v1/tenants/${t}/costs/daily?from=${from}&to=${to}&format=csv`,
+  findings: (t: string) => list<Finding>(`/v1/tenants/${t}/findings`),
+  resolve: (t: string, id: string, resolution: string) => send<Finding>(`/v1/tenants/${t}/findings/${id}/resolve`, 'POST', { resolution }),
+}
+
+/** Money for display: grouped, two decimals, currency code after. */
+export function fmtMoney(v: string | number | null | undefined, currency?: string): string {
+  if (v === null || v === undefined || v === '') return '—'
+  const n = typeof v === 'number' ? v : Number(v)
+  const s = n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return currency ? `${s} ${currency}` : s
+}
+
+/** Window [from, to) for a period containing date (YYYY-MM-DD). */
+export function windowFor(period: Period, date: string): { from: string; to: string } {
+  const d = new Date(date + 'T00:00:00Z')
+  const iso = (x: Date) => x.toISOString().slice(0, 10)
+  if (period === 'day') return { from: iso(d), to: iso(new Date(d.getTime() + 86400000)) }
+  if (period === 'month') return { from: iso(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1))), to: iso(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))) }
+  return { from: `${d.getUTCFullYear()}-01-01`, to: `${d.getUTCFullYear() + 1}-01-01` }
+}

@@ -15,9 +15,25 @@ import (
 
 // ECBDailyURL and ECB90DaysURL are the ECB reference-rate feeds.
 const (
-	ECBDailyURL  = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
-	ECB90DaysURL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist-90d.xml"
+	ECBDailyURL   = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
+	ECB90DaysURL  = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist-90d.xml"
+	ECBHistoryURL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.xml" // since 1999, ~8 MB
 )
+
+// Kept is the set of currencies Keel stores: Tenant currencies plus the
+// billing currencies of supported clouds. Extend when a provider bills in another.
+var Kept = map[string]bool{"EUR": true, "USD": true, "THB": true, "CNY": true}
+
+// Filter keeps rates for Kept currencies on or after since.
+func Filter(rates []Rate, since time.Time) []Rate {
+	var out []Rate
+	for _, r := range rates {
+		if Kept[r.Currency] && !r.Day.Before(since) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
 
 // Rate is units of Currency per 1 EUR on Day.
 type Rate struct {
@@ -78,7 +94,7 @@ func FetchECB(ctx context.Context, c *http.Client, url string) ([]Rate, error) {
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("ecb: HTTP %d", res.StatusCode)
 	}
-	return ParseECB(io.LimitReader(res.Body, 8<<20))
+	return ParseECB(io.LimitReader(res.Body, 32<<20))
 }
 
 // Saver stores rates in the home Tenant (reference data; read through the

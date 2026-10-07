@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/csv"
 	"errors"
 	"io"
 	"net/http"
@@ -76,6 +77,40 @@ func mountCost(mux Mux, a auth.Authenticator, d CostDeps) {
 		if err != nil {
 			return err
 		}
+		if r.URL.Query().Get("format") == "csv" {
+			return writeDailyCSV(w, rows)
+		}
+		writeJSON(w, http.StatusOK, items(rows))
+		return nil
+	}))
+	mux.Handle("GET /v1/tenants/{tenant}/costs/breakdown", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant := r.PathValue("tenant")
+		if err := d.allow(r, p, "cost.read", tenant); err != nil {
+			return err
+		}
+		from, to, err := dayRange(r)
+		if err != nil {
+			return err
+		}
+		q := r.URL.Query()
+		by := q.Get("by")
+		if by == "" {
+			by = "service"
+		}
+		if by != "service" && by != "resource" {
+			return errors.Join(catalog.ErrInvalid, errors.New("by is service or resource"))
+		}
+		f := cost.DailyFilter{From: from, To: to, ProjectID: q.Get("project"), EnvironmentID: q.Get("environment")}
+		for _, id := range []string{f.ProjectID, f.EnvironmentID} {
+			if id != "" && !catalog.ValidID(id) {
+				return errors.Join(catalog.ErrInvalid, errors.New("project and environment must be uuids"))
+			}
+		}
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		rows, err := d.Queries.Breakdown(r.Context(), tenant, f, by, limit)
+		if err != nil {
+			return err
+		}
 		writeJSON(w, http.StatusOK, items(rows))
 		return nil
 	}))
@@ -144,4 +179,23 @@ func mountCost(mux Mux, a auth.Authenticator, d CostDeps) {
 		writeJSON(w, http.StatusCreated, res)
 		return nil
 	}))
+}
+
+func writeDailyCSV(w http.ResponseWriter, rows []cost.DailyRow) error {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="keel-daily-costs.csv"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"day", "project", "environment", "provider", "currency", "billed", "effective"})
+	for _, r := range rows {
+		proj, eff := "", ""
+		if r.ProjectSlug != nil {
+			proj = *r.ProjectSlug
+		}
+		if r.Effective != nil {
+			eff = *r.Effective
+		}
+		_ = cw.Write([]string{r.Day.Format("2006-01-02"), proj, r.EnvironmentName, r.Provider, r.Currency, r.Billed, eff})
+	}
+	cw.Flush()
+	return cw.Error()
 }

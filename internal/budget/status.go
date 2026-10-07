@@ -4,6 +4,7 @@ import (
 	"context"
 	"hash/fnv"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -30,29 +31,30 @@ type Point struct {
 
 // Status compares spend with budget for one window ending at AsOf.
 type Status struct {
-	BudgetID       string    `json:"budget_id"`
-	Period         Period    `json:"period"`
-	Start          time.Time `json:"start"`
-	AsOf           time.Time `json:"as_of"`
-	Currency       string    `json:"currency"`
-	CostBasis      string    `json:"cost_basis"`
-	Budget         string    `json:"budget"`         // whole window
-	BudgetToDate   string    `json:"budget_to_date"` // prorated to AsOf
-	Actual         string    `json:"actual"`         // to date
-	Forecast       string    `json:"forecast"`       // p50 at window end; "" for Day or without enough history
-	ForecastP10    string    `json:"forecast_p10"`
-	ForecastP90    string    `json:"forecast_p90"`
-	ForecastMethod string    `json:"forecast_method"` // seasonal_trend | insufficient_history
-	HistoryDays    int       `json:"history_days"`
-	BacktestMAPE   *float64  `json:"backtest_mape,omitempty"` // month-total error on up to 3 past months
-	Variance       string    `json:"variance"`                // actual - budget_to_date
-	Final          bool      `json:"final"`                   // every provider month in the window is final
-	MissingFX      bool      `json:"missing_fx"`              // some spend could not be converted
-	Series         []Point   `json:"series"`
+	BudgetID       string          `json:"budget_id"`
+	Period         Period          `json:"period"`
+	Start          time.Time       `json:"start"`
+	AsOf           time.Time       `json:"as_of"`
+	Currency       string          `json:"currency"`
+	CostBasis      string          `json:"cost_basis"`
+	Budget         string          `json:"budget"`         // whole window
+	BudgetToDate   string          `json:"budget_to_date"` // prorated to AsOf
+	Actual         string          `json:"actual"`         // to date
+	Forecast       string          `json:"forecast"`       // p50 at window end; "" for Day or without enough history
+	ForecastP10    string          `json:"forecast_p10"`
+	ForecastP90    string          `json:"forecast_p90"`
+	ForecastMethod string          `json:"forecast_method"` // seasonal_trend | insufficient_history
+	HistoryDays    int             `json:"history_days"`
+	BacktestMAPE   *float64        `json:"backtest_mape,omitempty"` // month-total error on up to 3 past months
+	Variance       string          `json:"variance"`                // actual - budget_to_date
+	Final          bool            `json:"final"`                   // every provider month in the window is final
+	Providers      []ProviderFinal `json:"providers"`               // finality per provider ("data final?" badges)
+	MissingFX      bool            `json:"missing_fx"`              // some spend could not be converted
+	Series         []Point         `json:"series"`
 }
 
 // daily returns converted spend per UTC day in [from, to) for b's scope.
-func (s Service) daily(ctx context.Context, tx pgx.Tx, b Budget, from, to time.Time) (map[time.Time]*big.Rat, bool, []string, error) {
+func (s Service) daily(ctx context.Context, tx pgx.Tx, b Budget, from, to time.Time) (map[time.Time]*big.Rat, map[time.Time]bool, []string, error) {
 	amount := "coalesce(effective_cost, billed_cost)"
 	if b.CostBasis == "billed" {
 		amount = "billed_cost"
@@ -65,22 +67,22 @@ func (s Service) daily(ctx context.Context, tx pgx.Tx, b Budget, from, to time.T
 		        AND charge_period_start >= $4 AND charge_period_start < $6
 		      GROUP BY 1, 2) x`, b.ProjectID, b.EnvironmentID, b.Provider, from, b.Currency, to)
 	if err != nil {
-		return nil, false, nil, err
+		return nil, nil, nil, err
 	}
 	out := map[time.Time]*big.Rat{}
-	missing := false
+	missing := map[time.Time]bool{}
 	for rows.Next() {
 		var d time.Time
 		var v *string
 		if err := rows.Scan(&d, &v); err != nil {
 			rows.Close()
-			return nil, false, nil, err
-		}
-		if v == nil {
-			missing = true
-			continue
+			return nil, nil, nil, err
 		}
 		d = time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+		if v == nil {
+			missing[d] = true
+			continue
+		}
 		if out[d] == nil {
 			out[d] = new(big.Rat)
 		}
@@ -90,10 +92,26 @@ func (s Service) daily(ctx context.Context, tx pgx.Tx, b Budget, from, to time.T
 	provRows, err := tx.Query(ctx, `SELECT DISTINCT provider FROM cost_facts WHERE current AND project_id = $1 AND ($2::uuid IS NULL OR environment_id = $2) AND charge_period_start >= $3 AND charge_period_start < $4`,
 		b.ProjectID, b.EnvironmentID, from, to)
 	if err != nil {
-		return nil, false, nil, err
+		return nil, nil, nil, err
 	}
 	providers, err := pgx.CollectRows(provRows, pgx.RowTo[string])
 	return out, missing, providers, err
+}
+
+func firstDay(spend map[time.Time]*big.Rat) time.Time {
+	var first time.Time
+	for d := range spend {
+		if first.IsZero() || d.Before(first) {
+			first = d
+		}
+	}
+	return first
+}
+
+// ProviderFinal says whether a provider's data for the window is final.
+type ProviderFinal struct {
+	Provider string `json:"provider"`
+	Final    bool   `json:"final"`
 }
 
 // Status evaluates b for the Day, Month or Year containing asOf.
@@ -119,7 +137,7 @@ func (s Service) Status(ctx context.Context, tenantID, budgetID string, p Period
 		if err != nil {
 			return err
 		}
-		st = Status{BudgetID: b.ID, Period: p, AsOf: asOf, Currency: b.Currency, CostBasis: b.CostBasis, MissingFX: missing}
+		st = Status{BudgetID: b.ID, Period: p, AsOf: asOf, Currency: b.Currency, CostBasis: b.CostBasis}
 		var start, end time.Time
 		switch p {
 		case Day:
@@ -132,6 +150,11 @@ func (s Service) Status(ctx context.Context, tenantID, budgetID string, p Period
 			start, end = yearStart, yearEnd
 		}
 		st.Start = start
+		for d := range missing {
+			if !d.Before(start) && !d.After(asOf) {
+				st.MissingFX = true // only spend inside the window counts
+			}
+		}
 		budget, toDate, actual := new(big.Rat), new(big.Rat), new(big.Rat)
 		if st.Period == Year {
 			for m := time.January; m <= time.December; m++ {
@@ -174,7 +197,16 @@ func (s Service) Status(ctx context.Context, tenantID, budgetID string, p Period
 		if st.Period != Day {
 			s.forecast(&st, b, spend, actual, asOf, end)
 		}
-		st.Final, err = s.final(ctx, tx, providers, start, asOf)
+		// Months before the scope's first spend have nothing to finalise.
+		finalFrom := start
+		if first := firstDay(spend); first.After(start) {
+			finalFrom = first
+		}
+		st.Providers, err = s.final(ctx, tx, providers, finalFrom, asOf)
+		st.Final = len(st.Providers) > 0
+		for _, p := range st.Providers {
+			st.Final = st.Final && p.Final
+		}
 		return err
 	})
 	return st, mapErr(err)
@@ -213,13 +245,14 @@ func (s Service) forecast(st *Status, b Budget, spend map[time.Time]*big.Rat, ac
 	}
 }
 
-func (s Service) final(ctx context.Context, tx pgx.Tx, providers []string, start, asOf time.Time) (bool, error) {
+func (s Service) final(ctx context.Context, tx pgx.Tx, providers []string, start, asOf time.Time) ([]ProviderFinal, error) {
+	out := []ProviderFinal{}
 	if len(providers) == 0 {
-		return false, nil
+		return out, nil
 	}
 	rows, err := tx.Query(ctx, `SELECT provider, billing_period FROM cost_periods_final($1)`, start)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	type key struct {
 		p string
@@ -230,17 +263,18 @@ func (s Service) final(ctx context.Context, tx pgx.Tx, providers []string, start
 		var k key
 		if err := rows.Scan(&k.p, &k.m); err != nil {
 			rows.Close()
-			return false, err
+			return nil, err
 		}
 		done[key{k.p, time.Date(k.m.Year(), k.m.Month(), 1, 0, 0, 0, 0, time.UTC)}] = true
 	}
 	rows.Close()
-	for m := time.Date(start.Year(), start.Month(), 1, 0, 0, 0, 0, time.UTC); !m.After(asOf); m = m.AddDate(0, 1, 0) {
-		for _, p := range providers {
-			if !done[key{p, m}] {
-				return false, nil
-			}
+	slices.Sort(providers)
+	for _, p := range providers {
+		pf := ProviderFinal{Provider: p, Final: true}
+		for m := time.Date(start.Year(), start.Month(), 1, 0, 0, 0, 0, time.UTC); !m.After(asOf); m = m.AddDate(0, 1, 0) {
+			pf.Final = pf.Final && done[key{p, m}]
 		}
+		out = append(out, pf)
 	}
-	return true, nil
+	return out, nil
 }

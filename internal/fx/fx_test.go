@@ -28,3 +28,21 @@ func TestParseECB(t *testing.T) {
 		t.Errorf("rates %v", got)
 	}
 }
+
+func TestFilter(t *testing.T) {
+	f, _ := os.Open("testdata/eurofxref-daily.xml")
+	defer func() { _ = f.Close() }()
+	rates, _ := fx.ParseECB(f)
+	kept := fx.Filter(rates, rates[0].Day)
+	for _, r := range kept {
+		if !fx.Kept[r.Currency] {
+			t.Errorf("kept %s", r.Currency)
+		}
+	}
+	if len(kept) != 4 { // EUR, USD, THB, CNY
+		t.Errorf("kept %d rates", len(kept))
+	}
+	if len(fx.Filter(rates, rates[0].Day.AddDate(0, 0, 1))) != 0 {
+		t.Error("since must exclude older days")
+	}
+}
