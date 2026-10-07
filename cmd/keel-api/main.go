@@ -84,6 +84,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/attest"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/boundary"
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
@@ -395,7 +396,17 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 				api, err := tencent.NewCAM(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
 				return tencent.CIIdentity{API: api}, err
 			}}
-		steps := []flow.Step{landingzone.Step(st, guardrails, baseline), ci.Step()}
+		bounds := boundary.Manager{Store: st, Provider: "tencent", IAM: func(account string) (boundary.IAM, error) {
+			return tencent.NewBoundaries(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+		}}
+		go daily(ctx, "permission boundaries", func(ctx context.Context) error {
+			res, err := bounds.Check(ctx)
+			if err == nil {
+				slog.Info("permission boundaries", "accounts", res.Accounts, "roles_outside", res.Missing)
+			}
+			return err
+		})
+		steps := []flow.Step{landingzone.Step(st, guardrails, baseline), ci.Step(), bounds.Step()}
 		if id := os.Getenv("KEEL_TCR_REGISTRY_ID"); id != "" {
 			api, err := tencent.NewTCR(envOr("KEEL_TENCENT_REGION", "ap-bangkok"), tencent.Credentials())
 			if err != nil {
