@@ -75,7 +75,7 @@ func items[T any](v []T) list[T] {
 	return list[T]{Items: v}
 }
 
-func mountCatalog(mux *http.ServeMux, c *catalog.Service, a auth.Authenticator) {
+func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 	t := []string{"tenant"}
 	tp := []string{"tenant", "project"}
 

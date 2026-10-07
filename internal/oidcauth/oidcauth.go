@@ -135,7 +135,9 @@ type loginState struct {
 }
 
 // Mount registers /auth routes.
-func (s *Service) Mount(mux *http.ServeMux) {
+func (s *Service) Mount(mux interface {
+	HandleFunc(string, func(http.ResponseWriter, *http.Request))
+}) {
 	mux.HandleFunc("GET /auth/login", s.handleLogin)
 	mux.HandleFunc("GET /auth/callback", s.handleCallback)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
