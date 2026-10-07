@@ -759,4 +759,34 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 	} else {
 		slog.Info("k8s rightsizing", "raised", res.Raised, "kept", res.Kept, "skipped", res.Skipped)
 	}
+	role := os.Getenv("KEEL_TENCENT_MEMBER_ROLE")
+	if role == "" {
+		return
+	}
+	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
+	base := tencent.Credentials()
+	catAPI, err := tencent.NewCVM(region, base)
+	if err != nil {
+		slog.Error("cvm catalogue", "err", err)
+		return
+	}
+	vm := rightsize.VMEngine{Service: rightsize.Service{Store: st}, Catalog: tencent.Catalog{API: catAPI}, Region: region,
+		Inventory: func(account string) rightsize.Inventory {
+			api, err := tencent.NewCVM(region, &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region})
+			if err != nil {
+				return failingInventory{err}
+			}
+			return tencent.Inventory{API: api}
+		}}
+	if res, err := vm.Run(ctx); err != nil {
+		slog.Error("cvm rightsizing failed", "err", err)
+	} else {
+		slog.Info("cvm rightsizing", "raised", res.Raised, "kept", res.Kept, "skipped", res.Skipped)
+	}
+}
+
+type failingInventory struct{ err error }
+
+func (f failingInventory) InstanceTypes(context.Context, string, []string) (map[string]string, error) {
+	return nil, f.err
 }
