@@ -18,6 +18,19 @@ jobs:
   go:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 20
+    env:
+      KEEL_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # Fail (not skip) if the database tests cannot run: tenant isolation is release-blocking.
+      KEEL_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -118,3 +118,22 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
 - Noted: local Go was 1.24.5 (out of support); `go.mod` now requires 1.26 so the
   toolchain auto-upgrades. Docker daemon was not running, so the image and
   compose were not built locally; CI builds the image.
+
+## 2026-10-07 — Claude — CI fix on #45; #17 tenancy schema with RLS
+
+- PR #45 CI failed on golangci-lint `errcheck` (unchecked `Body.Close` in a
+  test). Root cause of the local/CI mismatch: `make lint` didn't run
+  golangci-lint and CI used `latest`. Fixed; linter pinned to v2.14.0 in both.
+  CI green.
+- #17 on branch `feat/17-tenancy-schema` (stacked on #45): first migration
+  (tenants, teams, projects, environments, cloud_accounts, services) with RLS
+  enabled + forced on every table, fail-closed `keel.tenant_id` scoping,
+  `create_tenant` SECURITY DEFINER function, `keel_app` role with no
+  BYPASSRLS and no DELETE.
+- Tests written first; each runs against a throwaway database as the real app
+  role. Verified they go red by mutation: removing RLS from `teams` fails 5
+  assertions; replacing a composite `(tenant_id, project_id)` FK with a plain
+  FK lets Tenant A attach an Environment to Tenant B's Project (FK checks
+  bypass RLS). The composite-FK pattern is therefore load-bearing.
+- CI now runs Postgres 18 as a service and fails, not skips, if DB tests can't
+  run.

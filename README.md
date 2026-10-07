@@ -15,8 +15,15 @@ Requires Go ≥ 1.26 (auto-downloaded via `GOTOOLCHAIN`), Node 22, pnpm 10, Dock
 make dev    # API on :8080 + portal on :5173
 make test   # go test -race
 make lint   # go vet, gofmt, oxlint
-docker compose up -d postgres   # local Postgres (used from #17 onwards)
+docker compose up -d postgres   # local Postgres 18
+export KEEL_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+make test   # now also runs the tenant-isolation (RLS) tests; they skip without the URL
 ```
+
+Database tests create a throwaway database per test, migrate it as
+`keel_owner`, and query as `keel_app` (no BYPASSRLS), so row-level security is
+exercised for real. CI sets `KEEL_REQUIRE_DB=1`, which turns a skip into a
+failure.
 
 | Read | For |
 |---|---|
