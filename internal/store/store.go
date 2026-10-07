@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for migrations
 	"github.com/pressly/goose/v3"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivermigrate"
 )
 
 //go:embed migrations/*.sql
@@ -36,6 +38,36 @@ func Migrate(ctx context.Context, ownerURL string) error {
 	}
 	if _, err := provider.Up(ctx); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
+	}
+	return migrateRiver(ctx, ownerURL)
+}
+
+// migrateRiver installs River's job tables (ADR-0014) and lets the
+// application role work them. River's tables hold no Tenant data, only job
+// arguments naming a Tenant and a flow; the work itself runs under RLS.
+func migrateRiver(ctx context.Context, ownerURL string) error {
+	pool, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		return fmt.Errorf("river migrate: %w", err)
+	}
+	defer pool.Close()
+	m, err := rivermigrate.New(riverpgxv5.New(pool), nil)
+	if err != nil {
+		return fmt.Errorf("river migrate: %w", err)
+	}
+	if _, err := m.Migrate(ctx, rivermigrate.DirectionUp, nil); err != nil {
+		return fmt.Errorf("river migrate: %w", err)
+	}
+	_, err = pool.Exec(ctx, `DO $$ DECLARE r record; BEGIN
+		FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'river\_%' LOOP
+			EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I TO keel_app', r.tablename);
+		END LOOP;
+		FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = current_schema() AND sequencename LIKE 'river\_%' LOOP
+			EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %I TO keel_app', r.sequencename);
+		END LOOP;
+	END $$`)
+	if err != nil {
+		return fmt.Errorf("river grants: %w", err)
 	}
 	return nil
 }

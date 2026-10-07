@@ -18,7 +18,7 @@ import (
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -85,6 +85,13 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO recommendations (tenant_id, fingerprint, source, provider, resource_id, resource_type, action, monthly_savings, currency, confidence)
 			VALUES ($1, $2, 'test', 'tencent', 'r', 'vm', 'resize', 1, 'USD', 0.5)`, f.tenant, "rec-"+slug); err != nil {
+			return err
+		}
+		var flowID string
+		if err := q(`INSERT INTO flows (tenant_id, kind, subject, created_by) VALUES ($1, 'test', $2, 'test') RETURNING id`, &flowID, f.tenant, "flow-"+slug); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO flow_steps (tenant_id, flow_id, seq, name) VALUES ($1, $2, 0, 'one')`, f.tenant, flowID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO allocation_rules (tenant_id, provider, sub_account_id, kind) VALUES ($1, 'tencent', $2, 'weights')`, f.tenant, "sa-"+slug); err != nil {
@@ -272,7 +279,9 @@ func TestEveryTableIsListed(t *testing.T) {
 	rows, err := s.AppPool().Query(context.Background(), `
 		SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
 		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname NOT LIKE 'goose_%'`)
+		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname NOT LIKE 'goose_%'
+		  -- River's job tables carry only job arguments (a Tenant id and a row id); the work runs under RLS.
+		  AND c.relname NOT LIKE 'river\_%'`)
 	if err != nil {
 		t.Fatal(err)
 	}
