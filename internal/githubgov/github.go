@@ -33,6 +33,20 @@ type API interface {
 	RepoRulesets(ctx context.Context, repo string) ([]Ruleset, error)
 	PutRepoRuleset(ctx context.Context, repo string, r Ruleset) error
 	EnableSecretScanning(ctx context.Context, repo string) error
+	Actions(ctx context.Context) (ActionsSettings, error)
+	PutActions(ctx context.Context, a ActionsSettings) error
+}
+
+// ActionsSettings is what GitHub reports for the organisation.
+type ActionsSettings struct {
+	AllowedActions         string // all | local_only | selected
+	SHAPinningRequired     bool
+	GitHubOwnedAllowed     bool
+	VerifiedAllowed        bool
+	Patterns               []string
+	DefaultPermissions     string // read | write
+	CanApprovePullRequests bool
+	ForkApproval           string
 }
 
 // GitHub implements API over REST. The token needs organisation
@@ -217,4 +231,65 @@ func (g GitHub) EnableSecretScanning(ctx context.Context, repo string) error {
 	on := map[string]string{"status": "enabled"}
 	return g.Client.Do(ctx, http.MethodPatch, "/repos/"+g.owner()+"/"+url.PathEscape(repo),
 		map[string]any{"security_and_analysis": map[string]any{"secret_scanning": on, "secret_scanning_push_protection": on}}, nil)
+}
+
+// Actions implements API.
+func (g GitHub) Actions(ctx context.Context) (ActionsSettings, error) {
+	base := "/orgs/" + g.owner() + "/actions/permissions"
+	var perms struct {
+		AllowedActions     string `json:"allowed_actions"`
+		SHAPinningRequired bool   `json:"sha_pinning_required"`
+	}
+	if err := g.Client.Do(ctx, http.MethodGet, base, nil, &perms); err != nil {
+		return ActionsSettings{}, err
+	}
+	out := ActionsSettings{AllowedActions: perms.AllowedActions, SHAPinningRequired: perms.SHAPinningRequired}
+	if perms.AllowedActions == "selected" {
+		var sel struct {
+			GitHubOwned bool     `json:"github_owned_allowed"`
+			Verified    bool     `json:"verified_allowed"`
+			Patterns    []string `json:"patterns_allowed"`
+		}
+		if err := g.Client.Do(ctx, http.MethodGet, base+"/selected-actions", nil, &sel); err != nil {
+			return out, err
+		}
+		out.GitHubOwnedAllowed, out.VerifiedAllowed, out.Patterns = sel.GitHubOwned, sel.Verified, sel.Patterns
+	}
+	var wf struct {
+		Default    string `json:"default_workflow_permissions"`
+		CanApprove bool   `json:"can_approve_pull_request_reviews"`
+	}
+	if err := g.Client.Do(ctx, http.MethodGet, base+"/workflow", nil, &wf); err != nil {
+		return out, err
+	}
+	out.DefaultPermissions, out.CanApprovePullRequests = wf.Default, wf.CanApprove
+	var fork struct {
+		Policy string `json:"approval_policy"`
+	}
+	if err := g.Client.Do(ctx, http.MethodGet, base+"/fork-pr-contributor-approval", nil, &fork); err != nil {
+		return out, err
+	}
+	out.ForkApproval = fork.Policy
+	return out, nil
+}
+
+// PutActions implements API.
+func (g GitHub) PutActions(ctx context.Context, a ActionsSettings) error {
+	base := "/orgs/" + g.owner() + "/actions/permissions"
+	if err := g.Client.Do(ctx, http.MethodPut, base, map[string]any{"enabled_repositories": "all", "allowed_actions": a.AllowedActions, "sha_pinning_required": a.SHAPinningRequired}, nil); err != nil {
+		return err
+	}
+	if a.AllowedActions == "selected" {
+		patterns := a.Patterns
+		if patterns == nil {
+			patterns = []string{}
+		}
+		if err := g.Client.Do(ctx, http.MethodPut, base+"/selected-actions", map[string]any{"github_owned_allowed": a.GitHubOwnedAllowed, "verified_allowed": a.VerifiedAllowed, "patterns_allowed": patterns}, nil); err != nil {
+			return err
+		}
+	}
+	if err := g.Client.Do(ctx, http.MethodPut, base+"/workflow", map[string]any{"default_workflow_permissions": a.DefaultPermissions, "can_approve_pull_request_reviews": a.CanApprovePullRequests}, nil); err != nil {
+		return err
+	}
+	return g.Client.Do(ctx, http.MethodPut, base+"/fork-pr-contributor-approval", map[string]any{"approval_policy": a.ForkApproval}, nil)
 }

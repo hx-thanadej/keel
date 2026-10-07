@@ -75,6 +75,9 @@ func (r Reconciler) Run(ctx context.Context) (Report, error) {
 		if err := r.subject(ctx, add); err != nil {
 			return rep, err
 		}
+		if err := r.actions(ctx, add); err != nil {
+			return rep, err
+		}
 	}
 	if useOrg {
 		have, err := r.API.OrgRulesets(ctx)
@@ -190,6 +193,51 @@ func (r Reconciler) subject(ctx context.Context, add func(Item) func()) error {
 	if r.Remediate {
 		if err := r.API.PutSubClaimKeys(ctx, r.Policy.SubClaimKeys); err != nil {
 			return fmt.Errorf("put oidc subject template: %w", err)
+		}
+		fixed()
+	}
+	return nil
+}
+
+// desiredActions turns the policy into GitHub's settings.
+func (p ActionsPolicy) desired() ActionsSettings {
+	perm := "write"
+	if p.DefaultTokenRead {
+		perm = "read"
+	}
+	return ActionsSettings{AllowedActions: "selected", SHAPinningRequired: p.SHAPinningRequired, GitHubOwnedAllowed: true, VerifiedAllowed: true,
+		Patterns: p.AllowedPatterns, DefaultPermissions: perm, CanApprovePullRequests: p.CanApprovePullRequests, ForkApproval: p.ForkApproval}
+}
+
+func (r Reconciler) actions(ctx context.Context, add func(Item) func()) error {
+	have, err := r.API.Actions(ctx)
+	if err != nil {
+		return fmt.Errorf("actions settings: %w", err)
+	}
+	want := r.Policy.Actions.desired()
+	var problems []string
+	if want.SHAPinningRequired && !have.SHAPinningRequired {
+		problems = append(problems, "actions are not required to be pinned to a full commit SHA")
+	}
+	if have.AllowedActions != "selected" || !have.GitHubOwnedAllowed || !have.VerifiedAllowed || !sameSet(have.Patterns, want.Patterns) {
+		problems = append(problems, fmt.Sprintf("allowed actions are %q %v, want GitHub-owned, verified creators and %v", have.AllowedActions, have.Patterns, want.Patterns))
+	}
+	if have.DefaultPermissions != want.DefaultPermissions {
+		problems = append(problems, "default GITHUB_TOKEN permission is "+have.DefaultPermissions+", want "+want.DefaultPermissions)
+	}
+	if have.CanApprovePullRequests && !want.CanApprovePullRequests {
+		problems = append(problems, "workflows may approve pull requests")
+	}
+	if want.ForkApproval != "" && have.ForkApproval != want.ForkApproval {
+		problems = append(problems, "fork pull request workflows need approval for "+want.ForkApproval+", currently "+orDefault(have.ForkApproval, "unset"))
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	fixed := add(Item{Setting: "actions", Problem: strings.Join(problems, "; "), Severity: "high", Fixable: true})
+	if r.Remediate {
+		if err := r.API.PutActions(ctx, want); err != nil {
+			return fmt.Errorf("put actions settings: %w", err)
 		}
 		fixed()
 	}
