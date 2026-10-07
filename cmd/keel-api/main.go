@@ -32,6 +32,7 @@
 //	KEEL_AWS_BUDGET_EMAIL     optional subscriber so AWS budgets also carry the thresholds
 //	KEEL_PROMETHEUS     cluster=url[@tenant/project/env][,…]: per-container utilisation for rightsizing
 //	KEEL_TENCENT_MEMBER_ROLE  role Keel assumes in member accounts to read Cloud Monitor (CVM utilisation)
+//	KEEL_AWS_COH=1      import AWS Cost Optimization Hub recommendations (management account, web identity)
 //	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
@@ -720,8 +721,8 @@ func startUtilisation(ctx context.Context, st *store.Store) error {
 			return &utilisation.TencentCVM{API: api}, nil
 		}
 	}
-	if len(job.Clusters) == 0 && job.CVM == nil {
-		return nil
+	if len(job.Clusters) == 0 && job.CVM == nil && os.Getenv("KEEL_AWS_COH") != "1" {
+		return nil // nothing to collect and no recommender to import from
 	}
 	go func() {
 		today := time.Now().UTC()
@@ -758,6 +759,17 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 		slog.Error("k8s rightsizing failed", "err", err)
 	} else {
 		slog.Info("k8s rightsizing", "raised", res.Raised, "kept", res.Kept, "skipped", res.Skipped)
+	}
+	if os.Getenv("KEEL_AWS_COH") == "1" {
+		if c, err := awsadapter.NewCOH(ctx); err != nil {
+			slog.Error("aws cost optimization hub", "err", err)
+		} else if recs, err := c.List(ctx); err != nil {
+			slog.Error("aws cost optimization hub", "err", err)
+		} else if res, err := (rightsize.Service{Store: st}).Import(ctx, recs); err != nil {
+			slog.Error("aws recommendations import", "err", err)
+		} else {
+			slog.Info("aws recommendations", "raised", res.Raised, "kept", res.Kept, "unowned", res.Unowned)
+		}
 	}
 	role := os.Getenv("KEEL_TENCENT_MEMBER_ROLE")
 	if role == "" {

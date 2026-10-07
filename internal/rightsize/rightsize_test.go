@@ -168,3 +168,33 @@ func TestAcceptRecordsActivity(t *testing.T) {
 		t.Errorf("80 THB/month severity %s, want low", sev)
 	}
 }
+
+func TestImportNativeAttributesAndConverts(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	must(t, w.s.InTenant(ctx, w.home, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO fx_rates (tenant_id, day, currency, per_eur) VALUES ($1, '2026-01-01', 'USD', 1.10), ($1, '2026-01-01', 'THB', 38.50)`, w.home)
+		return err
+	}))
+	must(t, w.s.InTenant(ctx, w.tat, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, environment_id, provider, external_id, name) VALUES ($1, $2, 'aws', '222222222222', 'tat-aws-prod')`, w.tat, w.prod)
+		return err
+	}))
+	svc := rightsize.Service{Store: w.s}
+	res, err := svc.Import(ctx, []rightsize.Recommendation{
+		{Source: "native:aws_coh", Provider: "aws", AccountID: "222222222222", ResourceID: "i-0abc", ResourceType: "ec2instance", Action: "resize", MonthlySavings: "100.00", Currency: "USD", Confidence: 0.8},
+		{Source: "native:aws_coh", Provider: "aws", AccountID: "999999999999", ResourceID: "i-0zzz", ResourceType: "ec2instance", Action: "stop", MonthlySavings: "5.00", Currency: "USD", Confidence: 0.8},
+	})
+	must(t, err)
+	if res.Raised != 2 || res.Unowned != 1 {
+		t.Fatalf("result %+v", res)
+	}
+	recs, _ := svc.List(ctx, w.tat, rightsize.Filter{})
+	if len(recs) != 1 || recs[0].Currency != "THB" || recs[0].MonthlySavings != "3500.00" || recs[0].EnvironmentID == nil || *recs[0].EnvironmentID != w.prod {
+		t.Fatalf("tat recs %+v", recs)
+	}
+	home, _ := svc.List(ctx, w.home, rightsize.Filter{})
+	if len(home) != 1 || home[0].ResourceID != "i-0zzz" {
+		t.Fatalf("unowned in home: %+v", home)
+	}
+}
