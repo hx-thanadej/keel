@@ -235,6 +235,27 @@ func TestValidationAndConflicts(t *testing.T) {
 	mustStatus(t, st, 400, body)
 }
 
+func TestWasteCleanupToggle(t *testing.T) {
+	c, home := setup(t)
+	admin := c.as(homeAdmin(home))
+	_, body := admin.do("POST", "/v1/tenants/"+home+"/teams", map[string]any{"slug": "crm", "name": "CRM"})
+	team := body["id"].(string)
+	_, body = admin.do("POST", "/v1/tenants/"+home+"/projects", map[string]any{"team_id": team, "slug": "keel", "name": "Keel"})
+	project := body["id"].(string)
+	envs := map[string]string{}
+	for _, n := range []string{"dev", "prod"} {
+		_, body = admin.do("POST", "/v1/tenants/"+home+"/projects/"+project+"/environments", map[string]any{"name": n})
+		envs[n] = body["id"].(string)
+	}
+	base := "/v1/tenants/" + home + "/projects/" + project + "/environments/"
+	st, body := admin.do("PATCH", base+envs["dev"], map[string]any{"waste_cleanup": true, "why": "throwaway env"})
+	mustStatus(t, st, 200, body)
+	st, body = admin.do("PATCH", base+envs["prod"], map[string]any{"waste_cleanup": true})
+	mustStatus(t, st, 400, body)
+	st, body = admin.do("PATCH", base+envs["dev"], map[string]any{})
+	mustStatus(t, st, 400, body)
+}
+
 func TestArchiveHidesFromList(t *testing.T) {
 	c, home := setup(t)
 	admin := c.as(homeAdmin(home))

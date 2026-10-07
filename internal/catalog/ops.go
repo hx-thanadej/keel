@@ -250,6 +250,31 @@ func (s *Service) ArchiveEnvironment(ctx context.Context, p auth.Principal, tena
 	return e, mapErr(err)
 }
 
+// SetWasteCleanup opts an Environment in or out of automatic waste cleanup
+// (#72). Production Environments cannot opt in.
+func (s *Service) SetWasteCleanup(ctx context.Context, p auth.Principal, tenantID, projectID, id string, on bool, why string) (Environment, error) {
+	team, err := s.projectTeam(ctx, tenantID, projectID)
+	if err != nil {
+		return Environment{}, err
+	}
+	var e Environment
+	err = s.do(ctx, p, write{action: "environment.update", res: authz.Resource{Type: "environment", ID: id, TenantID: tenantID, ProjectID: projectID, TeamID: team},
+		actType: "keel.environment.waste_cleanup_changed", operation: "SetWasteCleanup", kind: activity.Update, why: fmt.Sprintf("%s (waste_cleanup=%v)", why, on)},
+		func(tx pgx.Tx) (string, error) {
+			var name string
+			if err := tx.QueryRow(ctx, `SELECT name FROM environments WHERE id = $1 AND project_id = $2`, id, projectID).Scan(&name); err != nil {
+				return "", err
+			}
+			if on && (name == "prod" || name == "production" || name == "prd") {
+				return "", invalid("production Environments cannot enable automatic waste cleanup")
+			}
+			err := tx.QueryRow(ctx, `UPDATE environments SET waste_cleanup = $3 WHERE id = $1 AND project_id = $2 RETURNING `+envCols, id, projectID, on).
+				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.ArchivedAt)
+			return id, err
+		})
+	return e, mapErr(err)
+}
+
 // ---------- Cloud Accounts ----------
 
 const accountCols = `id::text, tenant_id::text, environment_id::text, provider, external_id, name, archived_at`

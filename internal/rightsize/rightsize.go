@@ -52,7 +52,10 @@ type Recommendation struct {
 	DecisionReason *string        `json:"decision_reason"`
 	PRURL          *string        `json:"pr_url"`
 	GeneratedAt    time.Time      `json:"generated_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	// ObservedAt, when set by an engine, is used as generated_at for new
+	// records (engines running on a backfill or test clock).
+	ObservedAt time.Time `json:"-"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Fingerprint identifies "the same advice about the same resource".
@@ -187,10 +190,10 @@ func (s Service) Upsert(ctx context.Context, tenant string, r Recommendation) (R
 			return err
 		}
 		out, err = scan(tx.QueryRow(ctx, `INSERT INTO recommendations (tenant_id, fingerprint, source, provider, account_id, region, resource_id, resource_type, project_id, environment_id,
-				action, current, recommended, evidence, monthly_savings, currency, savings_basis, confidence, risk, finding_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::numeric, $16, $17, $18, $19, $20) RETURNING `+cols,
+				action, current, recommended, evidence, monthly_savings, currency, savings_basis, confidence, risk, finding_id, generated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::numeric, $16, $17, $18, $19, $20, coalesce($21, now())) RETURNING `+cols,
 			tenant, r.Fingerprint, r.Source, r.Provider, r.AccountID, r.Region, r.ResourceID, r.ResourceType, r.ProjectID, r.EnvironmentID,
-			r.Action, mustJSON(r.Current), mustJSON(r.Recommended), mustJSON(r.Evidence), r.MonthlySavings, r.Currency, r.SavingsBasis, r.Confidence, mustJSON(r.Risk), findingID))
+			r.Action, mustJSON(r.Current), mustJSON(r.Recommended), mustJSON(r.Evidence), r.MonthlySavings, r.Currency, r.SavingsBasis, r.Confidence, mustJSON(r.Risk), findingID, observed(r.ObservedAt)))
 		if err != nil {
 			return err
 		}
@@ -273,6 +276,33 @@ func record(ctx context.Context, tx pgx.Tx, tenant, id, typ, op string, kind act
 		Operation: op, Kind: kind, Actor: by, Resources: []activity.Resource{{Type: "recommendation", UID: id}}, Outcome: activity.Success, StatusDetail: detail,
 		Why: activity.Why{Reason: detail}})
 	return err
+}
+
+func observed(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+// MarkApplied records that a recommendation was carried out (a merged pull
+// request, or Keel's own cleanup), resolving its Finding.
+func (s Service) MarkApplied(ctx context.Context, tenant, id, note, prURL string, by activity.Actor) error {
+	return s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		var finding string
+		err := tx.QueryRow(ctx, `UPDATE recommendations SET state = 'applied', decided_by = $2, decision_reason = $3, pr_url = nullif($4, ''), updated_at = now()
+			WHERE id = $1 AND state IN ('open', 'accepted') RETURNING coalesce(finding_id::text, '')`, id, by.UID, note, prURL).Scan(&finding)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrState
+		}
+		if err != nil {
+			return err
+		}
+		if err := resolveFinding(ctx, tx, finding, "applied: "+note); err != nil {
+			return err
+		}
+		return record(ctx, tx, tenant, id, "keel.recommendation.applied", "ApplyRecommendation", activity.Update, by, note)
+	})
 }
 
 func mustJSON(v any) []byte {

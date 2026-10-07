@@ -197,6 +197,24 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
+	mux.Handle("PATCH /v1/tenants/{tenant}/projects/{project}/environments/{env}", authed(a, []string{"tenant", "project", "env"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			WasteCleanup *bool  `json:"waste_cleanup"`
+			Why          string `json:"why"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		if in.WasteCleanup == nil {
+			return errors.Join(catalog.ErrInvalid, errors.New("waste_cleanup is required"))
+		}
+		out, err := c.SetWasteCleanup(r.Context(), p, r.PathValue("tenant"), r.PathValue("project"), r.PathValue("env"), *in.WasteCleanup, in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, out)
+		return nil
+	}))
 	mux.Handle("POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/archive", authed(a, []string{"tenant", "project", "env"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct{ Why string }
 		if err := decode(r, &in); err != nil {
