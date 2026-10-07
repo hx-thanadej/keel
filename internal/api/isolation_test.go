@@ -64,6 +64,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Rightsize: &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: s}},
 		Flows:     &api.FlowDeps{Authz: az, Engine: flow.New(s)},
 		Promotion: &api.PromotionDeps{Authz: az, Service: promo},
+		Registry:  &api.RegistryDeps{Authz: az, Store: s},
 		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
 		Vending:   &api.VendingDeps{Authz: az, Engine: flow.New(s), Vendors: map[string]vending.Vendor{"tencent": {Store: s, Org: stubOrg{}}}}})
 	srv := httptest.NewServer(router)
