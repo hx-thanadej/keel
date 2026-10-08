@@ -63,7 +63,8 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 		var in map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		b, _ := base64.StdEncoding.DecodeString(in["content"])
-		if in["sha"] != "sha-"+r.PathValue("path") {
+		_, onMain := f.files[r.PathValue("path")]
+		if in["sha"] != "sha-"+r.PathValue("path") && (onMain || in["sha"] != "") { // no sha creates a file
 			http.Error(w, "sha mismatch", http.StatusConflict)
 			return
 		}
@@ -211,4 +212,78 @@ func TestUnsupportedLayoutsSayApplyManually(t *testing.T) {
 	if _, err := a.Apply(ctx, tat, id, by); !errors.Is(err, apply.ErrUnsupported) || !strings.Contains(err.Error(), "Helm") {
 		t.Fatalf("helm repo: %v", err)
 	}
+}
+
+func TestApplyScheduleAddsScaledObjectBesideDeployment(t *testing.T) {
+	ctx := context.Background()
+	dev := strings.Replace(deploy, "  name: api\n", "  name: api\n  namespace: tat-crm\n", 1)
+	a, gh, tat, resize := setup(t, map[string]string{"k8s/dev/api.yaml": dev, "k8s/dev/other.yaml": "kind: ConfigMap\n"}, "https://github.com/hx/tat-crm")
+	project := mustGet(t, a, tat, resize).ProjectID
+	r, _, err := a.Recs.Upsert(ctx, tat, rightsize.Recommendation{Source: "engine:k8s-offhours", Provider: "k8s", ResourceID: "dev-tke/tat-crm/api", ResourceType: "k8s_workload",
+		ProjectID: project, Action: "schedule", Current: map[string]any{"replicas": 2},
+		Recommended:    map[string]any{"schedule": map[string]any{"text": "Mon–Fri 08:00–18:00 Asia/Bangkok, off at weekends", "start": "08:00", "stop": "18:00", "days": "Mon–Fri", "weekends_off": true, "timezone": "Asia/Bangkok"}},
+		Evidence:       map[string]any{"workload": "api", "lookback_days": 14, "off_hours_per_week": 118, "replicas": 2, "conditional_on": "cluster autoscaler removes idle nodes"},
+		MonthlySavings: "22125.00", Currency: "THB", Confidence: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, err := a.Apply(ctx, tat, r.ID, by)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := gh.branches["keel/offhours-"+r.ID[len(r.ID)-8:]]
+	if url == "" || len(branch) != 1 {
+		t.Fatalf("url %q branch files %v", url, branch)
+	}
+	if _, touched := branch["k8s/dev/api.yaml"]; touched {
+		t.Fatal("the Deployment manifest was changed")
+	}
+	want := `apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-offhours
+  namespace: tat-crm
+spec:
+  scaleTargetRef:
+    name: api
+  minReplicaCount: 0
+  triggers:
+    - type: cron
+      metadata:
+        timezone: Asia/Bangkok
+        start: 0 8 * * 1-5
+        end: 0 18 * * 1-5
+        desiredReplicas: "2"
+`
+	if got := branch["k8s/dev/keda-offhours-api.yaml"]; got != want {
+		t.Fatalf("ScaledObject:\n%s", got)
+	}
+	body := gh.prs[0]["body"].(string)
+	if !strings.Contains(body, "KEDA installed in the cluster") || !strings.Contains(body, "only if node autoscaling") || !strings.Contains(body, "22125.00 THB/month") {
+		t.Fatalf("pr body:\n%s", body)
+	}
+	if got, _ := a.Recs.Get(ctx, tat, r.ID); got.State != "accepted" || got.PRURL == nil || *got.PRURL != url {
+		t.Fatalf("state %s pr %v", got.State, got.PRURL)
+	}
+}
+
+func TestScaledObjectRunsToMidnight(t *testing.T) {
+	out, err := apply.ScaledObject(apply.Schedule{Workload: "worker", Kind: "StatefulSet", TimeZone: "Asia/Bangkok", Days: "Daily", Start: 7, Stop: 24, Replicas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"start: 0 7 * * *", "end: 59 23 * * *", "kind: StatefulSet", "desiredReplicas: \"1\""} {
+		if !strings.Contains(string(out), s) {
+			t.Fatalf("missing %q in:\n%s", s, out)
+		}
+	}
+}
+
+func mustGet(t *testing.T, a apply.Applier, tenant, id string) rightsize.Recommendation {
+	t.Helper()
+	r, err := a.Recs.Get(context.Background(), tenant, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }

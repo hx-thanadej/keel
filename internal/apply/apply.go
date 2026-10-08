@@ -38,41 +38,94 @@ func (a Applier) Apply(ctx context.Context, tenant, id string, by activity.Actor
 	if r.State != "open" && r.State != "accepted" {
 		return "", rightsize.ErrState
 	}
-	if r.ResourceType != "k8s_workload" || r.Action != "resize_requests" {
-		return "", fmt.Errorf("%w: Keel opens pull requests for Kubernetes request changes; change %s %s by hand", ErrUnsupported, r.ResourceType, r.ResourceID)
+	var c change
+	switch {
+	case r.ResourceType == "k8s_workload" && r.Action == "resize_requests":
+		c, err = a.resizeRequests(ctx, tenant, r)
+	case r.ResourceType == "k8s_workload" && r.Action == "schedule":
+		c, err = a.offHoursSchedule(ctx, tenant, r)
+	default:
+		err = fmt.Errorf("%w: Keel opens pull requests for Kubernetes request changes and off-hours schedules; change %s %s by hand", ErrUnsupported, r.ResourceType, r.ResourceID)
 	}
+	if err != nil {
+		return "", err
+	}
+	if r.State == "open" {
+		if _, err := a.Recs.Accept(ctx, tenant, id, by); err != nil {
+			return "", err
+		}
+	}
+	branch := c.branch + "-" + id[len(id)-8:]
+	if err := a.Git.Branch(ctx, c.repo, c.base, branch); err != nil {
+		return "", err
+	}
+	if err := a.Git.Commit(ctx, c.repo, branch, c.path, c.sha, c.title+"\n\nOpened by Keel from recommendation "+id, c.content); err != nil {
+		return "", err
+	}
+	pr, err := a.Git.OpenPR(ctx, c.repo, branch, c.base, c.title, fmt.Sprintf("Keel rightsizing recommendation `%s`.\n\n", id)+c.body)
+	if err != nil {
+		return "", err
+	}
+	if err := a.Recs.SetPR(ctx, tenant, id, pr.HTMLURL, by); err != nil {
+		return "", err
+	}
+	return pr.HTMLURL, nil
+}
+
+// change is one file a pull request writes. An empty sha creates the file.
+type change struct {
+	repo, base, branch string
+	path, sha          string
+	content            []byte
+	title, body        string
+}
+
+// target is a Service repository's default branch and its YAML files.
+type target struct {
+	repo, base string
+	files      []string
+}
+
+func (a Applier) target(ctx context.Context, tenant string, r rightsize.Recommendation, workload string) (target, error) {
+	repoURL, err := a.serviceRepo(ctx, tenant, *r.ProjectID, workload)
+	if err != nil {
+		return target{}, err
+	}
+	repo, err := Repo(repoURL)
+	if err != nil {
+		return target{}, fmt.Errorf("%w: %v", ErrUnsupported, err)
+	}
+	base, err := a.Git.defaultBranch(ctx, repo)
+	if err != nil {
+		return target{}, err
+	}
+	files, err := a.Git.YAMLFiles(ctx, repo, base)
+	if err != nil {
+		return target{}, err
+	}
+	if len(files) > maxFiles {
+		files = files[:maxFiles]
+	}
+	return target{repo: repo, base: base, files: files}, nil
+}
+
+func (a Applier) resizeRequests(ctx context.Context, tenant string, r rightsize.Recommendation) (change, error) {
 	workload, _ := r.Evidence["workload"].(string)
 	container, _ := r.Evidence["container"].(string)
 	cpu, _ := r.Recommended["cpu"].(string)
 	mem, _ := r.Recommended["memory"].(string)
 	if workload == "" || container == "" || cpu == "" || mem == "" || r.ProjectID == nil {
-		return "", fmt.Errorf("%w: the recommendation lacks workload/container details", ErrUnsupported)
+		return change{}, fmt.Errorf("%w: the recommendation lacks workload/container details", ErrUnsupported)
 	}
-	repoURL, err := a.serviceRepo(ctx, tenant, *r.ProjectID, workload)
+	t, err := a.target(ctx, tenant, r, workload)
 	if err != nil {
-		return "", err
+		return change{}, err
 	}
-	repo, err := Repo(repoURL)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrUnsupported, err)
-	}
-	base, err := a.Git.defaultBranch(ctx, repo)
-	if err != nil {
-		return "", err
-	}
-	files, err := a.Git.YAMLFiles(ctx, repo, base)
-	if err != nil {
-		return "", err
-	}
-	var path, sha string
-	var patched []byte
-	for i, f := range files {
-		if i >= maxFiles {
-			break
-		}
-		src, s, err := a.Git.File(ctx, repo, f, base)
+	c := change{repo: t.repo, base: t.base, branch: "keel/rightsize"}
+	for _, f := range t.files {
+		src, s, err := a.Git.File(ctx, t.repo, f, t.base)
 		if err != nil {
-			return "", err
+			return change{}, err
 		}
 		if !strings.Contains(string(src), workload) {
 			continue
@@ -81,38 +134,19 @@ func (a Applier) Apply(ctx context.Context, tenant, id string, by activity.Actor
 		if err != nil || !ok {
 			continue // unparsable templates (e.g. Helm) or a different workload
 		}
-		path, sha, patched = f, s, out
+		c.path, c.sha, c.content = f, s, out
 		break
 	}
-	if path == "" {
-		return "", fmt.Errorf("%w: no Deployment/StatefulSet/DaemonSet %q with container %q in plain YAML in %s (Helm or Kustomize patches need a manual change)", ErrUnsupported, workload, container, repo)
+	if c.path == "" {
+		return change{}, fmt.Errorf("%w: no Deployment/StatefulSet/DaemonSet %q with container %q in plain YAML in %s (Helm or Kustomize patches need a manual change)", ErrUnsupported, workload, container, t.repo)
 	}
-	if r.State == "open" {
-		if _, err := a.Recs.Accept(ctx, tenant, id, by); err != nil {
-			return "", err
-		}
-	}
-	branch := "keel/rightsize-" + id[len(id)-8:]
-	if err := a.Git.Branch(ctx, repo, base, branch); err != nil {
-		return "", err
-	}
-	title := fmt.Sprintf("Right-size %s/%s: requests cpu %s, memory %s", workload, container, cpu, mem)
-	if err := a.Git.Commit(ctx, repo, branch, path, sha, title+"\n\nOpened by Keel from recommendation "+id, patched); err != nil {
-		return "", err
-	}
-	body := fmt.Sprintf("Keel rightsizing recommendation `%s`.\n\n| | current | recommended |\n|---|---|---|\n| cpu request | %v | %s |\n| memory request | %v | %s |\n\n"+
+	c.title = fmt.Sprintf("Right-size %s/%s: requests cpu %s, memory %s", workload, container, cpu, mem)
+	c.body = fmt.Sprintf("| | current | recommended |\n|---|---|---|\n| cpu request | %v | %s |\n| memory request | %v | %s |\n\n"+
 		"**Expected saving:** about %s %s/month (%s cost).\n\n**Evidence:** %v days, %v replica(s), CPU p95 max %v, memory max %v. Confidence %.2f.\n\n"+
 		"Merge to apply; Keel marks the recommendation applied and tracks realised savings.",
-		id, r.Current["cpu"], cpu, r.Current["memory"], mem, r.MonthlySavings, r.Currency, r.SavingsBasis,
+		r.Current["cpu"], cpu, r.Current["memory"], mem, r.MonthlySavings, r.Currency, r.SavingsBasis,
 		r.Evidence["lookback_days"], r.Evidence["replicas"], r.Evidence["cpu_p95_max"], r.Evidence["memory_max"], r.Confidence)
-	pr, err := a.Git.OpenPR(ctx, repo, branch, base, title, body)
-	if err != nil {
-		return "", err
-	}
-	if err := a.Recs.SetPR(ctx, tenant, id, pr.HTMLURL, by); err != nil {
-		return "", err
-	}
-	return pr.HTMLURL, nil
+	return c, nil
 }
 
 func (a Applier) serviceRepo(ctx context.Context, tenant, project, workload string) (string, error) {

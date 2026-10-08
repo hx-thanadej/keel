@@ -18,18 +18,9 @@ var workloadKinds = map[string]bool{"Deployment": true, "StatefulSet": true, "Da
 // whether the workload and container were found. Other documents,
 // containers and limits are left as they are.
 func PatchRequests(src []byte, workload, container, cpu, memory string) ([]byte, bool, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(src))
-	var docs []*yaml.Node
-	for {
-		var n yaml.Node
-		err := dec.Decode(&n)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		docs = append(docs, &n)
+	docs, err := decodeDocs(src)
+	if err != nil {
+		return nil, false, err
 	}
 	found := false
 	for _, d := range docs {
@@ -66,6 +57,23 @@ func PatchRequests(src []byte, workload, container, cpu, memory string) ([]byte,
 		return nil, false, err
 	}
 	return buf.Bytes(), true, nil
+}
+
+// decodeDocs parses every document of a (multi-document) YAML file.
+func decodeDocs(src []byte) ([]*yaml.Node, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(src))
+	var docs []*yaml.Node
+	for {
+		var n yaml.Node
+		err := dec.Decode(&n)
+		if errors.Is(err, io.EOF) {
+			return docs, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, &n)
+	}
 }
 
 func get(n *yaml.Node, key string) *yaml.Node {
