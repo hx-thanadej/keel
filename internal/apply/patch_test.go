@@ -41,7 +41,7 @@ spec:
 `
 
 func TestPatchRequests(t *testing.T) {
-	out, ok, err := apply.PatchRequests([]byte(manifests), "api", "app", "410m", "1531Mi")
+	out, ok, err := apply.PatchRequests([]byte(manifests), "api", "tat-crm-prod", "app", "410m", "1531Mi")
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
@@ -60,19 +60,23 @@ func TestPatchRequests(t *testing.T) {
 }
 
 func TestPatchRequestsNoMatch(t *testing.T) {
-	_, ok, err := apply.PatchRequests([]byte(manifests), "api", "nope", "1m", "1Mi")
+	_, ok, err := apply.PatchRequests([]byte(manifests), "api", "tat-crm-prod", "nope", "1m", "1Mi")
 	if err != nil || ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	_, ok, _ = apply.PatchRequests([]byte(manifests), "other", "app", "1m", "1Mi")
+	_, ok, _ = apply.PatchRequests([]byte(manifests), "other", "tat-crm-prod", "app", "1m", "1Mi")
 	if ok {
 		t.Fatal("wrong workload matched")
+	}
+	_, ok, _ = apply.PatchRequests([]byte(manifests), "api", "tat-crm-dev", "app", "1m", "1Mi")
+	if ok {
+		t.Fatal("wrong namespace matched")
 	}
 }
 
 func TestPatchRequestsAddsMissingResources(t *testing.T) {
-	src := "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: db\nspec:\n  template:\n    spec:\n      containers:\n        - name: postgres\n          image: postgres:18\n"
-	out, ok, err := apply.PatchRequests([]byte(src), "db", "postgres", "500m", "1024Mi")
+	src := "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: db\n  namespace: data\nspec:\n  template:\n    spec:\n      containers:\n        - name: postgres\n          image: postgres:18\n"
+	out, ok, err := apply.PatchRequests([]byte(src), "db", "data", "postgres", "500m", "1024Mi")
 	if err != nil || !ok || !strings.Contains(string(out), "requests:") || !strings.Contains(string(out), "cpu: 500m") {
 		t.Fatalf("ok=%v err=%v\n%s", ok, err, out)
 	}

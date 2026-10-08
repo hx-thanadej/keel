@@ -102,16 +102,7 @@ func (e OffHoursEngine) tenant(ctx context.Context, tenant string, asOf time.Tim
 				uses[id] = u
 			}
 			u.days++
-			for h, v := range hourly {
-				if v < 0 {
-					continue
-				}
-				t := day.UTC().Add(time.Duration(h) * time.Hour).In(loc)
-				wd, lh := int(t.Weekday()), t.Hour()
-				if v >= offHoursIdleCPU {
-					u.busy[wd][lh] = true
-				}
-			}
+			markBusy(&u.busy, day, hourly, loc, offHoursIdleCPU)
 		}
 		if err := rows.Err(); err != nil {
 			return err
@@ -148,12 +139,8 @@ func (e OffHoursEngine) tenant(ctx context.Context, tenant string, asOf time.Tim
 			res.Skipped["no_hourly_cost"]++
 			continue
 		}
-		s, ok := schedule(u)
+		s, ok := quietWindow(&u.busy)
 		if !ok {
-			res.Skipped["no_quiet_hours"]++
-			continue
-		}
-		if s.offPerWeek < offHoursMinOffWeek {
 			res.Skipped["no_quiet_hours"]++
 			continue
 		}
@@ -191,15 +178,28 @@ type window struct {
 	offPerWeek  int
 }
 
-// schedule turns observed busy hours into one daily window. ok is false when
-// the VM was busy around the clock (no contiguous window fits) or never busy
-// (that is Waste, not scheduling).
-func schedule(u *hourUse) (window, bool) {
+// markBusy records, in the local weekday × hour matrix, the hours of one UTC
+// day whose maximum reached busyAt. Hours without a sample (-1) are skipped.
+func markBusy(busy *[7][24]bool, day time.Time, hourly []float64, loc *time.Location, busyAt float64) {
+	for h, v := range hourly {
+		if v < 0 || v < busyAt {
+			continue
+		}
+		t := day.UTC().Add(time.Duration(h) * time.Hour).In(loc)
+		busy[int(t.Weekday())][t.Hour()] = true
+	}
+}
+
+// quietWindow turns observed busy hours into one daily working window. ok
+// is false when the resource was busy around the clock (no contiguous
+// window fits), never busy (that is Waste, not scheduling), or the window
+// would leave fewer than offHoursMinOffWeek hours off a week.
+func quietWindow(busy *[7][24]bool) (window, bool) {
 	first, last := 24, -1
 	weekendBusy := false
 	for wd := 0; wd < 7; wd++ {
 		for h := 0; h < 24; h++ {
-			if !u.busy[wd][h] {
+			if !busy[wd][h] {
 				continue
 			}
 			if wd == int(time.Saturday) || wd == int(time.Sunday) {
@@ -221,5 +221,5 @@ func schedule(u *hourUse) (window, bool) {
 	} else {
 		w.offPerWeek = 168 - 7*on
 	}
-	return w, true
+	return w, w.offPerWeek >= offHoursMinOffWeek
 }
