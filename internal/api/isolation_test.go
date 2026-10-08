@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/hx-thanadej/keel/internal/access"
 	"github.com/hx-thanadej/keel/internal/admission"
 	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/attest"
@@ -26,6 +27,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/sbom"
 	"github.com/hx-thanadej/keel/internal/scans"
+	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 	"github.com/hx-thanadej/keel/internal/templates"
 	"github.com/hx-thanadej/keel/internal/vending"
@@ -77,6 +79,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Attest:    &api.AttestDeps{Authz: az, Service: attest.Service{Store: s}},
 		Admission: &api.AdmissionDeps{Authz: az, Service: admission.Service{Store: s}},
 		VEX:       &api.VEXDeps{Authz: az, Service: vex.Service{Store: s}},
+		Access:    &api.AccessDeps{Authz: az, Service: mustAccess(t, s)},
 		Controls:  &api.ControlDeps{Authz: az, Service: controls.Service{Store: s, Registry: mustControls(t)}},
 		SBOM:      &api.SBOMDeps{Authz: az, Service: sbom.Service{Store: s}, Releases: attest.Service{Store: s}},
 		Templates: &api.TemplateDeps{Authz: az, Engine: flow.New(s), Creator: templates.Creator{Store: s, Org: "acme", Templates: map[string]templates.Template{"go": {Name: "go", Repo: "acme/tmpl"}}}},
@@ -140,6 +143,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/services/{service}/scans":                        {"version": "2.1.0", "runs": []any{}},
 		"POST /v1/tenants/{tenant}/releases/{release}/attestations":                 {},
 		"POST /v1/tenants/{tenant}/services/{service}/registry-token":               {},
+		"POST /v1/tenants/{tenant}/access/roles":                                    {"environment_id": env, "team_id": team, "template": "read-only"},
+		"POST /v1/tenants/{tenant}/access/roles/{role}/decide":                      {"approve": true},
 		"POST /v1/tenants/{tenant}/vex":                                             {"vulnerability": "CVE-2026-0001", "service_id": "set below", "status": "under_investigation"},
 		"POST /v1/tenants/{tenant}/releases/{release}/sbom":                         {"bomFormat": "CycloneDX", "specVersion": "1.6"},
 		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/admission": {"mode": "warn", "why": "pwn"},
@@ -167,7 +172,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var victimService, victimRelease, victimPromotion, victimException string
+	var victimService, victimRelease, victimPromotion, victimException, victimRole string
 	if err := s.InTenant(t.Context(), a, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(t.Context(), `INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, 'victim-svc', 'Victim Service') RETURNING id::text`, a, project, team).Scan(&victimService); err != nil {
 			return err
@@ -178,14 +183,17 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		if err := tx.QueryRow(t.Context(), `INSERT INTO promotions (tenant_id, release_id, environment_id, state, requested_by) VALUES ($1, $2, $3, 'pending_approval', 'user:victim') RETURNING id::text`, a, victimRelease, env).Scan(&victimPromotion); err != nil {
 			return err
 		}
+		if err := tx.QueryRow(t.Context(), `INSERT INTO access_roles (tenant_id, environment_id, team_id, template, state, requested_by) VALUES ($1, $2, $3, 'operator', 'requested', 'user:victim') RETURNING id::text`, a, env, team).Scan(&victimRole); err != nil {
+			return err
+		}
 		return tx.QueryRow(t.Context(), `INSERT INTO exceptions (tenant_id, fingerprint, reason, requested_by, expires_at) VALUES ($1, 'victim-fp', 'victim exception reason', 'user:victim', now() + interval '1 day') RETURNING id::text`, a).Scan(&victimException)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	bodies["POST /v1/tenants/{tenant}/vex"]["service_id"] = victimService
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason"},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole},
 	}
 
 	attackers := map[string]auth.Principal{
@@ -278,4 +286,13 @@ func mustControls(t *testing.T) controls.Registry {
 		t.Fatal(err)
 	}
 	return r
+}
+
+func mustAccess(t *testing.T, s *store.Store) *access.Service {
+	t.Helper()
+	a, err := access.New(s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
 }

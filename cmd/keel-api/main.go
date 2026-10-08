@@ -76,6 +76,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/sigstore/sigstore-go/pkg/root"
 
+	"github.com/hx-thanadej/keel/internal/access"
 	"github.com/hx-thanadej/keel/internal/admission"
 	"github.com/hx-thanadej/keel/internal/anomaly"
 	"github.com/hx-thanadej/keel/internal/api"
@@ -340,6 +341,16 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if creator != nil {
 		defs = append(defs, creator.Def())
 	}
+	var dir access.Directory
+	if zone, region := os.Getenv("KEEL_CIC_ZONE_ID"), os.Getenv("KEEL_TENCENT_ORG_REGION"); zone != "" && region != "" {
+		dir = tencent.IdentityCenter{API: tencent.NewOrgAPI(region, tencent.Credentials()), ZoneID: zone}
+	}
+	acc, err := access.New(st, dir)
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	deps.Access = &api.AccessDeps{Authz: az, Service: acc}
 	excs := exceptions.New(st)
 	engine, stopJobs, err := startFlows(ctx, st, defs, excs)
 	if err != nil {
