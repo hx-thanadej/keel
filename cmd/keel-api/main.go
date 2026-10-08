@@ -526,7 +526,8 @@ func templateCreator(st *store.Store) (*templates.Creator, error) {
 		return nil, nil
 	}
 	c := &templates.Creator{Store: st, Git: templates.GitHub{Client: ghapi.Client{Token: tok}}, Org: os.Getenv("KEEL_GITHUB_OWNER"),
-		ReusableWorkflow: os.Getenv("KEEL_REUSABLE_WORKFLOW"), KeelURL: os.Getenv("KEEL_BASE_URL"), Templates: map[string]templates.Template{}}
+		ReusableWorkflow: os.Getenv("KEEL_REUSABLE_WORKFLOW"), KeelURL: os.Getenv("KEEL_BASE_URL"), Templates: map[string]templates.Template{},
+		AgeProd: os.Getenv("KEEL_SOPS_AGE_PROD"), AgeNonProd: os.Getenv("KEEL_SOPS_AGE_NONPROD")}
 	for _, kv := range strings.Split(raw, ",") {
 		name, rest, ok := strings.Cut(strings.TrimSpace(kv), "=")
 		repo, ref, _ := strings.Cut(rest, "@")

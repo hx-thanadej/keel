@@ -116,7 +116,7 @@ func setup(t *testing.T) world {
 var eng = activity.Actor{Type: activity.ActorHuman, UID: "user:eng@harmonyx.co"}
 
 func creator(w world, g *fakeGit, ref string) templates.Creator {
-	return templates.Creator{Store: w.s, Git: g, Org: "acme", ReusableWorkflow: "acme/keel-workflows/.github/workflows/build.yml@abc123", KeelURL: "https://keel.example.com",
+	return templates.Creator{Store: w.s, Git: g, Org: "acme", ReusableWorkflow: "acme/keel-workflows/.github/workflows/build.yml@abc123", KeelURL: "https://keel.example.com", AgeProd: "age1prodrecipient", AgeNonProd: "age1nonprodrecipient",
 		Templates: map[string]templates.Template{"go-service": {Name: "go-service", Repo: "acme/tmpl-go", Ref: ref}}}
 }
 
@@ -146,6 +146,9 @@ func TestCreateServiceFromTemplate(t *testing.T) {
 	comps, err := catalogsync.Parse([]byte(g.files["acme/crm-api/catalog-info.yaml"]))
 	if err != nil || len(comps) != 1 || comps[0].Name != "crm-api" || comps[0].Owner != "crm" || comps[0].System != "tat-crm" || comps[0].Tenant != "tat" {
 		t.Fatalf("catalog-info %+v %v", comps, err)
+	}
+	if sops := g.files["acme/crm-api/.sops.yaml"]; !strings.Contains(sops, "age: age1prodrecipient") || !strings.Contains(sops, "path_regex: envs/prod/") {
+		t.Fatalf(".sops.yaml:\n%s", sops)
 	}
 	var svcID string
 	if err := w.s.InTenant(ctx, w.tenant, func(tx pgx.Tx) error {

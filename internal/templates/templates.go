@@ -64,6 +64,8 @@ type Creator struct {
 	Templates        map[string]Template
 	ReusableWorkflow string
 	KeelURL          string
+	AgeProd          string
+	AgeNonProd       string
 }
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -126,7 +128,7 @@ func (c Creator) Def() flow.Def {
 		{Name: "files", Do: func(ctx context.Context, r *flow.Run) (map[string]any, error) {
 			files := Files(Params{Tenant: r.Str("tenant_slug"), Project: r.Str("project_slug"), Team: r.Str("team_slug"), Service: r.Str("service_slug"),
 				Title: r.Str("title"), Org: c.Org, Template: r.Str("template"), TemplateVersion: r.Out("template", "version"), ReusableWorkflow: c.ReusableWorkflow,
-				KeelURL: c.KeelURL, TenantID: r.Tenant, ServiceID: r.Out("register", "service_id")})
+				KeelURL: c.KeelURL, TenantID: r.Tenant, ServiceID: r.Out("register", "service_id"), AgeProd: c.AgeProd, AgeNonProd: c.AgeNonProd})
 			written := 0
 			for _, path := range sortedKeys(files) {
 				changed, err := c.Git.PutFile(ctx, r.Out("repo", "full_name"), r.Out("ready", "branch"), path, "chore: Keel governed files ("+path+")", files[path])
