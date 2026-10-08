@@ -6,28 +6,34 @@ Nothing here uses long-lived keys (ADR-0007).
 
 ## One-time setup (organisation admin)
 
-1. In the Tencent organisation admin account create the automation role Keel
-   assumes (`KEEL_TENCENT_AUTOMATION_ROLE`) with organisation read/write for
-   units, member creation, SCP attach/detach and CIC (Identity Center) role
-   configurations and assignments. Set `KEEL_TENCENT_ORG_ADMIN_UIN` and
-   `KEEL_TENCENT_ORG_REGION`.
-2. Name the role Keel assumes **inside** each new member account
-   (`KEEL_TENCENT_VENDING_ROLE`, created by member-account creation).
-3. Landing Zone drift: runs daily and reports Findings. Set
-   `KEEL_LANDING_ZONE_REMEDIATE=true` only after the guardrails were checked
-   on a sandbox member account (#98 — the SCP condition key and CloudAudit
-   action names are still unverified).
+1. Keel calls the organisation APIs with its ambient identity, the TKE pod
+   identity (OIDC) or the CVM instance role. In the Tencent organisation
+   admin account give that role organisation read/write for units, member
+   creation, SCP attach/detach and CIC (Identity Center) role configurations
+   and assignments. Set `KEEL_TENCENT_AUTOMATION_ROLE` to its name. Keel does
+   not assume it. The name only exempts the role from the identity guardrail
+   SCP. Set `KEEL_TENCENT_ORG_ADMIN_UIN` and `KEEL_TENCENT_ORG_REGION`.
+2. Keel assumes `KEEL_TENCENT_VENDING_ROLE` **inside** each new member
+   account. It defaults to `OrganizationAccessControlRole`, which
+   member-account creation makes.
+3. Landing Zone drift runs daily and reports Findings. Set
+   `KEEL_LANDING_ZONE_REMEDIATE=1` only after the guardrails were checked on
+   a sandbox member account (#98). The SCP condition key and CloudAudit
+   action names are still unverified.
 
 ## Vend an Environment
 
-Portal → Projects → Environment → *Vend account* (or
-`POST /v1/tenants/{t}/projects/{p}/environments/{e}/vend`). The durable flow
-runs: organisation unit → member account (name ≤ 25 chars) → wait until
-ready → register as a Cloud Account → Landing Zone baseline (`keel-baseline@1`
-SCPs: stay in the organisation, protect CloudAudit, identities only via Keel)
-→ CI identity. Each step is retried by River and
-undone in reverse on cancel. Watch it under Delivery → Flows; retry or
-cancel from there.
+Vending is API-only. The portal has no vend action. Call
+`POST /v1/tenants/{t}/projects/{p}/environments/{e}/vend` with
+`{"provider": "tencent"}`. The durable flow runs organisation unit → member
+account (name ≤ 25 chars) → wait until ready → register as a Cloud Account
+→ Landing Zone baseline (`keel-baseline@1` SCPs that keep the account in the
+organisation, protect CloudAudit and allow identities only via Keel) → CI
+identity → permission boundary → registry (only when `KEEL_TCR_REGISTRY_ID`
+is set). River retries each step. Cancel undoes the finished steps in
+reverse. Watch the run under Delivery → Runs, which offers *Retry from the
+failed step*. Cancel is API-only
+(`POST /v1/tenants/{t}/flows/{flow}/cancel` with a reason).
 
 ## CI identity
 

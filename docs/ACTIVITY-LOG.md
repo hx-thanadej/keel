@@ -274,8 +274,7 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
     bills are read with workload identity federation / RRSA; GCP key files
     are refused.
   - SCTs are required on every Sigstore verification; VSAs are Keel-signed
-    in-toto statements and production promotion needs one per image by
-    default.
+    in-toto statements and every promotion needs one per image by default.
   - Human cloud access only through CIC role assignments that expire; any
     standing production write access is a critical Finding.
   - Reports and evidence are stored/signed snapshots, so they stay readable
