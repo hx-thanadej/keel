@@ -227,6 +227,14 @@ func TestPromotionPathDevThenApprovedProd(t *testing.T) {
 	}); err != nil || !strings.Contains(detail, "lead time") {
 		t.Fatalf("deployment activity %q %v", detail, err)
 	}
+	// Later the app degrades: the deployment is marked failed (DORA).
+	argo.apps["tat-crm-dev-crm-api"] = promotion.AppStatus{Sync: "Synced", Health: "Degraded", Images: []string{image + "@" + digest}}
+	if res, err := s.Sync(ctx); err != nil || res.Failed != 1 {
+		t.Fatalf("degraded %+v %v", res, err)
+	}
+	if res, _ := s.Sync(ctx); res.Failed != 0 {
+		t.Fatal("marked failed twice")
+	}
 	// Prod now passes policy but needs a Tenant Approver; the requester cannot approve.
 	p, err = s.Promote(ctx, w.tenant, rel.ID, w.prod, eng)
 	if err != nil || p.State != "pending_approval" || !p.Decision.Allow {

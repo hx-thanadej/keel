@@ -97,6 +97,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/controls"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/dora"
 	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/flow"
@@ -263,6 +264,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Promotion = &api.PromotionDeps{Authz: az, Service: promo}
+	deps.DORA = &api.DORADeps{Authz: az, Service: dora.Service{Store: st}}
 	go every(ctx, 2*time.Minute, "promotion sync", func(ctx context.Context) error {
 		res, err := promo.Sync(ctx)
 		if err == nil && res != (promotion.SyncResult{}) {
