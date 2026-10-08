@@ -27,6 +27,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/leaks"
+	"github.com/hx-thanadej/keel/internal/maturity"
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/reports"
 	"github.com/hx-thanadej/keel/internal/rightsize"
@@ -94,6 +95,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Scorecards: &api.ScorecardDeps{Authz: az, Service: scorecard.Service{Store: s}},
 		DORA:       &api.DORADeps{Authz: az, Service: dora.Service{Store: s}},
 		Reports:    &api.ReportDeps{Authz: az, Service: reports.Service{Store: s}},
+		Maturity:   &api.MaturityDeps{Authz: az, Service: maturity.Service{Store: s, DORA: dora.Service{Store: s}}},
 		Webhooks:   &api.WebhookDeps{Leaks: &leaks.Service{Store: s}},
 		BreakGlass: &api.BreakGlassDeps{Authz: az, Service: breakglass.Service{Store: s}, Home: func(*http.Request) (string, error) { return home, nil }},
 		Access:     &api.AccessDeps{Authz: az, Service: mustAccess(t, s)},
@@ -125,6 +127,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	// A valid body per write route, so requests reach the policy check rather
 	// than failing validation first.
 	bodies := map[string]map[string]any{
+		"PUT /v1/tenants/{tenant}/maturity/{quarter}":                               {"answers": map[string]any{"investment": map[string]int{"level": 1}, "adoption": map[string]int{"level": 1}, "interfaces": map[string]int{"level": 1}, "operations": map[string]int{"level": 1}, "measurement": map[string]int{"level": 1}}},
 		"POST /v1/tenants/{tenant}/teams":                                           {"slug": "pwn-team", "name": "Pwn"},
 		"POST /v1/tenants/{tenant}/projects":                                        {"team_id": team, "slug": "pwn-project", "name": "Pwn"},
 		"PATCH /v1/tenants/{tenant}/projects/{project}":                             {"name": "Pwned"},
@@ -212,6 +215,9 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		if err := tx.QueryRow(t.Context(), `INSERT INTO access_grants (tenant_id, role_id, requester, reason, hours, state) VALUES ($1, $2, 'user:victim', 'victim grant reason', 1, 'requested') RETURNING id::text`, a, victimRole).Scan(&victimGrant); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(t.Context(), `INSERT INTO maturity_assessments (tenant_id, quarter, version, answers, indicators, submitted_by) VALUES ($1, '2026-Q3', 'v', '{"investment": {"level": 2, "note": "victim-maturity-note"}}', '{}', 'user:victim')`, a); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(t.Context(), `INSERT INTO tenant_reports (tenant_id, period, data, html) VALUES ($1, '2026-09-01', '{"tenant_name": "victim-report-data"}', '<p>victim-report-page</p>')`, a); err != nil {
 			return err
 		}
@@ -222,8 +228,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	bodies["POST /v1/tenants/{tenant}/vex"]["service_id"] = victimService
 	bodies["POST /v1/tenants/{tenant}/access/grants"]["role_id"] = victimRole
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole, "grant": victimGrant, "period": "2026-09"},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole, victimGrant, "victim grant reason", "victim-report-data", "victim-report-page"},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole, "grant": victimGrant, "period": "2026-09", "quarter": "2026-Q3"},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole, victimGrant, "victim grant reason", "victim-report-data", "victim-report-page", "victim-maturity-note"},
 	}
 
 	attackers := map[string]auth.Principal{
