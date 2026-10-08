@@ -1,9 +1,11 @@
 name: ci
 
+# CI runs only on main to save Actions minutes; run it on a branch on
+# demand with `gh workflow run ci.yml --ref <branch>`.
 on:
-  pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # Least privilege: nothing beyond reading the repo. Jobs that need more
 # (e.g. id-token: write for OIDC) must ask for it explicitly.
