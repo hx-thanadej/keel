@@ -284,6 +284,43 @@ describe('finops screens', () => {
     expect((screen.getByLabelText('Hours') as HTMLInputElement).max).toBe('2')
   })
 
+  it('insights tab shows DORA per month, failing scorecard checks, reports, evidence and maturity', async () => {
+    const dora = (n: number) => ({ from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z', tenant: { scope: 'tenant', deployments: n, deployments_per_day: n / 30, lead_time_hours: 5, change_fail_rate: 0.1, recovery_hours: 2, rework_rate: 0, failed: 1, rework: 0 }, services: [] })
+    const calls = mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/dora`]: () => dora(12),
+      [`/v1/tenants/${tat}/scorecards`]: { version: 'keel-scorecard@1', score: 60, teams: [], services: [
+        { service_id: 's1', service: 'crm-api', team_id: 't', score: 60, previous_score: 40, checks: [{ name: 'owner', control: 'PO.2.1', pass: true }, { name: 'scanned', control: 'PW.7.2', pass: false, why: 'no full scanner upload in the last 30 days' }] }] },
+      [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z' }],
+      [`/v1/tenants/${tat}/decisions`]: { items: [{ service_id: 's1', service: 'crm-api', path: 'docs/decisions/0003-queue.md', number: 3, title: 'Use River for jobs', status: 'accepted', date: '2026-05-01', superseded_by: '', url: 'https://github.com/acme/crm-api/blob/main/docs/decisions/0003-queue.md' }] },
+      [`/v1/tenants/${tat}/maturity`]: {
+        quarter: '2026-Q4',
+        questionnaire: { version: 'keel-maturity@1', levels: ['Provisional', 'Operational', 'Scalable', 'Optimizing'], aspects: [
+          { id: 'adoption', title: 'Adoption', question: 'How do teams come to use the platform?', measured: 'template_adoption', levels: ['a1', 'a2', 'a3', 'a4'] }] },
+        indicators: { services: 4, template_adoption: 0.75, environments: 2, self_service_environments: 0.5, dora: dora(12).tenant, suggested_levels: { adoption: 3 } },
+        assessments: [{ quarter: '2026-Q3', version: 'keel-maturity@1', answers: { adoption: { level: 2 } }, indicators: {}, submitted_by: 'user:lead@tat.or.th', submitted_at: '2026-09-20T00:00:00Z' }],
+      },
+      [`/v1/tenants/${tat}/maturity/2026-Q4`]: { quarter: '2026-Q4' },
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    expect(await screen.findByText('Deployments this month')).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'Production deployments per month' })).toBeTruthy()
+    expect(calls.filter((c) => c.startsWith(`/v1/tenants/${tat}/dora?`)).length).toBe(6)
+    expect(screen.getByText(/scanned \(no full scanner upload in the last 30 days\)/)).toBeTruthy()
+    expect(screen.getByText(/60 ↑/)).toBeTruthy()
+    expect((screen.getByRole('link', { name: 'Download report 2026-09' }) as HTMLAnchorElement).getAttribute('href')).toBe(`/v1/tenants/${tat}/reports/2026-09?format=html`)
+    expect((screen.getByRole('link', { name: 'Export evidence' }) as HTMLAnchorElement).getAttribute('href')).toMatch(new RegExp(`^/v1/tenants/${tat}/evidence\\?from=\\d{4}-\\d{2}-01&to=`))
+    expect(screen.getByText('Operational')).toBeTruthy() // Q3 trend cell
+    expect(screen.getByText('Keel measures Scalable')).toBeTruthy()
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('3') // pre-filled from the measure
+    await userEvent.type(screen.getByLabelText(/Search decisions/), 'queue')
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+    expect(await screen.findByText(/crm-api: ADR-0003 Use River for jobs/)).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Save 2026-Q4 assessment' }))
+    await waitFor(() => expect(calls).toContain(`/v1/tenants/${tat}/maturity/2026-Q4`))
+  })
+
   it('findings tab lists anomalies with severity label and contributors', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null, due_at: '2026-09-18T03:00:00Z', overdue_at: '2026-09-19T00:00:00Z' }] } })
     render(<App />)
