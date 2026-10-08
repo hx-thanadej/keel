@@ -174,6 +174,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/approve":                  {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/reject":                   {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/revoke":                   {"note": "pwn"},
+		"POST /v1/tenants/{tenant}/reports/{period}/regenerate":                     {},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)

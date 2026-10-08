@@ -18,8 +18,8 @@ type ReportDeps struct {
 }
 
 func mountReports(mux Mux, a auth.Authenticator, d ReportDeps) {
-	allow := func(r *http.Request, p auth.Principal, tenant string) error {
-		dec, err := d.Authz.Decide(r.Context(), authz.Request{Principal: p, Action: "report.read", Resource: authz.Resource{Type: "report", TenantID: tenant}})
+	allow := func(r *http.Request, p auth.Principal, action, tenant string) error {
+		dec, err := d.Authz.Decide(r.Context(), authz.Request{Principal: p, Action: action, Resource: authz.Resource{Type: "report", TenantID: tenant}})
 		if err != nil {
 			return err
 		}
@@ -30,7 +30,7 @@ func mountReports(mux Mux, a auth.Authenticator, d ReportDeps) {
 	}
 	mux.Handle("GET /v1/tenants/{tenant}/reports", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tenant := r.PathValue("tenant")
-		if err := allow(r, p, tenant); err != nil {
+		if err := allow(r, p, "report.read", tenant); err != nil {
 			return err
 		}
 		out, err := d.Service.List(r.Context(), tenant)
@@ -43,7 +43,7 @@ func mountReports(mux Mux, a auth.Authenticator, d ReportDeps) {
 	// The report as data, or with ?format=html as the stored page to download.
 	mux.Handle("GET /v1/tenants/{tenant}/reports/{period}", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tenant := r.PathValue("tenant")
-		if err := allow(r, p, tenant); err != nil {
+		if err := allow(r, p, "report.read", tenant); err != nil {
 			return err
 		}
 		period, err := reports.ParsePeriod(r.PathValue("period"))
@@ -64,6 +64,27 @@ func mountReports(mux Mux, a auth.Authenticator, d ReportDeps) {
 			w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 			w.WriteHeader(http.StatusOK)
 			_, err := w.Write([]byte(page))
+			return err
+		}
+		writeJSON(w, http.StatusOK, rep)
+		return nil
+	}))
+	// Rebuild a finished month's report from current data, e.g. once late
+	// cost data is final.
+	mux.Handle("POST /v1/tenants/{tenant}/reports/{period}/regenerate", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant := r.PathValue("tenant")
+		if err := allow(r, p, "report.generate", tenant); err != nil {
+			return err
+		}
+		period, err := reports.ParsePeriod(r.PathValue("period"))
+		if err != nil {
+			return errors.Join(catalog.ErrInvalid, err)
+		}
+		rep, err := d.Service.Generate(r.Context(), tenant, period, actor(p))
+		if errors.Is(err, reports.ErrPeriod) {
+			return errors.Join(catalog.ErrInvalid, err)
+		}
+		if err != nil {
 			return err
 		}
 		writeJSON(w, http.StatusOK, rep)

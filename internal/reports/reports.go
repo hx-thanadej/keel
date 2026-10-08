@@ -31,6 +31,7 @@ type Report struct {
 	TenantName  string         `json:"tenant_name"`
 	Period      string         `json:"period"` // YYYY-MM
 	GeneratedAt time.Time      `json:"generated_at"`
+	Final       bool           `json:"final"` // every Budget line's cost data is final
 	Currency    string         `json:"currency"`
 	Budgets     []BudgetLine   `json:"budgets"`
 	Savings     Savings        `json:"savings"`
@@ -127,9 +128,11 @@ func ParsePeriod(v string) (time.Time, error) {
 	return t, nil
 }
 
-// Run generates last month's report for every Tenant that lacks one. It is
-// safe to run daily: on the first of a month it produces the new reports,
-// and on other days it fills in any a failed run missed.
+// Run generates last month's report for every Tenant that lacks one, and
+// regenerates any whose cost data was not yet final. It is safe to run
+// hourly and from several replicas: on the first of a month it produces the
+// new reports, later runs fill in any a failed run missed and refresh
+// provisional figures, and each report change is recorded once.
 func (s Service) Run(ctx context.Context) (int, error) {
 	n := s.now()
 	period := time.Date(n.Year(), n.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -1, 0)
@@ -144,44 +147,74 @@ func (s Service) Run(ctx context.Context) (int, error) {
 	made := 0
 	var errs []error
 	for _, tenant := range tenants {
-		var exists bool
+		var exists, final bool
 		if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tenant_reports WHERE period = $1)`, period).Scan(&exists)
+			return tx.QueryRow(ctx, `SELECT count(*) > 0, coalesce(bool_and((data->>'final')::boolean), false) FROM tenant_reports WHERE period = $1`, period).Scan(&exists, &final)
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("tenant %s: %w", tenant, err))
 			continue
 		}
-		if exists {
+		if final {
 			continue
 		}
-		if _, err := s.Generate(ctx, tenant, period, keelActor); err != nil {
+		w := create
+		if exists {
+			w = refresh
+		}
+		_, changed, err := s.generate(ctx, tenant, period, keelActor, w)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("tenant %s: %w", tenant, err))
 			continue
 		}
-		made++
+		if changed {
+			made++
+		}
 	}
 	return made, errors.Join(errs...)
+}
+
+// write says how a newly generated report meets one already stored for its
+// month.
+type write int
+
+const (
+	create  write = iota // keep the stored one: another run got there first
+	refresh              // replace it only if its figures moved
+	replace              // always replace it
+)
+
+var upsert = map[write]string{
+	create:  `DO NOTHING`,
+	refresh: `DO UPDATE SET generated_at = excluded.generated_at, data = excluded.data, html = excluded.html WHERE tenant_reports.data - 'generated_at' IS DISTINCT FROM excluded.data - 'generated_at'`,
+	replace: `DO UPDATE SET generated_at = excluded.generated_at, data = excluded.data, html = excluded.html`,
 }
 
 // Generate builds, stores and returns the report for the month starting at
 // period, replacing any earlier one for that month.
 func (s Service) Generate(ctx context.Context, tenant string, period time.Time, by activity.Actor) (Report, error) {
+	r, _, err := s.generate(ctx, tenant, period, by, replace)
+	return r, err
+}
+
+// generate builds the report and stores it as w says, reporting whether the
+// stored report was created or changed. Only a change is an Activity.
+func (s Service) generate(ctx context.Context, tenant string, period time.Time, by activity.Actor, w write) (Report, bool, error) {
 	from := time.Date(period.Year(), period.Month(), 1, 0, 0, 0, 0, time.UTC)
 	to := from.AddDate(0, 1, 0)
 	if to.After(s.now()) {
-		return Report{}, ErrPeriod
+		return Report{}, false, ErrPeriod
 	}
 	last := to.AddDate(0, 0, -1)
 	r := Report{Tenant: tenant, Period: from.Format("2006-01"), GeneratedAt: s.now()}
 	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT name, currency FROM tenants WHERE id = $1`, tenant).Scan(&r.TenantName, &r.Currency)
 	}); err != nil {
-		return r, err
+		return r, false, err
 	}
 
 	budgets, err := s.Budgets.List(ctx, tenant, "")
 	if err != nil {
-		return r, err
+		return r, false, err
 	}
 	projects := map[string]string{}
 	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
@@ -199,7 +232,7 @@ func (s Service) Generate(ctx context.Context, tenant string, period time.Time, 
 		}
 		return rows.Err()
 	}); err != nil {
-		return r, err
+		return r, false, err
 	}
 	for _, b := range budgets {
 		if b.Year != from.Year() {
@@ -207,11 +240,11 @@ func (s Service) Generate(ctx context.Context, tenant string, period time.Time, 
 		}
 		m, err := s.Budgets.Status(ctx, tenant, b.ID, budget.Month, last)
 		if err != nil {
-			return r, fmt.Errorf("budget %s: %w", b.Name, err)
+			return r, false, fmt.Errorf("budget %s: %w", b.Name, err)
 		}
 		y, err := s.Budgets.Status(ctx, tenant, b.ID, budget.Year, last)
 		if err != nil {
-			return r, fmt.Errorf("budget %s: %w", b.Name, err)
+			return r, false, fmt.Errorf("budget %s: %w", b.Name, err)
 		}
 		r.Budgets = append(r.Budgets, BudgetLine{Project: projects[b.ProjectID], Budget: b.Name, Currency: b.Currency,
 			MonthBudget: m.Budget, MonthActual: m.Actual, MonthVariance: sub(m.Actual, m.Budget),
@@ -219,10 +252,14 @@ func (s Service) Generate(ctx context.Context, tenant string, period time.Time, 
 			Final: m.Final, MissingFX: m.MissingFX || y.MissingFX})
 	}
 	sort.SliceStable(r.Budgets, func(i, j int) bool { return r.Budgets[i].Project < r.Budgets[j].Project })
+	r.Final = true
+	for _, b := range r.Budgets {
+		r.Final = r.Final && b.Final
+	}
 
 	sv, err := s.Savings.Summary(ctx, tenant, "")
 	if err != nil {
-		return r, err
+		return r, false, err
 	}
 	r.Savings = Savings{Currency: sv.Currency, Realised: sv.Realised, Applied: sv.Applied, Regressions: sv.Regressions}
 	for _, it := range sv.Items {
@@ -239,7 +276,7 @@ func (s Service) Generate(ctx context.Context, tenant string, period time.Time, 
 
 	d, err := s.DORA.Compute(ctx, tenant, from, to)
 	if err != nil {
-		return r, err
+		return r, false, err
 	}
 	r.DORA, r.Services = d.Tenant, d.Services
 
@@ -257,8 +294,9 @@ func (s Service) Generate(ctx context.Context, tenant string, period time.Time, 
 				(SELECT count(*) FROM findings WHERE first_seen_at >= $1 AND first_seen_at < $2),
 				(SELECT count(*) FROM findings WHERE resolved_at >= $1 AND resolved_at < $2),
 				(SELECT count(*) FROM findings WHERE resolved_at >= $1 AND resolved_at < $2 AND (due_at IS NULL OR resolved_at <= due_at)),
-				(SELECT count(*) FROM exceptions WHERE state IN ('approved', 'expired', 'revoked') AND decided_at < $2 AND expires_at >= $1),
-				(SELECT count(*) FROM exceptions WHERE state IN ('approved', 'expired', 'revoked') AND decided_at >= $1 AND decided_at < $2),
+				(SELECT count(*) FROM exceptions WHERE state IN ('approved', 'expired', 'revoked')
+					AND coalesce(approved_at, decided_at, created_at) < $2 AND coalesce(revoked_at, expires_at) >= $1),
+				(SELECT count(*) FROM exceptions WHERE approved_at >= $1 AND approved_at < $2),
 				(SELECT count(*) FROM exceptions WHERE state = 'approved' AND expires_at >= $2 AND expires_at < $2 + interval '30 days'),
 				(SELECT count(*) FROM access_grants WHERE created_at >= $1 AND created_at < $2),
 				(SELECT coalesce(sum(hours) FILTER (WHERE activated_at IS NOT NULL), 0) FROM access_grants WHERE created_at >= $1 AND created_at < $2)`, from, to).
@@ -274,28 +312,40 @@ func (s Service) Generate(ctx context.Context, tenant string, period time.Time, 
 		return json.Unmarshal(states, &r.Access.ByState)
 	})
 	if err != nil {
-		return r, err
+		return r, false, err
 	}
 
 	var page bytes.Buffer
 	if err := pageTmpl.Execute(&page, r); err != nil {
-		return r, err
+		return r, false, err
 	}
 	data, err := json.Marshal(r)
 	if err != nil {
-		return r, err
+		return r, false, err
 	}
-	return r, s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO tenant_reports (tenant_id, period, generated_at, data, html) VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (tenant_id, period) DO UPDATE SET generated_at = excluded.generated_at, data = excluded.data, html = excluded.html`,
-			tenant, from, r.GeneratedAt, data, page.String()); err != nil {
+	changed := false
+	err = s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		var inserted bool // xmax is 0 only on a row this statement inserted
+		err := tx.QueryRow(ctx, `INSERT INTO tenant_reports (tenant_id, period, generated_at, data, html) VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (tenant_id, period) `+upsert[w]+` RETURNING xmax = 0`,
+			tenant, from, r.GeneratedAt, data, page.String()).Scan(&inserted)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/reports", Type: "keel.report.generated",
-			Subject: "tenant/" + tenant + "/reports/" + r.Period, Operation: "GenerateReport", Kind: activity.Create, Actor: by,
-			Outcome: activity.Success, StatusDetail: fmt.Sprintf("monthly report %s: %d budgets, %d deployments", r.Period, len(r.Budgets), r.DORA.Deployments)})
+		changed = true
+		kind := activity.Update
+		if inserted {
+			kind = activity.Create
+		}
+		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/reports", Type: "keel.report.generated",
+			Subject: "tenant/" + tenant + "/reports/" + r.Period, Operation: "GenerateReport", Kind: kind, Actor: by,
+			Outcome: activity.Success, StatusDetail: fmt.Sprintf("monthly report %s: %d budgets, %d deployments, final %v", r.Period, len(r.Budgets), r.DORA.Deployments, r.Final)})
 		return err
 	})
+	return r, changed, err
 }
 
 // List returns stored reports, newest first.
