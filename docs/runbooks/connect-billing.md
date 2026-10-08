@@ -82,7 +82,10 @@ Run OpenCost in each shared TKE cluster and set
 3. Keel authenticates with workload identity federation
    (`GOOGLE_APPLICATION_CREDENTIALS` pointing at an `external_account` config,
    or GKE Workload Identity) with *Storage Object Viewer* on the bucket.
-   Service-account key files are refused.
+   Keel accepts only keyless credentials. These are workload identity
+   federation (`external_account`), impersonation whose source is keyless,
+   and the metadata server. It refuses service-account key files and
+   `authorized_user` refresh tokens.
 4. Set `KEEL_GCP_BILL_BUCKET`, `KEEL_GCP_BILL_PREFIX`, `KEEL_GCP_BILLING_ACCOUNT`.
    Cloud Accounts are GCP **project ids** (`SubAccountId`).
 5. Finality: Google gives no hard close (invoice by the 5th business day,
