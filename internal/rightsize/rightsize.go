@@ -256,6 +256,19 @@ func (s Service) Get(ctx context.Context, tenant, id string) (Recommendation, er
 	return out, err
 }
 
+// IsProduction reports whether an Environment is production, by the rule
+// every engine applies: its name is prod, production or prd.
+func (s Service) IsProduction(ctx context.Context, tenant, environment string) (bool, error) {
+	var prod bool
+	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT name IN ('prod', 'production', 'prd') FROM environments WHERE id = $1`, environment).Scan(&prod)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	return prod, err
+}
+
 // SetPR links the pull request that applies a recommendation.
 func (s Service) SetPR(ctx context.Context, tenant, id, url string, by activity.Actor) error {
 	return s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {

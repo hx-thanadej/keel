@@ -109,37 +109,86 @@ func (a Applier) target(ctx context.Context, tenant string, r rightsize.Recommen
 	return target{repo: repo, base: base, files: files}, nil
 }
 
+// manifest is the one YAML file in the Service repo that declares a
+// workload of one of kinds with exactly this name and namespace. A
+// manifest without metadata.namespace never matches: the namespace it
+// lands in is decided elsewhere (Kustomize, Helm, kubectl -n), so Keel
+// can't tell a production copy from a non-production one.
+func (a Applier) manifest(ctx context.Context, t target, kinds map[string]bool, workload, namespace string) (manifest, error) {
+	var found []manifest
+	unnamespaced := false
+	for _, f := range t.files {
+		src, sha, err := a.Git.File(ctx, t.repo, f, t.base)
+		if err != nil {
+			return manifest{}, err
+		}
+		if !strings.Contains(string(src), workload) {
+			continue
+		}
+		docs, err := decodeDocs(src)
+		if err != nil {
+			continue // unparsable templates (e.g. Helm)
+		}
+		for _, d := range docs {
+			if len(d.Content) == 0 {
+				continue
+			}
+			root, meta := d.Content[0], get(d.Content[0], "metadata")
+			kind := scalar(get(root, "kind"))
+			if !kinds[kind] || scalar(get(meta, "name")) != workload {
+				continue
+			}
+			switch scalar(get(meta, "namespace")) {
+			case namespace:
+				found = append(found, manifest{path: f, sha: sha, kind: kind, src: src})
+			case "":
+				unnamespaced = true
+			}
+		}
+	}
+	switch {
+	case len(found) > 1:
+		paths := make([]string, len(found))
+		for i, m := range found {
+			paths[i] = m.path
+		}
+		return manifest{}, fmt.Errorf("%w: %s/%s is declared more than once in %s (%s); change the right one by hand", ErrUnsupported, namespace, workload, t.repo, strings.Join(paths, ", "))
+	case len(found) == 1:
+		return found[0], nil
+	case unnamespaced:
+		return manifest{}, fmt.Errorf("%w: %q in %s has no metadata.namespace, so Keel can't tell it is the %s copy; namespaces set by Kustomize or Helm need a manual change", ErrUnsupported, workload, t.repo, namespace)
+	}
+	return manifest{}, fmt.Errorf("%w: no %s/%s workload in plain YAML in %s (Helm or Kustomize patches need a manual change)", ErrUnsupported, namespace, workload, t.repo)
+}
+
+// manifest is a YAML file and the kind of the workload it declares.
+type manifest struct {
+	path, sha, kind string
+	src             []byte
+}
+
 func (a Applier) resizeRequests(ctx context.Context, tenant string, r rightsize.Recommendation) (change, error) {
 	workload, _ := r.Evidence["workload"].(string)
+	namespace, _ := r.Evidence["namespace"].(string)
 	container, _ := r.Evidence["container"].(string)
 	cpu, _ := r.Recommended["cpu"].(string)
 	mem, _ := r.Recommended["memory"].(string)
-	if workload == "" || container == "" || cpu == "" || mem == "" || r.ProjectID == nil {
-		return change{}, fmt.Errorf("%w: the recommendation lacks workload/container details", ErrUnsupported)
+	if workload == "" || namespace == "" || container == "" || cpu == "" || mem == "" || r.ProjectID == nil {
+		return change{}, fmt.Errorf("%w: the recommendation lacks workload/namespace/container details", ErrUnsupported)
 	}
 	t, err := a.target(ctx, tenant, r, workload)
 	if err != nil {
 		return change{}, err
 	}
-	c := change{repo: t.repo, base: t.base, branch: "keel/rightsize"}
-	for _, f := range t.files {
-		src, s, err := a.Git.File(ctx, t.repo, f, t.base)
-		if err != nil {
-			return change{}, err
-		}
-		if !strings.Contains(string(src), workload) {
-			continue
-		}
-		out, ok, err := PatchRequests(src, workload, container, cpu, mem)
-		if err != nil || !ok {
-			continue // unparsable templates (e.g. Helm) or a different workload
-		}
-		c.path, c.sha, c.content = f, s, out
-		break
+	m, err := a.manifest(ctx, t, workloadKinds, workload, namespace)
+	if err != nil {
+		return change{}, err
 	}
-	if c.path == "" {
-		return change{}, fmt.Errorf("%w: no Deployment/StatefulSet/DaemonSet %q with container %q in plain YAML in %s (Helm or Kustomize patches need a manual change)", ErrUnsupported, workload, container, t.repo)
+	out, ok, err := PatchRequests(m.src, workload, namespace, container, cpu, mem)
+	if err != nil || !ok {
+		return change{}, fmt.Errorf("%w: %s declares %s/%s but no container %q to patch", ErrUnsupported, m.path, namespace, workload, container)
 	}
+	c := change{repo: t.repo, base: t.base, branch: "keel/rightsize", path: m.path, sha: m.sha, content: out}
 	c.title = fmt.Sprintf("Right-size %s/%s: requests cpu %s, memory %s", workload, container, cpu, mem)
 	c.body = fmt.Sprintf("| | current | recommended |\n|---|---|---|\n| cpu request | %v | %s |\n| memory request | %v | %s |\n\n"+
 		"**Expected saving:** about %s %s/month (%s cost).\n\n**Evidence:** %v days, %v replica(s), CPU p95 max %v, memory max %v. Confidence %.2f.\n\n"+

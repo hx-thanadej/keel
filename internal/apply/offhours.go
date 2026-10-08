@@ -83,64 +83,43 @@ func ScaledObject(s Schedule) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// findScalable reports the kind and namespace of a Deployment or
-// StatefulSet named workload in a (multi-document) YAML file.
-func findScalable(src []byte, workload string) (kind, namespace string, ok bool) {
-	docs, err := decodeDocs(src)
-	if err != nil {
-		return "", "", false
-	}
-	for _, d := range docs {
-		if len(d.Content) == 0 {
-			continue
-		}
-		root := d.Content[0]
-		k := scalar(get(root, "kind"))
-		if (k == "Deployment" || k == "StatefulSet") && scalar(get(get(root, "metadata"), "name")) == workload {
-			return k, scalar(get(get(root, "metadata"), "namespace")), true
-		}
-	}
-	return "", "", false
-}
+var scalableKinds = map[string]bool{"Deployment": true, "StatefulSet": true}
 
 // offHoursSchedule adds a KEDA ScaledObject next to the workload's
-// manifest. The workload's own manifest is never changed.
+// manifest. The workload's own manifest is never changed. The engine never
+// schedules production, but the Environment is checked again here so a
+// stale or hand-made recommendation can't either.
 func (a Applier) offHoursSchedule(ctx context.Context, tenant string, r rightsize.Recommendation) (change, error) {
 	workload, _ := r.Evidence["workload"].(string)
+	namespace, _ := r.Evidence["namespace"].(string)
 	sched, _ := r.Recommended["schedule"].(map[string]any)
 	zone, _ := sched["timezone"].(string)
 	days, _ := sched["days"].(string)
 	start, startErr := hour(sched["start"])
 	stop, stopErr := hour(sched["stop"])
 	replicas, _ := r.Current["replicas"].(float64)
-	if workload == "" || zone == "" || days == "" || startErr != nil || stopErr != nil || replicas < 1 || r.ProjectID == nil {
-		return change{}, fmt.Errorf("%w: the recommendation lacks workload/schedule details", ErrUnsupported)
+	if workload == "" || namespace == "" || zone == "" || days == "" || startErr != nil || stopErr != nil || replicas < 1 || r.ProjectID == nil {
+		return change{}, fmt.Errorf("%w: the recommendation lacks workload/namespace/schedule details", ErrUnsupported)
+	}
+	if r.EnvironmentID == nil {
+		return change{}, fmt.Errorf("%w: the recommendation has no Environment, so Keel can't confirm it is not production", ErrUnsupported)
+	}
+	switch prod, err := a.Recs.IsProduction(ctx, tenant, *r.EnvironmentID); {
+	case err != nil:
+		return change{}, err
+	case prod:
+		return change{}, fmt.Errorf("%w: Keel never schedules production workloads to scale to zero", ErrUnsupported)
 	}
 	t, err := a.target(ctx, tenant, r, workload)
 	if err != nil {
 		return change{}, err
 	}
-	c := change{repo: t.repo, base: t.base, branch: "keel/offhours"}
-	name := "keda-offhours-" + workload + ".yaml"
-	s := Schedule{Workload: workload, TimeZone: zone, Days: days, Start: start, Stop: stop, Replicas: int(replicas)}
-	for _, f := range t.files {
-		src, _, err := a.Git.File(ctx, t.repo, f, t.base)
-		if err != nil {
-			return change{}, err
-		}
-		if !strings.Contains(string(src), workload) {
-			continue
-		}
-		kind, ns, ok := findScalable(src, workload)
-		if !ok {
-			continue
-		}
-		c.path, s.Kind, s.Namespace = path.Join(path.Dir(f), name), kind, ns
-		break
+	m, err := a.manifest(ctx, t, scalableKinds, workload, namespace)
+	if err != nil {
+		return change{}, err
 	}
-	if c.path == "" {
-		return change{}, fmt.Errorf("%w: no Deployment/StatefulSet %q in plain YAML in %s to schedule", ErrUnsupported, workload, t.repo)
-	}
+	c := change{repo: t.repo, base: t.base, branch: "keel/offhours", path: path.Join(path.Dir(m.path), "keda-offhours-"+workload+".yaml")}
+	s := Schedule{Workload: workload, Namespace: namespace, Kind: m.kind, TimeZone: zone, Days: days, Start: start, Stop: stop, Replicas: int(replicas)}
 	if slices.Contains(t.files, c.path) {
 		return change{}, fmt.Errorf("%w: %s already exists in %s", ErrUnsupported, c.path, t.repo)
 	}

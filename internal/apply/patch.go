@@ -14,10 +14,10 @@ import (
 var workloadKinds = map[string]bool{"Deployment": true, "StatefulSet": true, "DaemonSet": true}
 
 // PatchRequests sets resources.requests (cpu, memory) of one container of
-// one workload in a (multi-document) Kubernetes YAML file. It reports
-// whether the workload and container were found. Other documents,
-// containers and limits are left as they are.
-func PatchRequests(src []byte, workload, container, cpu, memory string) ([]byte, bool, error) {
+// one workload, matched by name and namespace, in a (multi-document)
+// Kubernetes YAML file. It reports whether the workload and container were
+// found. Other documents, containers and limits are left as they are.
+func PatchRequests(src []byte, workload, namespace, container, cpu, memory string) ([]byte, bool, error) {
 	docs, err := decodeDocs(src)
 	if err != nil {
 		return nil, false, err
@@ -27,8 +27,8 @@ func PatchRequests(src []byte, workload, container, cpu, memory string) ([]byte,
 		if len(d.Content) == 0 {
 			continue
 		}
-		root := d.Content[0]
-		if !workloadKinds[scalar(get(root, "kind"))] || scalar(get(get(root, "metadata"), "name")) != workload {
+		root, meta := d.Content[0], get(d.Content[0], "metadata")
+		if !workloadKinds[scalar(get(root, "kind"))] || scalar(get(meta, "name")) != workload || scalar(get(meta, "namespace")) != namespace {
 			continue
 		}
 		for _, c := range seq(get(get(get(get(root, "spec"), "template"), "spec"), "containers")) {
