@@ -126,8 +126,8 @@ func (s *Service) RequestGrant(ctx context.Context, tenant, roleID string, hours
 		}
 		raw, _ := json.Marshal(d)
 		h := min(max(hours, 1), 12)
-		if g, err = scanGrant(tx.QueryRow(ctx, `INSERT INTO access_grants (tenant_id, role_id, requester, reason, hours, state, decision)
-			VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING `+grantCols, tenant, roleID, p.Subject, reason, h, state, raw)); err != nil {
+		if g, err = scanGrant(tx.QueryRow(ctx, `INSERT INTO access_grants (tenant_id, role_id, requester, reason, hours, state, decision, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING `+grantCols, tenant, roleID, p.Subject, reason, h, state, raw, s.Now().UTC())); err != nil {
 			return err
 		}
 		outcome := activity.Success
@@ -219,7 +219,7 @@ func (s *Service) Reject(ctx context.Context, tenant, id, why string, p auth.Pri
 	var g Grant
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var err error
-		g, err = scanGrant(tx.QueryRow(ctx, `UPDATE access_grants SET state = 'rejected', ended_at = now(), ended_by = $2 WHERE id = $1 AND state = 'requested' AND requester <> $2 RETURNING `+grantCols, id, p.Subject))
+		g, err = scanGrant(tx.QueryRow(ctx, `UPDATE access_grants SET state = 'rejected', ended_at = $3, ended_by = $2 WHERE id = $1 AND state = 'requested' AND requester <> $2 RETURNING `+grantCols, id, p.Subject, s.Now().UTC()))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrState
 		}
@@ -332,7 +332,7 @@ func (s *Service) end(ctx context.Context, tenant, id, state, why string, by act
 	}
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var err error
-		if g, err = scanGrant(tx.QueryRow(ctx, `UPDATE access_grants SET state = $2, ended_at = now(), ended_by = $3 WHERE id = $1 AND state = 'active' RETURNING `+grantCols, id, state, by.UID)); err != nil {
+		if g, err = scanGrant(tx.QueryRow(ctx, `UPDATE access_grants SET state = $2, ended_at = $4, ended_by = $3 WHERE id = $1 AND state = 'active' RETURNING `+grantCols, id, state, by.UID, s.Now().UTC())); err != nil {
 			return err
 		}
 		return record(ctx, tx, tenant, "keel.access.grant_"+state, "EndAccessGrant", "access_grant/"+id, activity.Update, activity.Success, by,

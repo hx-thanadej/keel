@@ -10,8 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/dora"
+	"github.com/hx-thanadej/keel/internal/exceptions"
 	"github.com/hx-thanadej/keel/internal/flow/flowtest"
 	"github.com/hx-thanadej/keel/internal/reports"
 	"github.com/hx-thanadej/keel/internal/rightsize"
@@ -273,5 +275,29 @@ func TestRiverJobGeneratesReports(t *testing.T) {
 			t.Fatalf("periodic job never generated the report: %v", err)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestReportCountsExceptionsOnTheExceptionsClock(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	tenant, err := s.CreateTenant(ctx, "tat", "TAT", false)
+	must(t, err)
+	ex := exceptions.New(s)
+	ex.Now = storetest.Clock()
+	c, _ := flowtest.Client(t, s, ex.Register)
+	ex.SetClient(c)
+	e, err := ex.Create(ctx, tenant, exceptions.Request{Fingerprint: "vuln:CVE-2026-3:", Reason: "base image patch lands next sprint", ExpiresAt: ex.Now().Add(48 * time.Hour)},
+		activity.Actor{Type: activity.ActorHuman, UID: "user:eng@harmonyx.co"})
+	must(t, err)
+	_, err = ex.Approve(ctx, tenant, e.ID, "accepted risk", activity.Actor{Type: activity.ActorHuman, UID: "user:security@harmonyx.co"})
+	must(t, err)
+
+	month := time.Date(storetest.Epoch.Year(), storetest.Epoch.Month(), 1, 0, 0, 0, 0, time.UTC)
+	next := month.AddDate(0, 1, 0)
+	r, err := service(s, &next).Generate(ctx, tenant, month, reports.SystemActor())
+	must(t, err)
+	if r.Exceptions.Granted != 1 || r.Exceptions.Active != 1 {
+		t.Fatalf("exception approved in %s: %+v", month.Format("2006-01"), r.Exceptions)
 	}
 }

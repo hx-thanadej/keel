@@ -24,7 +24,7 @@ func TestBreakGlassUseNeedsPostMortemAndDrillsComeDue(t *testing.T) {
 	s := storetest.New(t)
 	home, _ := s.CreateTenant(ctx, "harmonyx", "HarmonyX", true)
 	admin := activity.Actor{Type: activity.ActorHuman, UID: "user:admin@harmonyx.co"}
-	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	now := storetest.Epoch
 	log := &audit{}
 	svc := breakglass.Service{Store: s, Now: func() time.Time { return now }, Audit: func(string) (breakglass.Audit, error) { return log, nil }}
 	if _, err := svc.Register(ctx, breakglass.Identity{Account: "200045645249", PrincipalID: "100099", Name: "breakglass-1", Holder: "CTO safe"}, admin); !errors.Is(err, breakglass.ErrInvalid) {

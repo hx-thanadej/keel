@@ -119,8 +119,8 @@ func (s *Service) Create(ctx context.Context, tenant string, r Request, by activ
 			}
 		}
 		var err error
-		e, err = scan(tx.QueryRow(ctx, `INSERT INTO exceptions (tenant_id, project_id, finding_ids, fingerprint, reason, requested_by, expires_at)
-			VALUES ($1, $2, $3::uuid[], $4, $5, $6, $7) RETURNING `+cols, tenant, r.ProjectID, r.FindingIDs, r.Fingerprint, r.Reason, by.UID, r.ExpiresAt))
+		e, err = scan(tx.QueryRow(ctx, `INSERT INTO exceptions (tenant_id, project_id, finding_ids, fingerprint, reason, requested_by, expires_at, created_at)
+			VALUES ($1, $2, $3::uuid[], $4, $5, $6, $7, $8) RETURNING `+cols, tenant, r.ProjectID, r.FindingIDs, r.Fingerprint, r.Reason, by.UID, r.ExpiresAt, now))
 		if err != nil {
 			return err
 		}
@@ -159,12 +159,13 @@ func (s *Service) decide(ctx context.Context, tenant, id, to, note string, by ac
 		if cur.RequestedBy == by.UID {
 			return fmt.Errorf("%w: the requester cannot decide their own exception", ErrState)
 		}
-		if to == "approved" && !cur.ExpiresAt.After(s.Now()) {
+		now := s.Now()
+		if to == "approved" && !cur.ExpiresAt.After(now) {
 			return fmt.Errorf("%w: it would already have expired; request a new one", ErrState)
 		}
-		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = $2, decided_by = $3, decision_note = nullif($4, ''), decided_at = now(),
-			approved_at = CASE WHEN $2 = 'approved' THEN now() END WHERE id = $1 RETURNING `+cols,
-			id, to, by.UID, note))
+		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = $2, decided_by = $3, decision_note = nullif($4, ''), decided_at = $5,
+			approved_at = CASE WHEN $2 = 'approved' THEN $5::timestamptz END WHERE id = $1 RETURNING `+cols,
+			id, to, by.UID, note, now))
 		if err != nil {
 			return err
 		}
@@ -189,7 +190,7 @@ func (s *Service) Revoke(ctx context.Context, tenant, id, note string, by activi
 	var e Exception
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var err error
-		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = 'revoked', decision_note = $2, revoked_at = now() WHERE id = $1 AND state = 'approved' RETURNING `+cols, id, note))
+		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = 'revoked', decision_note = $2, revoked_at = $3 WHERE id = $1 AND state = 'approved' RETURNING `+cols, id, note, s.Now()))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrState
 		}
@@ -244,8 +245,8 @@ func (w *expireWorker) Work(ctx context.Context, job *river.Job[expireArgs]) err
 		if e.State != "approved" {
 			return nil // revoked or already expired
 		}
-		if e.ExpiresAt.After(w.s.Now()) {
-			return river.JobSnooze(time.Until(e.ExpiresAt) + time.Second)
+		if left := e.ExpiresAt.Sub(w.s.Now()); left > 0 {
+			return river.JobSnooze(left + time.Second)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE exceptions SET state = 'expired' WHERE id = $1`, e.ID); err != nil {
 			return err

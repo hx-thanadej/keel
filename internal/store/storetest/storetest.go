@@ -10,6 +10,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -91,6 +92,18 @@ func New(t *testing.T) *store.Store {
 	s := store.New(pool)
 	superURLs.Store(s, superURL(t, adminURL, dbName))
 	return s
+}
+
+// Epoch is the start of every test service clock: years from wall time, so a
+// timestamp written from the database's now() instead of the service clock
+// lands far from the clock and any comparison between the two fails.
+var Epoch = time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// Clock returns a service clock that starts at Epoch and advances with wall
+// time. Give it to every service whose timestamps it later compares.
+func Clock() func() time.Time {
+	start := time.Now()
+	return func() time.Time { return Epoch.Add(time.Since(start)) }
 }
 
 var superURLs sync.Map // *store.Store → superuser URL of its database
