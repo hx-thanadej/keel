@@ -314,7 +314,7 @@ export type ScoreCheck = { name: string; control: string; pass: boolean; why?: s
 export type Scorecard = { service_id: string; service: string; team_id: string; score: number; checks: ScoreCheck[]; previous_score: number | null }
 export type ScorecardReport = { version: string; services: Scorecard[] | null; teams: { team_id: string; team: string; services: number; score: number }[] | null; score: number }
 export type DecisionEntry = { service_id: string; service: string; path: string; number: number | null; title: string; status: string; date: string; superseded_by: string; url: string }
-export type ReportSummary = { period: string; generated_at: string }
+export type ReportSummary = { period: string; generated_at: string; final: boolean }
 export type MaturityAspect = { id: string; title: string; question: string; measured?: string; levels: string[] }
 export type MaturityAnswer = { level: number; note?: string }
 export type MaturityIndicators = {
@@ -338,6 +338,7 @@ export const insights = {
   scorecards: (t: string) => request<ScorecardReport>(`/v1/tenants/${t}/scorecards`),
   decisions: (t: string, q: string) => list<DecisionEntry>(`/v1/tenants/${t}/decisions?q=${encodeURIComponent(q)}`),
   reports: (t: string) => request<ReportSummary[]>(`/v1/tenants/${t}/reports`),
+  regenerateReport: (t: string, period: string) => request<unknown>(`/v1/tenants/${t}/reports/${period}/regenerate`, { method: 'POST', body: '{}' }),
   reportURL: (t: string, period: string) => `/v1/tenants/${t}/reports/${period}?format=html`,
   evidenceURL: (t: string, from: string, to: string) => `/v1/tenants/${t}/evidence?from=${from}&to=${to}`,
   maturity: (t: string) => request<MaturityView>(`/v1/tenants/${t}/maturity`),

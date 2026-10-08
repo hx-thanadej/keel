@@ -194,6 +194,13 @@ func TestRunRefreshesProvisionalReportsOnly(t *testing.T) {
 			t.Fatalf("tenant %s final = %v, want %v", tenant, r.Final, want)
 		}
 	}
+	for tenant, want := range map[string]bool{provisional: false, final: true} {
+		list, err := svc.List(ctx, tenant)
+		must(t, err)
+		if len(list) != 1 || list[0].Final != want {
+			t.Fatalf("tenant %s list = %+v, want one report with final=%v", tenant, list, want)
+		}
+	}
 	for _, tenant := range []string{provisional, final} {
 		must(t, s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at) VALUES ($1, 'vulnerability', 'late', 'high', 'late', '2026-09-29')`, tenant)
