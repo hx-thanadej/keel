@@ -43,18 +43,27 @@ export class ApiError extends Error {
   }
 }
 
+async function failure(res: Response): Promise<ApiError> {
+  let msg = `HTTP ${res.status}`
+  try {
+    msg = (await res.json()).error ?? msg
+  } catch {
+    /* non-JSON error body */
+  }
+  return new ApiError(res.status, msg)
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { credentials: 'same-origin', ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`
-    try {
-      msg = (await res.json()).error ?? msg
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, msg)
-  }
+  if (!res.ok) throw await failure(res)
   return res.status === 204 ? (undefined as T) : res.json()
+}
+
+/** Fetches a file with the session cookie; a non-OK response throws instead of being saved. */
+export async function fetchBlob(path: string): Promise<Blob> {
+  const res = await fetch(path, { credentials: 'same-origin' })
+  if (!res.ok) throw await failure(res)
+  return res.blob()
 }
 
 const list = async <T,>(path: string) => (await request<{ items: T[] }>(path)).items

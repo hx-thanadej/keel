@@ -3,6 +3,7 @@ import {
   insights,
   monthStarts,
   ApiError,
+  fetchBlob,
   type DecisionEntry,
   type DoraReport,
   type MaturityAnswer,
@@ -12,41 +13,73 @@ import {
 } from './api'
 
 const message = (e: unknown) => (e instanceof ApiError && e.status === 403 ? 'You are not allowed to do that here.' : (e as Error).message)
+const loadMessage = (e: unknown) => (e instanceof ApiError && e.status === 403 ? 'You are not allowed to see this here.' : (e as Error).message)
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}%`)
 const hours = (v: number | null | undefined) => (v == null ? '—' : v < 48 ? `${v.toFixed(1)} h` : `${(v / 24).toFixed(1)} d`)
 const monthName = (iso: string) => new Date(iso).toLocaleString('en-GB', { month: 'short', year: '2-digit', timeZone: 'UTC' })
 
 /** Insights: DORA trend, scorecards, decisions, monthly reports, evidence and maturity (#155). */
-export function InsightsView({ tenantId }: { tenantId: string }) {
+type Section = 'dora' | 'cards' | 'reports' | 'maturity'
+type Errors = Partial<Record<Section, string>>
+
+async function save(url: string, filename: string) {
+  const href = URL.createObjectURL(await fetchBlob(url))
+  const a = document.createElement('a')
+  a.href = href
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(href)
+}
+
+const SectionError = ({ text }: { text?: string }) => (text ? <p className="notice error" role="alert">{text}</p> : null)
+
+export function InsightsView({ tenantId, canSubmit }: { tenantId: string; canSubmit: boolean }) {
   const [months, setMonths] = useState<DoraReport[]>([])
   const [cards, setCards] = useState<ScorecardReport | null>(null)
   const [reports, setReports] = useState<ReportSummary[]>([])
   const [maturity, setMaturity] = useState<MaturityView | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [errors, setErrors] = useState<Errors>({})
   const [reload, setReload] = useState(0)
 
   useEffect(() => {
     let stale = false
-    const ok = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback)
     const starts = monthStarts(6)
-    Promise.all([
-      Promise.all(starts.slice(0, -1).map((from, i) => ok(insights.dora(tenantId, from, starts[i + 1]), null))),
-      ok(insights.scorecards(tenantId), null),
-      ok(insights.reports(tenantId), []),
-      ok(insights.maturity(tenantId), null),
-    ])
-      .then(([ds, sc, rs, mt]) => {
-        if (stale) return
-        setMonths(ds.filter((d): d is DoraReport => d !== null))
-        setCards(sc)
-        setReports(rs)
-        setMaturity(mt)
-      })
-      .catch((e: Error) => !stale && setError(e.message))
+    Promise.allSettled([
+      Promise.allSettled(starts.slice(0, -1).map((from, i) => insights.dora(tenantId, from, starts[i + 1]))),
+      insights.scorecards(tenantId),
+      insights.reports(tenantId),
+      insights.maturity(tenantId),
+    ]).then(([ds, sc, rs, mt]) => {
+      if (stale) return
+      const errs: Errors = {}
+      const fail = (k: Section, r: PromiseSettledResult<unknown>) => {
+        if (r.status === 'rejected') errs[k] = loadMessage(r.reason)
+      }
+      const doraOk = ds.status === 'fulfilled' ? ds.value.filter((d): d is PromiseFulfilledResult<DoraReport> => d.status === 'fulfilled') : []
+      const doraFail = ds.status === 'fulfilled' ? ds.value.find((d) => d.status === 'rejected') : undefined
+      setMonths(doraOk.map((d) => d.value))
+      if (doraOk.length === 0 && doraFail) fail('dora', doraFail)
+      setCards(sc.status === 'fulfilled' ? sc.value : null)
+      fail('cards', sc)
+      setReports(rs.status === 'fulfilled' ? rs.value : [])
+      fail('reports', rs)
+      setMaturity(mt.status === 'fulfilled' ? mt.value : null)
+      fail('maturity', mt)
+      setErrors(errs)
+    })
     return () => {
       stale = true
     }
   }, [tenantId, reload])
+
+  const download = (url: string, filename: string) => (e: React.MouseEvent) => {
+    e.preventDefault()
+    setError(null)
+    save(url, filename).catch((err) => setError(message(err)))
+  }
 
   const latest = months[months.length - 1]
   return (
@@ -54,6 +87,7 @@ export function InsightsView({ tenantId }: { tenantId: string }) {
       {error && <p className="notice error">{error}</p>}
 
       <h2>Delivery performance (production)</h2>
+      <SectionError text={errors.dora} />
       {latest && (
         <div className="tiles">
           <Tile label="Deployments this month" value={String(latest.tenant.deployments)} sub={`${latest.tenant.deployments_per_day.toFixed(2)} per day`} />
@@ -65,28 +99,31 @@ export function InsightsView({ tenantId }: { tenantId: string }) {
       {months.length > 0 && <DoraChart months={months} />}
 
       <h2>Service scorecards</h2>
-      <Scorecards report={cards} />
+      <SectionError text={errors.cards} />
+      {!errors.cards && <Scorecards report={cards} />}
 
       <h2>Decisions</h2>
       <Decisions tenantId={tenantId} />
 
       <h2>Monthly reports</h2>
-      {reports.length === 0 && <p className="muted">The first report appears on the first of next month.</p>}
+      <SectionError text={errors.reports} />
+      {!errors.reports && reports.length === 0 && <p className="muted">The first report appears on the first of next month.</p>}
       {reports.map((r) => (
         <article key={r.period} className="card finding">
           <strong>{monthName(r.period + '-01T00:00:00Z')}</strong>
-          <a href={insights.reportURL(tenantId, r.period)} download={`keel-report-${r.period}.html`}>
+          <a href={insights.reportURL(tenantId, r.period)} download={`keel-report-${r.period}.html`} onClick={download(insights.reportURL(tenantId, r.period), `keel-report-${r.period}.html`)}>
             Download report {r.period}
           </a>
         </article>
       ))}
 
       <h2>Evidence export</h2>
-      <Evidence tenantId={tenantId} />
+      <Evidence tenantId={tenantId} download={download} />
 
       <h2>Platform maturity</h2>
+      <SectionError text={errors.maturity} />
       {maturity ? (
-        <Maturity view={maturity} onSubmit={async (q, a) => {
+        <Maturity view={maturity} canSubmit={canSubmit} onSubmit={async (q, a) => {
           try {
             await insights.submitMaturity(tenantId, q, a)
             setReload((n) => n + 1)
@@ -95,7 +132,7 @@ export function InsightsView({ tenantId }: { tenantId: string }) {
           }
         }} />
       ) : (
-        <p className="muted">No maturity data.</p>
+        !errors.maturity && <p className="muted">No maturity data.</p>
       )}
     </section>
   )
@@ -179,9 +216,16 @@ function Scorecards({ report }: { report: ScorecardReport | null }) {
 function Decisions({ tenantId }: { tenantId: string }) {
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<DecisionEntry[] | null>(null)
+  const [err, setErr] = useState<string>()
   const search = async (e: React.FormEvent) => {
     e.preventDefault()
-    setHits(await insights.decisions(tenantId, q).catch(() => []))
+    try {
+      setHits(await insights.decisions(tenantId, q))
+      setErr(undefined)
+    } catch (x) {
+      setHits(null)
+      setErr(loadMessage(x))
+    }
   }
   return (
     <>
@@ -193,6 +237,7 @@ function Decisions({ tenantId }: { tenantId: string }) {
           Search
         </button>
       </form>
+      <SectionError text={err} />
       {hits?.length === 0 && <p className="muted">No matching decisions.</p>}
       {hits?.map((d) => (
         <article key={d.service_id + d.path} className="card finding">
@@ -214,7 +259,7 @@ function Decisions({ tenantId }: { tenantId: string }) {
   )
 }
 
-function Evidence({ tenantId }: { tenantId: string }) {
+function Evidence({ tenantId, download }: { tenantId: string; download: (url: string, filename: string) => (e: React.MouseEvent) => void }) {
   const [from, setFrom] = useState(monthStarts(3)[0])
   const [to, setTo] = useState(monthStarts(1)[1])
   return (
@@ -225,14 +270,14 @@ function Evidence({ tenantId }: { tenantId: string }) {
       <label>
         To <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
       </label>
-      <a className="button primary" href={insights.evidenceURL(tenantId, from, to)} download={`keel-evidence-${from}-${to}.json`}>
+      <a className="button primary" href={insights.evidenceURL(tenantId, from, to)} download={`keel-evidence-${from}-${to}.json`} onClick={download(insights.evidenceURL(tenantId, from, to), `keel-evidence-${from}-${to}.json`)}>
         Export evidence
       </a>
     </div>
   )
 }
 
-function Maturity({ view, onSubmit }: { view: MaturityView; onSubmit: (quarter: string, a: Record<string, MaturityAnswer>) => void }) {
+function Maturity({ view, canSubmit, onSubmit }: { view: MaturityView; canSubmit: boolean; onSubmit: (quarter: string, a: Record<string, MaturityAnswer>) => void }) {
   const q = view.questionnaire
   const done = view.assessments.find((a) => a.quarter === view.quarter)
   const suggested = view.indicators.suggested_levels ?? {}
@@ -290,9 +335,11 @@ function Maturity({ view, onSubmit }: { view: MaturityView; onSubmit: (quarter: 
             {suggested[a.id] && <span className="meta">Keel measures {q.levels[suggested[a.id] - 1]}</span>}
           </article>
         ))}
-        <button className="primary" type="submit">
-          Save {view.quarter} assessment
-        </button>
+        {canSubmit && (
+          <button className="primary" type="submit">
+            Save {view.quarter} assessment
+          </button>
+        )}
       </form>
     </>
   )

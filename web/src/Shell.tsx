@@ -89,7 +89,7 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
             {tab === 'delivery' && <DeliveryView key={current.id} tenantId={current.id} />}
             {tab === 'security' && <SecurityView key={current.id} tenantId={current.id} />}
             {tab === 'access' && <AccessView key={current.id} tenantId={current.id} />}
-            {tab === 'insights' && <InsightsView key={current.id} tenantId={current.id} />}
+            {tab === 'insights' && <InsightsView key={current.id} tenantId={current.id} canSubmit={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'tenant_approver'))} />}
             {tab === 'catalog' && <TenantView key={current.id} tenant={current} />}
             {tab === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
           </>
