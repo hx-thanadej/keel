@@ -30,6 +30,9 @@ type gitHub struct {
 	dismissed []map[string]any
 	downloads []int64
 	failSARIF bool
+	// capped makes the analyses list end in a next link on every page, as
+	// a repository with more analyses than Keel reads does.
+	capped bool
 }
 
 func newGitHub(t *testing.T) *gitHub {
@@ -42,6 +45,9 @@ func newGitHub(t *testing.T) *gitHub {
 		case p == repo+"/code-scanning/analyses":
 			if r.URL.Query().Get("ref") != "refs/heads/main" {
 				t.Errorf("analyses not filtered to the default branch: %s", r.URL)
+			}
+			if g.capped {
+				w.Header().Set("Link", "<"+g.srv.URL+r.URL.String()+">; rel=\"next\"")
 			}
 			_ = json.NewEncoder(w).Encode(g.analyses)
 		case strings.HasPrefix(p, repo+"/code-scanning/analyses/"):
@@ -148,6 +154,31 @@ func (e env) byPrefix(t *testing.T, prefix string) []finding {
 	return out
 }
 
+// except approves an Exception for the Finding id.
+func (e env) except(t *testing.T, id string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := e.s.InTenant(ctx, e.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO exceptions (tenant_id, finding_ids, reason, state, requested_by, expires_at)
+			VALUES ($1, ARRAY[$2::uuid], 'accepted until the ORM migration', 'approved', 'a', now() + interval '30 days')`, e.tenant, id)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e env) covered(t *testing.T, id string) bool {
+	t.Helper()
+	ctx := context.Background()
+	var covered bool
+	if err := e.s.InTenant(ctx, e.tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM exceptions WHERE $1::uuid = ANY (finding_ids) AND state = 'approved')`, id).Scan(&covered)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return covered
+}
+
 func open(fs []finding) []finding {
 	var out []finding
 	for _, f := range fs {
@@ -178,13 +209,7 @@ func TestCodeScanningLifecycleKeepsOneFindingPerAlert(t *testing.T) {
 	if len(alert) != 1 || alert[0].Status != "open" || len(others) != 2 {
 		t.Fatalf("after the first GitHub analysis: %v %v", alert, others)
 	}
-	if err := e.s.InTenant(ctx, e.tenant, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO exceptions (tenant_id, finding_ids, reason, state, requested_by, expires_at)
-			VALUES ($1, ARRAY[$2::uuid], 'accepted until the ORM migration', 'approved', 'a', now() + interval '30 days')`, e.tenant, alert[0].ID)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	e.except(t, alert[0].ID)
 	check := func(step string) {
 		t.Helper()
 		got := e.byPrefix(t, codeqlPrefix)
@@ -194,11 +219,8 @@ func TestCodeScanningLifecycleKeepsOneFindingPerAlert(t *testing.T) {
 		if now := append(e.byPrefix(t, "scan:semgrep:"), e.byPrefix(t, "vuln:")...); fmt.Sprint(now) != fmt.Sprint(others) {
 			t.Fatalf("%s: other Findings changed: %v, was %v", step, now, others)
 		}
-		var covered bool
-		if err := e.s.InTenant(ctx, e.tenant, func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM exceptions WHERE $1::uuid = ANY (finding_ids) AND state = 'approved')`, alert[0].ID).Scan(&covered)
-		}); err != nil || !covered {
-			t.Fatalf("%s: Exception no longer covers the Finding (%v)", step, err)
+		if !e.covered(t, alert[0].ID) {
+			t.Fatalf("%s: Exception no longer covers the Finding", step)
 		}
 	}
 	check("GitHub analysis")
@@ -330,4 +352,122 @@ func (e env) lastSyncDetail(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return detail
+}
+
+// GitHub's copy of an uploaded SARIF is not CI's copy: GitHub adds
+// primaryLocationLineHash to a third-party tool's results, may drop CodeQL's,
+// and writes the path against %SRCROOT%. Each pairing, through CI, sync, CI,
+// sync, keeps one open Finding with the same id and first_seen_at, still
+// covered by its Exception.
+func TestCIAndGitHubCopiesOfAResultAreOneFinding(t *testing.T) {
+	copyOf := func(tool string, hash bool, location string) string {
+		r := `{"ruleId":"r1","level":"error","message":{"text":"tainted input reaches sink"},"locations":[{"physicalLocation":{` + location + `,"region":{"startLine":7}}}]`
+		if hash {
+			r += `,"partialFingerprints":{"primaryLocationLineHash":"9f3c1a2b:1"}`
+		}
+		return sarifOf(tool, r+"}")
+	}
+	for _, c := range []struct {
+		tool           string
+		ciHash, ghHash bool
+	}{
+		{"Semgrep", false, true},
+		{"CodeQL", true, false},
+		{"CodeQL", false, true},
+	} {
+		t.Run(fmt.Sprintf("%s CI hash %v GitHub hash %v", c.tool, c.ciHash, c.ghHash), func(t *testing.T) {
+			e := setup(t, "acme/crm-api")
+			gh := newGitHub(t)
+			src := &fake{code: gh.source()}
+			ci := copyOf(c.tool, c.ciHash, `"artifactLocation":{"uri":"db.go"}`)
+			fromGitHub := copyOf(c.tool, c.ghHash, `"artifactLocation":{"uri":"db.go","uriBaseId":"%SRCROOT%"}`)
+			prefix := "scan:" + strings.ToLower(c.tool) + ":r1:" + e.svc + ":"
+
+			e.upload(t, "full", ci)
+			first := e.byPrefix(t, prefix)
+			if len(first) != 1 || first[0].Status != "open" {
+				t.Fatalf("CI upload: %v", first)
+			}
+			e.except(t, first[0].ID)
+			for i, step := range []string{"sync", "CI", "sync"} {
+				if step == "CI" {
+					e.upload(t, "full", ci)
+				} else {
+					gh.analysis(c.tool, "", fromGitHub)
+					e.run(t, src)
+				}
+				if got := e.byPrefix(t, prefix); len(got) != 1 || got[0] != first[0] {
+					t.Fatalf("step %d (%s): Findings %v, want only %v", i+1, step, got, first[0])
+				}
+				if !e.covered(t, first[0].ID) {
+					t.Fatalf("step %d (%s): Exception no longer covers the Finding", i+1, step)
+				}
+			}
+		})
+	}
+}
+
+// A dismissal names the path GitHub shows; the SARIF may write the same file
+// as ./db.go, as a file URI under %SRCROOT%, or without a region. Each form
+// resolves with GitHub's reason, and the next analysis does not raise it again.
+func TestDismissalMatchesEveryLocationForm(t *testing.T) {
+	const base = `"originalUriBaseIds":{"%SRCROOT%":{"uri":"file:///home/runner/work/crm-api/crm-api/"}},`
+	for _, c := range []struct {
+		name, location string
+		alertLine      int
+	}{
+		{"dot slash", `"artifactLocation":{"uri":"./db.go"},"region":{"startLine":7}`, 7},
+		{"file URI", `"artifactLocation":{"uri":"file:///home/runner/work/crm-api/crm-api/db.go"},"region":{"startLine":7}`, 7},
+		{"uriBaseId", `"artifactLocation":{"uri":"db.go","uriBaseId":"%SRCROOT%"},"region":{"startLine":7}`, 7},
+		{"no region", `"artifactLocation":{"uri":"db.go"}`, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := setup(t, "acme/crm-api")
+			gh := newGitHub(t)
+			src := &fake{code: gh.source()}
+			result := `{"ruleId":"go/sql-injection","level":"error","message":{"text":"bad query"},"locations":[{"physicalLocation":{` + c.location + `}}]}`
+			analysis := `{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeQL"}},` + base + `"results":[` + result + `,` + xss + `]}]}`
+			gh.analysis("CodeQL", "", analysis)
+			e.run(t, src)
+			gh.dismiss("go/sql-injection", "db.go", c.alertLine, "false positive")
+			gh.analysis("CodeQL", "", analysis)
+			e.run(t, src)
+			got := e.byPrefix(t, "scan:codeql:go/sql-injection:")
+			if len(got) != 1 || got[0].Status != "resolved" || got[0].Resolution != "dismissed on GitHub: false positive" {
+				t.Fatalf("dismissed alert: %v", got)
+			}
+			if kept := open(e.byPrefix(t, "scan:codeql:go/reflected-xss:")); len(kept) != 1 {
+				t.Fatalf("the other alert: %v", kept)
+			}
+		})
+	}
+}
+
+// When the analyses list ends at the page cap, a category missing from the
+// window may still exist on GitHub: the categories seen resolve as usual,
+// and the Findings of the others stay open.
+func TestCategoryOutsideTheAnalysisWindowStaysOpen(t *testing.T) {
+	e := setup(t, "acme/crm-api")
+	gh := newGitHub(t)
+	src := &fake{code: gh.source()}
+	gh.analysis("CodeQL", "/language:go", codeql(sqli))
+	gh.analysis("CodeQL", "/language:javascript", codeql(jsXSS))
+	e.run(t, src)
+	gh.analysis("CodeQL", "/language:go", codeql())
+	var window []map[string]any
+	for _, a := range gh.analyses {
+		if a["category"] != "/language:javascript" {
+			window = append(window, a)
+		}
+	}
+	gh.analyses, gh.capped = window, true
+	if st := e.run(t, src); st.CodeScanning != ghalerts.StatusOK {
+		t.Fatalf("code scanning %q", st.CodeScanning)
+	}
+	if got := e.byPrefix(t, "scan:codeql:go/sql-injection:"); len(got) != 1 || got[0].Status != "resolved" {
+		t.Fatalf("Go result fixed in a seen category: %v", got)
+	}
+	if got := open(e.byPrefix(t, "scan:codeql:js/xss:")); len(got) != 1 {
+		t.Fatalf("JavaScript result outside the window: %v, want it open", got)
+	}
 }

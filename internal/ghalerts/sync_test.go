@@ -28,10 +28,10 @@ type fake struct {
 	repos            []string
 }
 
-func (f *fake) Analyses(ctx context.Context, repo string) ([]ghalerts.Analysis, error) {
+func (f *fake) Analyses(ctx context.Context, repo string) ([]ghalerts.Analysis, bool, error) {
 	f.repos = append(f.repos, repo)
 	if f.code == nil || f.codeErr != nil {
-		return nil, f.codeErr
+		return nil, false, f.codeErr
 	}
 	return f.code.Analyses(ctx, repo)
 }

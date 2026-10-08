@@ -41,11 +41,19 @@ every 6 hours (#121). The token needs read access to code scanning alerts
 
 - Code scanning comes in as the SARIF GitHub itself holds. For each tool,
   Keel downloads the newest analysis of every category on the default branch
-  and ingests them together as one full scan, once per analysis, so the
-  Findings fingerprint exactly as a CI upload of the same SARIF and one alert is
-  one Finding whoever uploaded it; a fixed alert resolves when the next analysis
-  no longer reports it. An alert dismissed on GitHub resolves as `dismissed on
-  GitHub: <reason>` and is left out of later ingests.
+  and ingests them together as one full scan, once per analysis. A fixed alert
+  resolves when the next analysis no longer reports it.
+- Every code scanning Finding, from CI or from GitHub, is
+  `scan:<tool>:<rule>:<service>:<hash>`, where the hash covers the
+  repository-relative path and the message. `partialFingerprints` and line
+  numbers are ignored, because GitHub adds `primaryLocationLineHash` to a
+  third-party tool's upload: CI's copy and GitHub's copy of one result are one
+  Finding. The same rule and message twice in one file is one Finding with
+  both locations, and editing a result's message raises a new Finding.
+- An alert dismissed on GitHub resolves as `dismissed on GitHub: <reason>` and
+  is left out of later ingests. It matches on tool, rule and path (`./`,
+  `file://` and `%SRCROOT%` forms normalised), and on the line only when both
+  sides have one.
 - A Dependabot alert is `vuln:<CVE or GHSA>:<service>` (CVE preferred), so the
   same CVE from Trivy or OSV is one Finding with several `tools`. A secret alert
   is a critical `secret` Finding (`secret:github:<repository id>:<number>`).
@@ -61,5 +69,5 @@ every 6 hours (#121). The token needs read access to code scanning alerts
   "unknown", never "no alerts": nothing of that type is ingested or resolved.
   A tool whose newest analysis failed on GitHub is left as it is. Lists follow
   GitHub's `Link` cursor, up to 100 pages of 100. For analyses that means the
-  newest 10,000 on the default branch, so a category not analysed within them
-  counts as removed.
+  newest 10,000 on the default branch. When that cap is reached, only the
+  categories seen resolve; the Findings of any other category stay open.

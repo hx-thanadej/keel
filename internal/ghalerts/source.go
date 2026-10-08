@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hx-thanadej/keel/internal/ghapi"
+	"github.com/hx-thanadej/keel/internal/scans"
 )
 
 // Fetch failures that mean "unknown", never "no alerts".
@@ -41,10 +41,10 @@ type Analysis struct {
 	Error     string // GitHub's error for a failed analysis, else ""
 }
 
-// DismissedAlert is a code scanning alert dismissed on GitHub. Location is
-// "path:line", as SARIF ingest writes a Finding's locations.
+// DismissedAlert is a code scanning alert dismissed on GitHub.
 type DismissedAlert struct {
-	Tool, RuleID, Location, Reason string
+	Tool, RuleID, Reason string
+	Location             scans.Location
 }
 
 // DependabotAlert is an open Dependabot alert.
@@ -69,7 +69,10 @@ type SecretAlert struct {
 
 // Source reads one repository ("owner/name") on GitHub.
 type Source interface {
-	Analyses(ctx context.Context, repo string) ([]Analysis, error)
+	// Analyses lists the newest analysis per tool and category. truncated
+	// means the list ended at the page cap, so a category missing from it
+	// may still exist.
+	Analyses(ctx context.Context, repo string) (latest []Analysis, truncated bool, err error)
 	// SARIF downloads an analysis as the SARIF GitHub holds for it.
 	SARIF(ctx context.Context, repo string, analysis int64) ([]byte, error)
 	DismissedCodeAlerts(ctx context.Context, repo string) ([]DismissedAlert, error)
@@ -130,17 +133,16 @@ func classify(err error) error {
 
 // Analyses implements Source: the newest analysis per tool and category
 // on the default branch. GitHub lists analyses newest first and keeps every
-// one, so only the newest maxPages pages are read: a category not analysed
-// within them counts as gone.
-func (g GitHub) Analyses(ctx context.Context, repo string) ([]Analysis, error) {
+// one, so only the newest maxPages pages are read.
+func (g GitHub) Analyses(ctx context.Context, repo string) ([]Analysis, bool, error) {
 	var r struct {
 		DefaultBranch string `json:"default_branch"`
 	}
 	if err := g.Client.Do(ctx, http.MethodGet, "/repos/"+repo, nil, &r); err != nil {
-		return nil, classify(err)
+		return nil, false, classify(err)
 	}
 	if r.DefaultBranch == "" {
-		return nil, fmt.Errorf("%s has no default branch", repo)
+		return nil, false, fmt.Errorf("%s has no default branch", repo)
 	}
 	type wire struct {
 		ID        int64     `json:"id"`
@@ -155,8 +157,9 @@ func (g GitHub) Analyses(ctx context.Context, repo string) ([]Analysis, error) {
 	}
 	raw, err := list[wire](ctx, g.Client, "/repos/"+repo+"/code-scanning/analyses",
 		"direction=desc&sort=created&ref="+url.QueryEscape("refs/heads/"+r.DefaultBranch))
-	if err != nil && !errors.Is(err, ErrTooManyPages) {
-		return nil, err
+	truncated := errors.Is(err, ErrTooManyPages)
+	if err != nil && !truncated {
+		return nil, false, err
 	}
 	latest := map[[2]string]Analysis{}
 	for _, w := range raw {
@@ -176,7 +179,7 @@ func (g GitHub) Analyses(ctx context.Context, repo string) ([]Analysis, error) {
 		}
 		return out[i].Category < out[j].Category
 	})
-	return out, nil
+	return out, truncated, nil
 }
 
 // SARIF implements Source.
@@ -211,11 +214,9 @@ func (g GitHub) DismissedCodeAlerts(ctx context.Context, repo string) ([]Dismiss
 	}
 	out := make([]DismissedAlert, 0, len(raw))
 	for _, w := range raw {
-		loc := w.MostRecentInstance.Location.Path
-		if n := w.MostRecentInstance.Location.StartLine; n > 0 {
-			loc += ":" + strconv.Itoa(n)
-		}
-		out = append(out, DismissedAlert{Tool: strings.ToLower(w.Tool.Name), RuleID: w.Rule.ID, Location: loc, Reason: w.DismissedReason})
+		l := w.MostRecentInstance.Location
+		out = append(out, DismissedAlert{Tool: strings.ToLower(w.Tool.Name), RuleID: w.Rule.ID, Reason: w.DismissedReason,
+			Location: scans.Location{Path: scans.NormalizePath(l.Path), Line: max(l.StartLine, 0)}})
 	}
 	return out, nil
 }

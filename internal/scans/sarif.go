@@ -1,6 +1,6 @@
 // Package scans turns scanner output into Findings (#109): SARIF 2.1 from
-// any tool in CI, deduplicated by rule and stable location fingerprint, and
-// across tools for the same vulnerability id.
+// any tool in CI or GitHub code scanning, deduplicated by rule, file and
+// message, and across tools for the same vulnerability id.
 package scans
 
 import (
@@ -27,6 +27,10 @@ type Result struct {
 type sarifLog struct {
 	Version string `json:"version"`
 	Runs    []struct {
+		OriginalURIBaseIDs map[string]sarifBase `json:"originalUriBaseIds"`
+		AutomationDetails  struct {
+			ID string `json:"id"`
+		} `json:"automationDetails"`
 		Tool struct {
 			Driver struct {
 				Name  string      `json:"name"`
@@ -42,17 +46,21 @@ type sarifLog struct {
 			Locations []struct {
 				Physical struct {
 					Artifact struct {
-						URI string `json:"uri"`
+						URI       string `json:"uri"`
+						URIBaseID string `json:"uriBaseId"`
 					} `json:"artifactLocation"`
 					Region struct {
 						StartLine int `json:"startLine"`
 					} `json:"region"`
 				} `json:"physicalLocation"`
 			} `json:"locations"`
-			PartialFingerprints map[string]string `json:"partialFingerprints"`
-			Properties          map[string]any    `json:"properties"`
+			Properties map[string]any `json:"properties"`
 		} `json:"results"`
 	} `json:"runs"`
+}
+
+type sarifBase struct {
+	URI string `json:"uri"`
 }
 
 type sarifRule struct {
@@ -77,6 +85,12 @@ var toolKinds = map[string]string{
 
 // ParseSARIF normalises every result of every run. service scopes the
 // fingerprints, so the same rule in two Services is two Findings.
+//
+// A code scanning fingerprint is the rule, the repository-relative path and
+// the message, never partialFingerprints or lines: GitHub adds
+// primaryLocationLineHash to a third-party upload, so its copy of a SARIF
+// and CI's copy would otherwise key the same result differently. The same
+// rule and message twice in one file is one Finding with both locations.
 func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err error) {
 	var log sarifLog
 	if err := json.Unmarshal(raw, &log); err != nil {
@@ -89,21 +103,22 @@ func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err e
 	for _, run := range log.Runs {
 		tool := strings.ToLower(run.Tool.Driver.Name)
 		tools = append(tools, tool)
+		category := ""
+		if i := strings.LastIndexByte(run.AutomationDetails.ID, '/'); i >= 0 {
+			category = run.AutomationDetails.ID[:i] // "category/run id", as GitHub reads it
+		}
 		rules := map[string]sarifRule{}
 		for _, r := range run.Tool.Driver.Rules {
 			rules[r.ID] = r
 		}
 		for _, res := range run.Results {
 			rule := rules[res.RuleID]
-			loc := ""
+			var loc Location
 			if len(res.Locations) > 0 {
 				pl := res.Locations[0].Physical
-				loc = pl.Artifact.URI
-				if pl.Region.StartLine > 0 {
-					loc += ":" + strconv.Itoa(pl.Region.StartLine)
-				}
+				loc = Location{Path: artifactPath(pl.Artifact.URI, pl.Artifact.URIBaseID, run.OriginalURIBaseIDs), Line: max(pl.Region.StartLine, 0)}
 			}
-			r := Result{RuleID: res.RuleID, Location: loc, Severity: severity(res.Properties, rule, res.Level)}
+			r := Result{RuleID: res.RuleID, Location: loc.String(), Severity: severity(res.Properties, rule, res.Level)}
 			r.Title = rule.ShortDescription.Text
 			if r.Title == "" {
 				r.Title = res.Message.Text
@@ -120,13 +135,16 @@ func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err e
 				if r.Kind == "" {
 					r.Kind = "code_scan"
 				}
-				r.Fingerprint = "scan:" + tool + ":" + res.RuleID + ":" + service + ":" + stable(res.PartialFingerprints, loc, res.Message.Text)
+				r.Fingerprint = "scan:" + tool + ":" + res.RuleID + ":" + service + ":" + short(loc.Path+"|"+strings.Join(strings.Fields(res.Message.Text), " "))
 			}
-			r.Detail = map[string]any{"tools": []string{tool}, "rule_id": res.RuleID, "message": trim(res.Message.Text, 1000), "locations": []string{loc}}
+			r.Detail = map[string]any{"tools": []string{tool}, "rule_id": res.RuleID, "message": trim(res.Message.Text, 1000), "locations": []string{r.Location}}
+			if category != "" {
+				r.Detail["category"] = category
+			}
 			if i, dup := seen[r.Fingerprint]; dup {
 				// Same vulnerability in several places: one Finding, all locations.
 				locs := out[i].Detail["locations"].([]string)
-				out[i].Detail["locations"] = append(locs, loc)
+				out[i].Detail["locations"] = append(locs, r.Location)
 				if rank(r.Severity) < rank(out[i].Severity) {
 					out[i].Severity = r.Severity
 				}
@@ -137,17 +155,6 @@ func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err e
 		}
 	}
 	return tools, out, nil
-}
-
-// stable prefers the scanner's own location-independent fingerprint, so a
-// result survives lines moving; else it hashes location and message.
-func stable(partial map[string]string, loc, msg string) string {
-	for _, k := range []string{"primaryLocationLineHash", "primaryLocationStartColumnFingerprint"} {
-		if v := partial[k]; v != "" {
-			return short(k + "=" + v)
-		}
-	}
-	return short(loc + "|" + msg)
 }
 
 func short(s string) string {

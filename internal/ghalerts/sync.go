@@ -230,6 +230,7 @@ type codeScan struct {
 type toolSARIF struct {
 	tool           string
 	ids            []int64
+	categories     []string // set when the analyses list was truncated: resolve only these
 	commitSHA, ref string
 	sarif          []byte
 	dismissed      []string // fingerprints of results dismissed on GitHub
@@ -256,16 +257,12 @@ func (c codeScan) summary() string {
 // partial view.
 func (s Syncer) fetchCode(ctx context.Context, tenant, service, repo string) (codeScan, error) {
 	var c codeScan
-	analyses, err := s.Source.Analyses(ctx, repo)
+	analyses, truncated, err := s.Source.Analyses(ctx, repo)
 	if err != nil {
 		return c, err
 	}
 	if c.dismissed, err = s.Source.DismissedCodeAlerts(ctx, repo); err != nil {
 		return c, err
-	}
-	dismissed := map[[3]string]bool{}
-	for _, d := range c.dismissed {
-		dismissed[[3]string{d.Tool, d.RuleID, d.Location}] = true
 	}
 	ids := make([]int64, 0, len(analyses))
 	byTool := map[string][]Analysis{}
@@ -303,7 +300,7 @@ func (s Syncer) fetchCode(ctx context.Context, tenant, service, repo string) (co
 			continue
 		}
 		t := toolSARIF{tool: tool}
-		var runs []json.RawMessage
+		var runs []map[string]any
 		var newest time.Time
 		for _, a := range as {
 			raw, err := s.Source.SARIF(ctx, repo, a.ID)
@@ -311,12 +308,20 @@ func (s Syncer) fetchCode(ctx context.Context, tenant, service, repo string) (co
 				return c, err
 			}
 			var log struct {
-				Runs []json.RawMessage `json:"runs"`
+				Runs []map[string]any `json:"runs"`
 			}
 			if err := json.Unmarshal(raw, &log); err != nil {
 				return c, fmt.Errorf("analysis %d: not SARIF JSON: %w", a.ID, err)
 			}
-			runs = append(runs, log.Runs...)
+			for _, run := range log.Runs {
+				// The category GitHub filed the analysis under, as SARIF writes it.
+				run["automationDetails"] = map[string]any{"id": a.Category + "/"}
+				runs = append(runs, run)
+			}
+			if truncated {
+				// A category outside the window may still exist: its Findings stay open.
+				t.categories = append(t.categories, a.Category)
+			}
 			t.ids = append(t.ids, a.ID)
 			if a.CreatedAt.After(newest) {
 				newest, t.commitSHA, t.ref = a.CreatedAt, a.CommitSHA, a.Ref
@@ -335,7 +340,7 @@ func (s Syncer) fetchCode(ctx context.Context, tenant, service, repo string) (co
 		}
 		for _, r := range results {
 			locs, _ := r.Detail["locations"].([]string)
-			if slices.ContainsFunc(locs, func(l string) bool { return dismissed[[3]string{tool, r.RuleID, l}] }) {
+			if slices.ContainsFunc(c.dismissed, func(d DismissedAlert) bool { return d.covers(tool, r.RuleID, locs) }) {
 				t.dismissed = append(t.dismissed, r.Fingerprint)
 			}
 		}
@@ -363,7 +368,7 @@ func (s Syncer) applyCode(ctx context.Context, tenant, service string, c codeSca
 	}
 	for _, t := range c.ingest {
 		run, err := scans.Service{Store: s.Store}.Ingest(ctx, tenant, service, scans.Upload{Scope: "full", CommitSHA: t.commitSHA, Ref: t.ref,
-			SARIF: t.sarif, Dismissed: t.dismissed, GitHubAnalysisIDs: t.ids}, keelActor)
+			SARIF: t.sarif, Dismissed: t.dismissed, GitHubAnalysisIDs: t.ids, Categories: t.categories}, keelActor)
 		if err != nil {
 			return 0, 0, fmt.Errorf("%s analyses %v: %w", t.tool, t.ids, err)
 		}
@@ -373,18 +378,40 @@ func (s Syncer) applyCode(ctx context.Context, tenant, service string, c codeSca
 	return raised, resolved, nil
 }
 
+// covers reports whether d is the alert of a result of tool and rule at one
+// of locs (a Finding's detail.locations).
+func (d DismissedAlert) covers(tool, rule string, locs []string) bool {
+	return d.Tool == tool && d.RuleID == rule && slices.ContainsFunc(locs, func(l string) bool { return d.Location.Matches(scans.ParseLocation(l)) })
+}
+
 // dismiss takes d's tool off the open Findings at its rule and location and
 // resolves those no other tool still reports.
 func dismiss(ctx context.Context, tx pgx.Tx, service string, d DismissedAlert) (int, error) {
+	rows, err := tx.Query(ctx, `SELECT id::text, coalesce(detail->'locations', '[]') FROM findings
+		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND detail->>'rule_id' = $3`, service, d.Tool, d.RuleID)
+	if err != nil {
+		return 0, err
+	}
+	var id string
+	var locs []string
+	var ids []string
+	if _, err := pgx.ForEachRow(rows, []any{&id, &locs}, func() error {
+		if d.covers(d.Tool, d.RuleID, locs) {
+			ids = append(ids, id)
+		}
+		return nil
+	}); err != nil || len(ids) == 0 {
+		return 0, err
+	}
 	var n int
-	err := tx.QueryRow(ctx, `WITH d AS (UPDATE findings SET
-		    detail = jsonb_set(detail, '{tools}', (detail->'tools') - $2),
-		    status = CASE WHEN (detail->'tools') - $2 = '[]' THEN 'resolved' ELSE status END,
-		    resolved_at = CASE WHEN (detail->'tools') - $2 = '[]' THEN now() ELSE resolved_at END,
-		    resolution = CASE WHEN (detail->'tools') - $2 = '[]' THEN $5 ELSE resolution END
-		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND detail->>'rule_id' = $3 AND detail->'locations' ? $4
+	err = tx.QueryRow(ctx, `WITH d AS (UPDATE findings SET
+		    detail = jsonb_set(detail, '{tools}', (detail->'tools') - $1),
+		    status = CASE WHEN (detail->'tools') - $1 = '[]' THEN 'resolved' ELSE status END,
+		    resolved_at = CASE WHEN (detail->'tools') - $1 = '[]' THEN now() ELSE resolved_at END,
+		    resolution = CASE WHEN (detail->'tools') - $1 = '[]' THEN $3 ELSE resolution END
+		WHERE id = ANY ($2::uuid[])
 		RETURNING status)
-		SELECT count(*) FILTER (WHERE status = 'resolved') FROM d`, service, d.Tool, d.RuleID, d.Location, "dismissed on GitHub: "+d.Reason).Scan(&n)
+		SELECT count(*) FILTER (WHERE status = 'resolved') FROM d`, d.Tool, ids, "dismissed on GitHub: "+d.Reason).Scan(&n)
 	return n, err
 }
 

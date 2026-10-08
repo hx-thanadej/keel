@@ -46,6 +46,9 @@ type Upload struct {
 	// GitHubAnalysisIDs are the GitHub code scanning analyses this SARIF
 	// came from, so the GitHub sync ingests each analysis once.
 	GitHubAnalysisIDs []int64
+	// Categories, when set, limits what a full scan resolves to the Findings
+	// of these SARIF categories: the upload saw only them.
+	Categories []string
 }
 
 // Service ingests scans.
@@ -102,7 +105,8 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 				    last_seen_at = now(),
 				    detail = findings.detail || jsonb_build_object(
 				        'tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'tools', '[]') || (excluded.detail->'tools')) AS t),
-				        'locations', excluded.detail->'locations', 'commit', excluded.detail->'commit', 'message', excluded.detail->'message'),
+				        'locations', excluded.detail->'locations', 'commit', excluded.detail->'commit', 'message', excluded.detail->'message')
+				        || jsonb_strip_nulls(jsonb_build_object('category', excluded.detail->'category')),
 				    severity = CASE WHEN array_position(ARRAY['critical','high','medium','low'], excluded.severity) < array_position(ARRAY['critical','high','medium','low'], findings.severity)
 				                    THEN excluded.severity ELSE findings.severity END
 				RETURNING (xmax = 0)`, tenant, r.Kind, r.Fingerprint, r.Severity, title, detail, project, team, service).Scan(&inserted)
@@ -115,7 +119,7 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		}
 		if u.Scope == "full" {
 			for _, tool := range tools {
-				n, err := resolveAbsent(ctx, tx, service, tool, current)
+				n, err := resolveAbsent(ctx, tx, service, tool, current, u.Categories)
 				if err != nil {
 					return err
 				}
@@ -139,17 +143,19 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 // ResolveAbsent is resolveAbsent for other sources of vulnerability
 // Findings (OSV re-matching) that report under their own tool name.
 func ResolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string) (int, error) {
-	return resolveAbsent(ctx, tx, service, tool, current)
+	return resolveAbsent(ctx, tx, service, tool, current, nil)
 }
 
 // resolveAbsent: a full scan by tool that no longer reports a Finding removes
 // the tool from it; with no tool left reporting, the Finding is resolved.
-func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string) (int, error) {
+// Non-nil categories limit this to Findings of those SARIF categories.
+func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current, categories []string) (int, error) {
 	if current == nil {
 		current = []string{} // a nil slice is SQL NULL, and "x = ANY(NULL)" is never false
 	}
 	if _, err := tx.Exec(ctx, `UPDATE findings SET detail = jsonb_set(detail, '{tools}', (detail->'tools') - $2)
-		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND NOT (fingerprint = ANY ($3::text[]))`, service, tool, current); err != nil {
+		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND NOT (fingerprint = ANY ($3::text[]))
+		  AND ($4::text[] IS NULL OR coalesce(detail->>'category', '') = ANY ($4))`, service, tool, current, categories); err != nil {
 		return 0, err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'no longer reported by a full scan'
