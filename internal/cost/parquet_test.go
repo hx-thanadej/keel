@@ -2,6 +2,7 @@ package cost
 
 import (
 	"bytes"
+	"maps"
 	"testing"
 	"time"
 
@@ -95,5 +96,43 @@ func TestGoogleStyleTags(t *testing.T) {
 	}
 	if err := parseTags(`"nope"`, map[string]string{}); err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+// A null key in the middle of a Google-style list-of-struct labels column
+// must not shift later values onto the wrong key.
+func TestParquetNullTagKeyKeepsPairs(t *testing.T) {
+	type label struct {
+		Key   *string `parquet:"key,optional"`
+		Value *string `parquet:"value,optional"`
+	}
+	type row struct {
+		BilledCost         float64   `parquet:"BilledCost"`
+		BillingCurrency    string    `parquet:"BillingCurrency"`
+		BillingPeriodStart time.Time `parquet:"BillingPeriodStart,timestamp(millisecond)"`
+		ChargePeriodStart  time.Time `parquet:"ChargePeriodStart,timestamp(microsecond)"`
+		ChargePeriodEnd    time.Time `parquet:"ChargePeriodEnd,timestamp(microsecond)"`
+		ChargeCategory     string    `parquet:"ChargeCategory"`
+		SubAccountId       string    `parquet:"SubAccountId"`
+		Labels             []label   `parquet:"x_Labels"`
+	}
+	s := func(v string) *string { return &v }
+	day := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	w := parquet.NewGenericWriter[row](&buf)
+	if _, err := w.Write([]row{{BilledCost: 1, BillingCurrency: "USD", BillingPeriodStart: day.AddDate(0, 0, -2), ChargePeriodStart: day,
+		ChargePeriodEnd: day.AddDate(0, 0, 1), ChargeCategory: "Usage", SubAccountId: "p1",
+		Labels: []label{{s("a"), s("1")}, {nil, s("orphan")}, {s("c"), s("3")}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := ParseFOCUS(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := lines[0].Tags, map[string]string{"a": "1", "c": "3"}; !maps.Equal(got, want) {
+		t.Fatalf("tags %v, want %v", got, want)
 	}
 }

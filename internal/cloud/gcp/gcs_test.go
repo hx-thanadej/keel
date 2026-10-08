@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -44,13 +45,45 @@ func TestGCSListAndGet(t *testing.T) {
 	}
 }
 
-func TestKeyFilesRefused(t *testing.T) {
-	if err := checkKeyless([]byte(`{"type":"service_account","private_key":"x"}`)); !errors.Is(err, ErrKeyFile) {
-		t.Fatalf("service account key: %v", err)
-	}
-	for _, ok := range []string{`{"type":"external_account"}`, `{"type":"impersonated_service_account"}`, ``} {
+func TestOnlyKeylessCredentialsAccepted(t *testing.T) {
+	for _, ok := range []string{
+		``,
+		`{"type":"external_account","audience":"//iam.googleapis.com/x"}`,
+		`{"type":"impersonated_service_account","source_credentials":{"type":"external_account"}}`,
+		`{"type":"impersonated_service_account","source_credentials":{"type":"impersonated_service_account","source_credentials":{"type":"external_account"}}}`,
+	} {
 		if err := checkKeyless([]byte(ok)); err != nil {
-			t.Fatalf("%s: %v", ok, err)
+			t.Errorf("%s: %v", ok, err)
 		}
+	}
+	for _, bad := range []string{
+		`{"type":"service_account","private_key":"SECRET-KEY"}`,
+		`{"type":"authorized_user","refresh_token":"SECRET-KEY","client_secret":"SECRET-KEY"}`,
+		`{"type":"impersonated_service_account","source_credentials":{"type":"service_account","private_key":"SECRET-KEY"}}`,
+		`{"type":"impersonated_service_account","source_credentials":{"type":"authorized_user","refresh_token":"SECRET-KEY"}}`,
+		`{"type":"impersonated_service_account"}`,
+		`{"type":"gdch_service_account","private_key":"SECRET-KEY"}`,
+	} {
+		err := checkKeyless([]byte(bad))
+		if !errors.Is(err, ErrKeyFile) {
+			t.Errorf("%s: got %v, want ErrKeyFile", bad, err)
+			continue
+		}
+		if strings.Contains(err.Error(), "SECRET-KEY") {
+			t.Errorf("error leaks credential content: %v", err)
+		}
+	}
+}
+
+func TestGCSErrorOmitsRawBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = fmt.Fprint(w, `{"error":{"code":403,"message":"caller lacks storage.objects.list","errors":[{"debug":"Bearer at-SECRET"}]}}`)
+	}))
+	t.Cleanup(srv.Close)
+	g := GCS{Bucket: "b", Endpoint: srv.URL, Tokens: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "at-SECRET"})}
+	_, err := g.ListWithETag(context.Background(), "")
+	if err == nil || strings.Contains(err.Error(), "at-SECRET") || !strings.Contains(err.Error(), "caller lacks storage.objects.list") {
+		t.Fatalf("error %v: want the message field only", err)
 	}
 }

@@ -6,6 +6,7 @@
 package azure
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -131,9 +132,14 @@ func (b Blob) do(ctx context.Context, u string) (*http.Response, error) {
 		return nil, err
 	}
 	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
 		_ = res.Body.Close()
-		return nil, fmt.Errorf("azure blob %s: %s", res.Status, firstLine(string(body)))
+		var e struct {
+			Code    string `xml:"Code"`
+			Message string `xml:"Message"`
+		}
+		_ = xml.Unmarshal(bytes.TrimPrefix(body, []byte("\ufeff")), &e)
+		return nil, fmt.Errorf("azure blob %s: %s %s", res.Status, e.Code, firstLine(e.Message))
 	}
 	return res, nil
 }
