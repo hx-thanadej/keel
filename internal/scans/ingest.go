@@ -68,6 +68,16 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		if err != nil {
 			return err
 		}
+		var handedOver int
+		if u.Scope == "full" {
+			for _, tool := range tools {
+				n, err := HandOver(ctx, tx, service, tool, SourceCI)
+				if err != nil {
+					return err
+				}
+				handedOver += n
+			}
+		}
 		current := make([]string, 0, len(results))
 		for _, r := range results {
 			current = append(current, r.Fingerprint)
@@ -119,11 +129,45 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		}
 		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/scans", Type: "keel.scan.ingested", Subject: "service/" + service,
 			Operation: "IngestScan", Kind: activity.Create, Actor: by, Outcome: activity.Success,
-			Resources:    []activity.Resource{{Type: "service", UID: service, OwnerTeam: team}, {Type: "scan_run", UID: run.ID}},
-			StatusDetail: fmt.Sprintf("%s %s scan of %s@%.12s: %d results, %d new, %d resolved", run.Tool, run.Scope, slug, u.CommitSHA, run.Results, run.Raised, run.Resolved)})
+			Resources: []activity.Resource{{Type: "service", UID: service, OwnerTeam: team}, {Type: "scan_run", UID: run.ID}},
+			StatusDetail: fmt.Sprintf("%s %s scan of %s@%.12s: %d results, %d new, %d resolved, %d handed over from GitHub",
+				run.Tool, run.Scope, slug, u.CommitSHA, run.Results, run.Raised, run.Resolved, handedOver)})
 		return err
 	})
 	return run, err
+}
+
+// Source is where the Findings of one code scanning tool for a Service come
+// from. GitHub's alert list has no partial fingerprints, so its copy of a
+// SARIF result gets another fingerprint than CI's: two sources for one tool
+// would mean two Findings per alert, so only one owns the tool at a time.
+type Source string
+
+const (
+	SourceCI     Source = "CI uploads"
+	SourceGitHub Source = "GitHub code scanning"
+)
+
+// HandOver makes to the source of tool for service. The open Findings the
+// other source raised for tool stop carrying it and resolve when no tool is
+// left, so the new source raises its own copy. It returns how many resolved.
+// Vulnerability Findings are keyed by advisory, not by source, so both
+// sources already share them and they are left alone.
+func HandOver(ctx context.Context, tx pgx.Tx, service, tool string, to Source) (int, error) {
+	from := `detail->>'source' = 'github' AND detail->'github_tools' ? $2`
+	if to == SourceGitHub {
+		from = `coalesce(detail->>'source', '') <> 'github' AND NOT coalesce(detail->'github_tools', '[]') ? $2`
+	}
+	var n int
+	err := tx.QueryRow(ctx, `WITH h AS (UPDATE findings SET
+		    detail = detail || jsonb_strip_nulls(jsonb_build_object('tools', (detail->'tools') - $2, 'github_tools', (detail->'github_tools') - $2)),
+		    status = CASE WHEN (detail->'tools') - $2 = '[]' THEN 'resolved' ELSE status END,
+		    resolved_at = CASE WHEN (detail->'tools') - $2 = '[]' THEN now() ELSE resolved_at END,
+		    resolution = CASE WHEN (detail->'tools') - $2 = '[]' THEN $3 ELSE resolution END
+		WHERE service_id = $1 AND status = 'open' AND kind <> 'vulnerability' AND detail->'tools' ? $2 AND `+from+`
+		RETURNING status)
+		SELECT count(*) FILTER (WHERE status = 'resolved') FROM h`, service, tool, "source handed over to "+string(to)).Scan(&n)
+	return n, err
 }
 
 // ResolveAbsent is resolveAbsent for other sources of vulnerability

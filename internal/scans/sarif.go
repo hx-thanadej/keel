@@ -111,17 +111,8 @@ func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err e
 			if len(r.Title) > 200 {
 				r.Title = r.Title[:200]
 			}
-			switch {
-			case vulnID.MatchString(res.RuleID):
-				r.Kind = "vulnerability"
-				r.Fingerprint = "vuln:" + res.RuleID + ":" + service
-			default:
-				r.Kind = toolKinds[tool]
-				if r.Kind == "" {
-					r.Kind = "code_scan"
-				}
-				r.Fingerprint = "scan:" + tool + ":" + res.RuleID + ":" + service + ":" + stable(res.PartialFingerprints, loc, res.Message.Text)
-			}
+			r.Kind = Kind(tool, res.RuleID)
+			r.Fingerprint = Fingerprint(tool, res.RuleID, service, res.PartialFingerprints, loc, res.Message.Text)
 			r.Detail = map[string]any{"tools": []string{tool}, "rule_id": res.RuleID, "message": trim(res.Message.Text, 1000), "locations": []string{loc}}
 			if i, dup := seen[r.Fingerprint]; dup {
 				// Same vulnerability in several places: one Finding, all locations.
@@ -137,6 +128,29 @@ func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err e
 		}
 	}
 	return tools, out, nil
+}
+
+// Kind is the Finding kind for a result of tool under ruleID: a vulnerability
+// id is always a vulnerability, otherwise the tool decides.
+func Kind(tool, ruleID string) string {
+	if vulnID.MatchString(ruleID) {
+		return "vulnerability"
+	}
+	if k := toolKinds[tool]; k != "" {
+		return k
+	}
+	return "code_scan"
+}
+
+// Fingerprint is the identity of one result: vulnerabilities are per id and
+// Service (shared across tools), everything else per tool, rule, Service and
+// stable location. Other sources of the same results (GitHub code scanning
+// alerts) use it so they dedupe with SARIF uploads.
+func Fingerprint(tool, ruleID, service string, partial map[string]string, loc, msg string) string {
+	if vulnID.MatchString(ruleID) {
+		return "vuln:" + ruleID + ":" + service
+	}
+	return "scan:" + tool + ":" + ruleID + ":" + service + ":" + stable(partial, loc, msg)
 }
 
 // stable prefers the scanner's own location-independent fingerprint, so a
