@@ -144,6 +144,21 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
+	mux.Handle("PATCH /v1/tenants/{tenant}/services/{service}", authed(a, []string{"tenant", "service"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			CodeScanningSource string `json:"code_scanning_source"`
+			Why                string `json:"why"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		out, err := c.SetCodeScanningSource(r.Context(), p, r.PathValue("tenant"), r.PathValue("service"), in.CodeScanningSource, in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, out)
+		return nil
+	}))
 	mux.Handle("GET /v1/tenants/{tenant}/projects", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		out, err := c.ListProjects(r.Context(), p, r.PathValue("tenant"))
 		if err != nil {

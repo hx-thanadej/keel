@@ -163,6 +163,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/services/{service}/scans":                        {"version": "2.1.0", "runs": []any{}},
 		"POST /v1/tenants/{tenant}/releases/{release}/attestations":                 {},
 		"POST /v1/tenants/{tenant}/services/{service}/registry-token":               {},
+		"PATCH /v1/tenants/{tenant}/services/{service}":                             {"code_scanning_source": "github", "why": "pwn"},
 		"POST /v1/tenants/{tenant}/access/roles":                                    {"environment_id": env, "team_id": team, "template": "read-only"},
 		"POST /v1/tenants/{tenant}/access/roles/{role}/decide":                      {"approve": true},
 		"POST /v1/tenants/{tenant}/promotions/{promotion}/failed":                   {"reason": "pwn"},

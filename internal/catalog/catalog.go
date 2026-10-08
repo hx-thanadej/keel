@@ -77,6 +77,9 @@ type (
 		Repository      string `json:"repository"`
 		Template        string `json:"template"`
 		TemplateVersion string `json:"template_version"`
+		// CodeScanningSource is where the Service's code scanning Findings
+		// come from: "keel" (CI's SARIF uploads) or "github" (#121).
+		CodeScanningSource string `json:"code_scanning_source"`
 	}
 	Environment struct {
 		ID         string     `json:"id"`

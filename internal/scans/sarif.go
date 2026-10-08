@@ -75,6 +75,23 @@ var toolKinds = map[string]string{
 	"zizmor": "workflow",
 }
 
+// Kind is the Finding kind of a result tool reports under rule: a
+// vulnerability for a CVE or GHSA id, else what the tool scans for.
+func Kind(tool, rule string) string {
+	if vulnID.MatchString(rule) {
+		return "vulnerability"
+	}
+	if k := toolKinds[tool]; k != "" {
+		return k
+	}
+	return "code_scan"
+}
+
+// CodeScanning reports whether a Finding kind is a code scanning kind, the
+// only kinds a Service's code scanning source governs. Vulnerabilities,
+// secrets, IaC and workflow results are not: other sources own them.
+func CodeScanning(kind string) bool { return kind == "sast" || kind == "code_scan" }
+
 // ParseSARIF normalises every result of every run. service scopes the
 // fingerprints, so the same rule in two Services is two Findings.
 func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err error) {
@@ -111,15 +128,10 @@ func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err e
 			if len(r.Title) > 200 {
 				r.Title = r.Title[:200]
 			}
-			switch {
-			case vulnID.MatchString(res.RuleID):
-				r.Kind = "vulnerability"
+			r.Kind = Kind(tool, res.RuleID)
+			if r.Kind == "vulnerability" {
 				r.Fingerprint = "vuln:" + res.RuleID + ":" + service
-			default:
-				r.Kind = toolKinds[tool]
-				if r.Kind == "" {
-					r.Kind = "code_scan"
-				}
+			} else {
 				r.Fingerprint = "scan:" + tool + ":" + res.RuleID + ":" + service + ":" + stable(res.PartialFingerprints, loc, res.Message.Text)
 			}
 			r.Detail = map[string]any{"tools": []string{tool}, "rule_id": res.RuleID, "message": trim(res.Message.Text, 1000), "locations": []string{loc}}
