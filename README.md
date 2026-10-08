@@ -5,10 +5,11 @@ security, policy and findings, permission boundaries and just-in-time access,
 multi-cloud FinOps (budgets per Project × Environment per day/month/year,
 forecasting, rightsizing), all recorded in one tamper-evident Activity Log.
 
-**Status:** M0 (foundations), M1 (cost visibility) and M2 (rightsizing &
-waste) are built; connecting real billing data and member-account roles is the
-next step ([billing](docs/runbooks/connect-billing.md),
-[rightsizing](docs/runbooks/rightsizing.md)).
+**Status:** all six milestones (M0 foundations through M6 insights &
+compliance) are built. What remains is connecting real accounts: billing
+data, member-account roles, GitHub, Identity Center and the registry — see
+the [runbooks](docs/runbooks/) and the open external issues in the
+[Activity Log](docs/ACTIVITY-LOG.md).
 
 What works today:
 
@@ -32,7 +33,21 @@ What works today:
   Optimization Hub import, idle/orphaned resources with gated cleanup,
   off-hours schedules for non-prod; accepted advice becomes a pull request;
   realised savings and regressions tracked per Project.
-- **Portal:** Budgets, Costs (CSV export), Findings, Savings, Projects, Activity.
+- **Delivery:** Tencent account vending per Environment with Landing Zone
+  guardrails, keyless CI roles, GitHub organisation governance, Service
+  Templates, GitOps promotion with policy and Argo CD sync, keyless registry
+  pushes.
+- **Supply chain:** SARIF and SBOM ingest, OSV and VEX, Finding SLAs and
+  Exceptions, Sigstore provenance with Keel-signed VSAs, Kyverno admission,
+  reusable hardened build workflow, Controls catalogue.
+- **Access:** permission boundaries, Identity Center role templates,
+  time-boxed Access Grants with approvals, standing-access report,
+  break-glass, leaked-key auto-disable.
+- **Insights:** DORA, Service scorecards, Decision Record index, signed
+  evidence export with the EU CRA clock, monthly Tenant reports, quarterly
+  maturity self-assessment; Azure, Google Cloud and Alibaba bills too.
+- **Portal:** Budgets, Costs (CSV export), Findings, Savings, Delivery,
+  Security, Access, Insights, Projects, Activity.
 
 ## Develop
 

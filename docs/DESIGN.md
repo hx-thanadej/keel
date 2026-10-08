@@ -1,6 +1,6 @@
 # Keel — Product & Architecture Design
 
-Status: **draft for review** · 2026-10-06 · Glossary: [CONTEXT.md](../CONTEXT.md) ·
+Status: **implemented through M6** · 2026-10-08 · Glossary: [CONTEXT.md](../CONTEXT.md) ·
 Decisions: [adr/](./adr/) · History: [ACTIVITY-LOG.md](./ACTIVITY-LOG.md) ·
 Evidence: [research/](./research/)
 
