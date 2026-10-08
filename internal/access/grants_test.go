@@ -107,9 +107,13 @@ func TestAccessGrantLifecycle(t *testing.T) {
 	if g.CreatedAt.After(*g.ActivatedAt) || g.EndedAt.Before(*g.ActivatedAt) {
 		t.Fatalf("grant out of order: created %v, active %v, ended %v", g.CreatedAt, g.ActivatedAt, g.EndedAt)
 	}
+	before := svc.Now().Truncate(time.Microsecond)
 	d, err := svc.RequestGrant(ctx, w.tenant, prodOp.ID, 2, "incident 4712 recovery", eng)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if after := svc.Now(); d.CreatedAt.Before(before) || d.CreatedAt.After(after) {
+		t.Fatalf("grant requested between %v and %v on the service clock, recorded created_at %v", before, after, d.CreatedAt)
 	}
 	if d, err = svc.Reject(ctx, w.tenant, d.ID, "use the runbook", leadP); err != nil || d.EndedAt.Before(d.CreatedAt) {
 		t.Fatalf("rejected grant ended %v before its request %v (%v)", d.EndedAt, d.CreatedAt, err)

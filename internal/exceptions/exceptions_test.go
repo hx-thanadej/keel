@@ -131,3 +131,26 @@ func TestRevokeKeepsApprovalTime(t *testing.T) {
 			approved.DecidedAt, revoked.DecidedAt, approved.ApprovedAt, revoked.ApprovedAt, revoked.RevokedAt)
 	}
 }
+
+func TestRejectStampsDecisionOnServiceClock(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	tenant, _ := s.CreateTenant(ctx, "tdc", "TDC", false)
+	svc := exceptions.New(s)
+	svc.Now = storetest.Clock()
+	c, _ := flowtest.Client(t, s, svc.Register)
+	svc.SetClient(c)
+	e, err := svc.Create(ctx, tenant, exceptions.Request{Fingerprint: "vuln:CVE-2026-3:", Reason: "vendor fix is not out yet", ExpiresAt: svc.Now().Add(time.Hour)}, eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := svc.Now().Truncate(time.Microsecond)
+	rejected, err := svc.Reject(ctx, tenant, e.ID, "not accepted", sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := svc.Now()
+	if rejected.DecidedAt == nil || rejected.DecidedAt.Before(before) || rejected.DecidedAt.After(after) {
+		t.Fatalf("rejected between %v and %v on the service clock, recorded decided_at %v", before, after, rejected.DecidedAt)
+	}
+}
