@@ -106,8 +106,8 @@ func (s Service) Register(ctx context.Context, in Identity, by activity.Actor) (
 	var out Identity
 	err = s.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
 		var err error
-		if out, err = scanID(tx.QueryRow(ctx, `INSERT INTO breakglass_identities (tenant_id, provider, account, principal_id, name, holder, hardware_mfa, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, true, $7) RETURNING `+idCols, home, in.Provider, in.Account, in.PrincipalID, in.Name, in.Holder, by.UID)); err != nil {
+		if out, err = scanID(tx.QueryRow(ctx, `INSERT INTO breakglass_identities (tenant_id, provider, account, principal_id, name, holder, hardware_mfa, created_by, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8) RETURNING `+idCols, home, in.Provider, in.Account, in.PrincipalID, in.Name, in.Holder, by.UID, s.now())); err != nil {
 			return err
 		}
 		return record(ctx, tx, home, "keel.breakglass.registered", "RegisterBreakGlass", "breakglass/"+out.ID, by, activity.Success,
