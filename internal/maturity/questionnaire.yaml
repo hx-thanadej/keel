@@ -1,0 +1,50 @@
+# Keel's quarterly platform maturity self-assessment (#154), after the CNCF
+# Platform Engineering Maturity Model's five aspects and four levels. The
+# wording is Keel's own summary. Bump the version when a question changes;
+# stored answers keep the version they were given against.
+version: keel-maturity@1
+levels: [Provisional, Operational, Scalable, Optimizing]
+aspects:
+  - id: investment
+    title: Investment
+    question: How are people and money put into the platform?
+    levels:
+      - Individuals improve tooling on the side, without a budget.
+      - A team owns the platform as a cost centre with a backlog.
+      - The platform is funded as a product with a roadmap tied to business goals.
+      - Investment follows measured value; the platform is planned like any product line.
+  - id: adoption
+    title: Adoption
+    question: How do teams come to use the platform?
+    measured: template_adoption
+    levels:
+      - Use is accidental or mandated without support.
+      - Teams adopt it because a mandate or an early champion pushes it.
+      - Teams choose it because it is the easiest path for most work.
+      - Teams contribute back; the platform spreads by its own merit.
+  - id: interfaces
+    title: Interfaces
+    question: How do teams consume platform capabilities?
+    measured: self_service_environments
+    levels:
+      - Tickets and custom requests to the platform team.
+      - Documented, consistent processes, partly automated.
+      - Self-service through a portal, API or templates for common needs.
+      - Integrated, composable services that cover most needs without help.
+  - id: operations
+    title: Operations
+    question: How are platform capabilities run and changed?
+    levels:
+      - On demand, by whoever built them.
+      - Tracked centrally with a known owner per capability.
+      - Managed as products with lifecycle, support and deprecation.
+      - Operated with SLOs and continuous improvement from feedback.
+  - id: measurement
+    title: Measurement
+    question: How is the platform's effect measured and used?
+    measured: dora
+    levels:
+      - Anecdotes and ad hoc feedback.
+      - Consistent collection of a few metrics (e.g. deploy frequency).
+      - Insights from delivery and satisfaction data drive priorities.
+      - Quantitative and qualitative measures steer investment continuously.

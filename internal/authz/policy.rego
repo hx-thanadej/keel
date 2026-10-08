@@ -62,6 +62,8 @@ rules := {
 	"evidence.export": {"platform_admin", "security_lead", "tenant_approver", "tenant_viewer"},
 	"report.read": read_roles,
 	"report.generate": {"platform_admin", "finops_lead"},
+	"maturity.read": read_roles,
+	"maturity.submit": {"platform_admin", "tenant_approver"},
 	"breakglass.manage": {"platform_admin", "security_lead"},
 	"access.request_role": {"platform_admin", "team_lead"},
 	"access.approve_role": {"platform_admin", "security_lead"},

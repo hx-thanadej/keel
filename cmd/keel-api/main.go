@@ -113,6 +113,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/integrity"
 	"github.com/hx-thanadej/keel/internal/landingzone"
 	"github.com/hx-thanadej/keel/internal/leaks"
+	"github.com/hx-thanadej/keel/internal/maturity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
 	"github.com/hx-thanadej/keel/internal/pipelineauth"
 	"github.com/hx-thanadej/keel/internal/promotion"
@@ -294,6 +295,16 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	rep := reports.Service{Store: st, Budgets: budget.Service{Store: st}, DORA: dora.Service{Store: st},
 		Savings: rightsize.Tracker{Service: rightsize.Service{Store: st}}}
 	deps.Reports = &api.ReportDeps{Authz: az, Service: rep}
+	// Quarterly maturity self-assessment (#154) and its reminder.
+	mat := maturity.Service{Store: st, DORA: dora.Service{Store: st}}
+	deps.Maturity = &api.MaturityDeps{Authz: az, Service: mat}
+	go daily(ctx, "maturity reminder", func(ctx context.Context) error {
+		n, err := mat.Remind(ctx)
+		if n > 0 {
+			slog.Info("maturity reminders", "opened", n)
+		}
+		return err
+	})
 	go daily(ctx, "scorecard snapshot", func(ctx context.Context) error {
 		n, err := scorecard.Service{Store: st}.Snapshot(ctx)
 		if err == nil {

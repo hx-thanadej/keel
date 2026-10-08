@@ -18,7 +18,7 @@ import (
 
 // tenantScoped lists every table that must be isolated per Tenant. Adding a
 // table to the schema without adding it here fails TestEveryTableIsListed.
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps", "releases", "promotions", "exceptions", "scan_runs", "release_attestations", "release_sboms", "release_components", "vex_statements", "access_roles", "access_grants", "breakglass_identities", "breakglass_uses", "webhook_deliveries", "scorecard_snapshots", "decision_records", "tenant_reports"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps", "releases", "promotions", "exceptions", "scan_runs", "release_attestations", "release_sboms", "release_components", "vex_statements", "access_roles", "access_grants", "breakglass_identities", "breakglass_uses", "webhook_deliveries", "scorecard_snapshots", "decision_records", "tenant_reports", "maturity_assessments"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -95,6 +95,9 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO scorecard_snapshots (tenant_id, service_id, day, version, score, checks) VALUES ($1, $2, '2026-10-01', 'v', 50, '[]')`, f.tenant, f.service); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO maturity_assessments (tenant_id, quarter, version, answers, indicators, submitted_by) VALUES ($1, '2026-Q3', 'v', '{}', '{}', 'u')`, f.tenant); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO tenant_reports (tenant_id, period, data, html) VALUES ($1, '2026-09-01', '{}', '<p>')`, f.tenant); err != nil {
