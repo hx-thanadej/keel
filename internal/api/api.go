@@ -43,6 +43,7 @@ type Deps struct {
 	BreakGlass *BreakGlassDeps
 	Webhooks   *WebhookDeps
 	DORA       *DORADeps
+	Scorecards *ScorecardDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -152,6 +153,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Access != nil {
 			mountAccess(mux, deps.Auth, *deps.Access)
+		}
+		if deps.Scorecards != nil {
+			mountScorecards(mux, deps.Auth, *deps.Scorecards)
 		}
 		if deps.DORA != nil {
 			mountDORA(mux, deps.Auth, *deps.DORA)

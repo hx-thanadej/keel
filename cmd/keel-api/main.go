@@ -114,6 +114,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/sbom"
 	"github.com/hx-thanadej/keel/internal/scans"
+	"github.com/hx-thanadej/keel/internal/scorecard"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/templates"
 	"github.com/hx-thanadej/keel/internal/utilisation"
@@ -265,6 +266,14 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	deps.Promotion = &api.PromotionDeps{Authz: az, Service: promo}
 	deps.DORA = &api.DORADeps{Authz: az, Service: dora.Service{Store: st}}
+	deps.Scorecards = &api.ScorecardDeps{Authz: az, Service: scorecard.Service{Store: st}}
+	go daily(ctx, "scorecard snapshot", func(ctx context.Context) error {
+		n, err := scorecard.Service{Store: st}.Snapshot(ctx)
+		if err == nil {
+			slog.Info("scorecards", "services", n)
+		}
+		return err
+	})
 	go every(ctx, 2*time.Minute, "promotion sync", func(ctx context.Context) error {
 		res, err := promo.Sync(ctx)
 		if err == nil && res != (promotion.SyncResult{}) {
