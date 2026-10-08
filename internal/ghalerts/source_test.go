@@ -14,26 +14,6 @@ import (
 	"github.com/hx-thanadej/keel/internal/ghapi"
 )
 
-func TestGitHubSourceMapsCodeScanningSeverity(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/acme/crm/code-scanning/alerts" || r.URL.Query().Get("state") != "open" || r.Header.Get("Authorization") != "Bearer tok" {
-			t.Errorf("unexpected request %s %v", r.URL, r.Header)
-		}
-		_, _ = w.Write([]byte(`[{"number": 1, "rule": {"id": "go/sql-injection", "security_severity_level": "critical", "severity": "note", "description": "SQL injection"}, "tool": {"name": "CodeQL"},
-			"most_recent_instance": {"location": {"path": "db.go", "start_line": 7}, "message": {"text": "bad"}}},
-			{"number": 2, "rule": {"id": "go/xss", "security_severity_level": null, "severity": "warning"}, "tool": {"name": "CodeQL"}}]`))
-	}))
-	defer srv.Close()
-	g := ghalerts.GitHub{Client: ghapi.Client{BaseURL: srv.URL, Token: "tok"}}
-	got, err := g.CodeScanning(context.Background(), "acme/crm")
-	if err != nil || len(got) != 2 {
-		t.Fatalf("%+v %v", got, err)
-	}
-	if got[0].Severity != "critical" || got[1].Severity != "medium" || got[0].Tool != "codeql" || got[0].Path != "db.go" || got[0].Line != 7 || got[0].Number != 1 {
-		t.Fatalf("%+v %+v", got[0], got[1])
-	}
-}
-
 // cursorServer serves Dependabot-style cursor pages: it ignores "page" and
 // pages only by the "after" cursor in its Link header, like GitHub's
 // Dependabot alerts endpoint. next(after) returns the next cursor, or "".
@@ -142,7 +122,7 @@ func TestGitHubSourceMapsRefusals(t *testing.T) {
 			}))
 			defer srv.Close()
 			g := ghalerts.GitHub{Client: ghapi.Client{BaseURL: srv.URL}}
-			if _, err := g.CodeScanning(context.Background(), "acme/crm"); !errors.Is(err, tc.want) {
+			if _, err := g.DismissedCodeAlerts(context.Background(), "acme/crm"); !errors.Is(err, tc.want) {
 				t.Fatalf("code scanning: %v, want %v", err, tc.want)
 			}
 		})

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -27,10 +27,6 @@ const (
 	StatusNotEnabled = "not_enabled"
 	StatusForbidden  = "forbidden"
 	StatusError      = "error"
-	// StatusSARIF: the fetch worked, but CI uploads SARIF for some of the
-	// code scanning tools, so CI is their only source and their GitHub
-	// alerts were skipped.
-	StatusSARIF = "sarif"
 )
 
 var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:ghalerts"}
@@ -150,69 +146,39 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 	if v.repoID != nil {
 		repoKey = fmt.Sprint(*v.repoID) // immutable, survives renames
 	}
-	// All GitHub calls happen before the transaction.
-	code, codeErr := s.Source.CodeScanning(ctx, repo)
+	// All GitHub calls happen before any write.
+	code, codeErr := s.fetchCode(ctx, tenant, v.id, repo)
 	deps, depErr := s.Source.Dependabot(ctx, repo)
 	secrets, secErr := s.Source.SecretScanning(ctx, repo)
 	st.CodeScanning, st.Dependabot, st.SecretScanning = status(codeErr), status(depErr), status(secErr)
 
 	var raised, resolved int
+	codeDetail := detailStatus(st.CodeScanning, codeErr)
+	if codeErr == nil {
+		r, n, err := s.applyCode(ctx, tenant, v.id, code)
+		if err != nil {
+			return st, err
+		}
+		raised += r
+		resolved += n
+		codeDetail += " " + code.summary()
+	}
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		type group struct {
 			ok    bool
 			items []item
-			tools []string // tools this type reports as; each is resolved separately
+			tool  string
 		}
-		ciTools, err := sarifTools(ctx, tx, v.id)
-		if err != nil {
-			return err
-		}
-		var handovers []string
-		handOver := func(tool string, to scans.Source) error {
-			n, err := scans.HandOver(ctx, tx, v.id, tool, to)
-			if n > 0 {
-				dir := "GitHub to CI"
-				if to == scans.SourceGitHub {
-					dir = "CI to GitHub"
-				}
-				handovers = append(handovers, fmt.Sprintf("%s handed over from %s (%d)", tool, dir, n))
-				resolved += n
-			}
-			return err
-		}
-		for _, tool := range sortedKeys(ciTools) {
-			if err := handOver(tool, scans.SourceCI); err != nil {
-				return err
-			}
-		}
-		code, skipped := splitByTool(code, ciTools)
-		if codeErr == nil && len(skipped) > 0 {
-			st.CodeScanning = StatusSARIF
-		}
-		cs := group{ok: codeErr == nil, items: codeItems(code, v.id)}
-		cs.tools = distinctTools(cs.items)
-		if cs.ok {
-			for _, tool := range cs.tools {
-				if err := handOver(tool, scans.SourceGitHub); err != nil {
-					return err
-				}
-			}
-			known, err := githubTools(ctx, tx, v.id)
-			if err != nil {
-				return err
-			}
-			cs.tools = without(union(cs.tools, known), ciTools)
-		}
-		groups := []group{cs,
-			{ok: depErr == nil, items: dependabotItems(deps, v.id), tools: []string{toolDependabot}},
-			{ok: secErr == nil, items: secretItems(secrets, repoKey), tools: []string{toolSecrets}}}
-		for _, g := range groups {
+		for _, g := range []group{
+			{ok: depErr == nil, items: dependabotItems(deps, v.id), tool: toolDependabot},
+			{ok: secErr == nil, items: secretItems(secrets, repoKey), tool: toolSecrets},
+		} {
 			if !g.ok {
 				continue // unknown, not clean: keep what we have
 			}
-			byTool := map[string][]string{}
+			current := []string{}
 			for _, it := range g.items {
-				byTool[it.tool] = append(byTool[it.tool], it.fingerprint)
+				current = append(current, it.fingerprint)
 				if it.vuln != "" {
 					var suppressed bool
 					if err := tx.QueryRow(ctx, `SELECT vex_suppressed($1, $2)`, it.vuln, v.id).Scan(&suppressed); err != nil {
@@ -230,21 +196,16 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 					raised++
 				}
 			}
-			for _, tool := range g.tools {
-				n, err := resolveAbsent(ctx, tx, v.id, tool, byTool[tool])
-				if err != nil {
-					return err
-				}
-				resolved += n
+			n, err := scans.ResolveAbsent(ctx, tx, v.id, g.tool, current)
+			if err != nil {
+				return err
 			}
+			resolved += n
 		}
-		detail := fmt.Sprintf("%s: code scanning %s (%d), dependabot %s (%d), secret scanning %s (%d); %d new, %d resolved",
-			repo, detailStatus(st.CodeScanning, codeErr, skipped), len(code), detailStatus(st.Dependabot, depErr, nil), len(deps),
-			detailStatus(st.SecretScanning, secErr, nil), len(secrets), raised, resolved)
-		if len(handovers) > 0 {
-			detail += "; " + strings.Join(handovers, ", ")
-		}
-		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/ghalerts", Type: "keel.ghalerts.synced", Subject: "service/" + v.id,
+		detail := fmt.Sprintf("%s: code scanning %s, dependabot %s (%d), secret scanning %s (%d); %d new, %d resolved",
+			repo, codeDetail, detailStatus(st.Dependabot, depErr), len(deps),
+			detailStatus(st.SecretScanning, secErr), len(secrets), raised, resolved)
+		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/ghalerts", Type: "keel.ghalerts.synced", Subject: "service/" + v.id,
 			Operation: "SyncGitHubAlerts", Kind: activity.Update, Actor: keelActor, Outcome: activity.Success,
 			Resources:    []activity.Resource{{Type: "service", UID: v.id, OwnerTeam: v.team}},
 			StatusDetail: detail})
@@ -255,69 +216,182 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 	return st, err
 }
 
-// sarifTools lists the tools for which CI is the source (scans.Source): a
-// full SARIF upload for the Service in the last 30 days. A diff upload
-// resolves nothing, so it never takes a tool over.
-func sarifTools(ctx context.Context, tx pgx.Tx, service string) (map[string]bool, error) {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT t FROM scan_runs, unnest(string_to_array(tool, ',')) AS t
-		WHERE service_id = $1 AND scope = 'full' AND created_at > now() - interval '30 days'`, service)
+// codeScan is what one sync fetched from GitHub code scanning.
+type codeScan struct {
+	ingest    []toolSARIF      // tools with an analysis Keel has not ingested
+	unchanged []string         // tools whose latest analyses Keel already ingested
+	failed    []string         // tools whose latest analysis failed on GitHub: left as they are
+	dismissed []DismissedAlert // alerts dismissed on GitHub
+}
+
+// toolSARIF is the latest analysis of every category of one tool, merged
+// into one SARIF log so a full ingest never resolves another category's
+// results.
+type toolSARIF struct {
+	tool           string
+	ids            []int64
+	commitSHA, ref string
+	sarif          []byte
+	dismissed      []string // fingerprints of results dismissed on GitHub
+}
+
+func (c codeScan) summary() string {
+	var parts []string
+	for _, t := range c.ingest {
+		parts = append(parts, fmt.Sprintf("ingested %s (%d analyses)", t.tool, len(t.ids)))
+	}
+	if len(c.unchanged) > 0 {
+		parts = append(parts, "unchanged "+strings.Join(c.unchanged, ", "))
+	}
+	if len(c.failed) > 0 {
+		parts = append(parts, "kept "+strings.Join(c.failed, ", ")+": latest analysis failed on GitHub")
+	}
+	parts = append(parts, fmt.Sprintf("%d dismissed on GitHub", len(c.dismissed)))
+	return "(" + strings.Join(parts, "; ") + ")"
+}
+
+// fetchCode reads the latest analysis per tool and category and downloads
+// the SARIF of each tool with an analysis Keel has not ingested yet. Any
+// failed call fails the whole alert type, so nothing is resolved on a
+// partial view.
+func (s Syncer) fetchCode(ctx context.Context, tenant, service, repo string) (codeScan, error) {
+	var c codeScan
+	analyses, err := s.Source.Analyses(ctx, repo)
 	if err != nil {
-		return nil, err
+		return c, err
 	}
-	tools, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	out := map[string]bool{}
-	for _, t := range tools {
-		out[t] = true
+	if c.dismissed, err = s.Source.DismissedCodeAlerts(ctx, repo); err != nil {
+		return c, err
 	}
-	return out, err
-}
-
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+	dismissed := map[[3]string]bool{}
+	for _, d := range c.dismissed {
+		dismissed[[3]string{d.Tool, d.RuleID, d.Location}] = true
 	}
-	sort.Strings(out)
-	return out
-}
-
-// splitByTool separates the alerts of tools CI already uploads.
-func splitByTool(alerts []CodeAlert, ci map[string]bool) (keep []CodeAlert, skipped map[string]int) {
-	for _, a := range alerts {
-		if !ci[a.Tool] {
-			keep = append(keep, a)
+	ids := make([]int64, 0, len(analyses))
+	byTool := map[string][]Analysis{}
+	var tools []string
+	for _, a := range analyses {
+		ids = append(ids, a.ID)
+		if byTool[a.Tool] == nil {
+			tools = append(tools, a.Tool)
+		}
+		byTool[a.Tool] = append(byTool[a.Tool], a)
+	}
+	var seen map[int64]bool
+	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT a FROM scan_runs, unnest(github_analysis_ids) AS a WHERE service_id = $1 AND a = ANY ($2)`, service, ids)
+		if err != nil {
+			return err
+		}
+		got, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+		seen = map[int64]bool{}
+		for _, id := range got {
+			seen[id] = true
+		}
+		return err
+	}); err != nil {
+		return c, err
+	}
+	for _, tool := range tools {
+		as := byTool[tool]
+		if slices.ContainsFunc(as, func(a Analysis) bool { return a.Error != "" }) {
+			c.failed = append(c.failed, tool)
 			continue
 		}
-		if skipped == nil {
-			skipped = map[string]int{}
+		if !slices.ContainsFunc(as, func(a Analysis) bool { return !seen[a.ID] }) {
+			c.unchanged = append(c.unchanged, tool)
+			continue
 		}
-		skipped[a.Tool]++
+		t := toolSARIF{tool: tool}
+		var runs []json.RawMessage
+		var newest time.Time
+		for _, a := range as {
+			raw, err := s.Source.SARIF(ctx, repo, a.ID)
+			if err != nil {
+				return c, err
+			}
+			var log struct {
+				Runs []json.RawMessage `json:"runs"`
+			}
+			if err := json.Unmarshal(raw, &log); err != nil {
+				return c, fmt.Errorf("analysis %d: not SARIF JSON: %w", a.ID, err)
+			}
+			runs = append(runs, log.Runs...)
+			t.ids = append(t.ids, a.ID)
+			if a.CreatedAt.After(newest) {
+				newest, t.commitSHA, t.ref = a.CreatedAt, a.CommitSHA, a.Ref
+			}
+		}
+		if t.sarif, err = json.Marshal(map[string]any{"version": "2.1.0", "runs": runs}); err != nil {
+			return c, err
+		}
+		got, results, err := scans.ParseSARIF(t.sarif, service)
+		// A full scan resolves per tool, so the SARIF must name only this one.
+		if err == nil && (len(got) == 0 || slices.ContainsFunc(got, func(g string) bool { return g != tool })) {
+			err = fmt.Errorf("SARIF runs are %v, want %s only", got, tool)
+		}
+		if err != nil {
+			return c, fmt.Errorf("%s analyses %v: %w", tool, t.ids, err)
+		}
+		for _, r := range results {
+			locs, _ := r.Detail["locations"].([]string)
+			if slices.ContainsFunc(locs, func(l string) bool { return dismissed[[3]string{tool, r.RuleID, l}] }) {
+				t.dismissed = append(t.dismissed, r.Fingerprint)
+			}
+		}
+		c.ingest = append(c.ingest, t)
 	}
-	return keep, skipped
+	return c, nil
 }
 
-func without(tools []string, drop map[string]bool) []string {
-	var out []string
-	for _, t := range tools {
-		if !drop[t] {
-			out = append(out, t)
+// applyCode resolves the Findings of alerts dismissed on GitHub, then
+// ingests each new SARIF as a full scan of its tool. Dismissals go first so
+// their Findings carry GitHub's reason, and the ingest leaves dismissed
+// results out so it never raises them again.
+func (s Syncer) applyCode(ctx context.Context, tenant, service string, c codeScan) (raised, resolved int, err error) {
+	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		for _, d := range c.dismissed {
+			n, err := dismiss(ctx, tx, service, d)
+			if err != nil {
+				return err
+			}
+			resolved += n
 		}
+		return nil
+	}); err != nil {
+		return 0, 0, err
 	}
-	return out
+	for _, t := range c.ingest {
+		run, err := scans.Service{Store: s.Store}.Ingest(ctx, tenant, service, scans.Upload{Scope: "full", CommitSHA: t.commitSHA, Ref: t.ref,
+			SARIF: t.sarif, Dismissed: t.dismissed, GitHubAnalysisIDs: t.ids}, keelActor)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s analyses %v: %w", t.tool, t.ids, err)
+		}
+		raised += run.Raised
+		resolved += run.Resolved
+	}
+	return raised, resolved, nil
 }
 
-// detailStatus is a status as the Activity shows it: which tools were left
-// to CI, or a short reason for an error.
-func detailStatus(st string, err error, skipped map[string]int) string {
-	switch st {
-	case StatusSARIF:
-		tools := make([]string, 0, len(skipped))
-		for t, n := range skipped {
-			tools = append(tools, fmt.Sprintf("%d %s", n, t))
-		}
-		sort.Strings(tools)
-		return fmt.Sprintf("%s (skipped %s: CI uploads SARIF)", st, strings.Join(tools, ", "))
-	case StatusError:
+// dismiss takes d's tool off the open Findings at its rule and location and
+// resolves those no other tool still reports.
+func dismiss(ctx context.Context, tx pgx.Tx, service string, d DismissedAlert) (int, error) {
+	var n int
+	err := tx.QueryRow(ctx, `WITH d AS (UPDATE findings SET
+		    detail = jsonb_set(detail, '{tools}', (detail->'tools') - $2),
+		    status = CASE WHEN (detail->'tools') - $2 = '[]' THEN 'resolved' ELSE status END,
+		    resolved_at = CASE WHEN (detail->'tools') - $2 = '[]' THEN now() ELSE resolved_at END,
+		    resolution = CASE WHEN (detail->'tools') - $2 = '[]' THEN $5 ELSE resolution END
+		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND detail->>'rule_id' = $3 AND detail->'locations' ? $4
+		RETURNING status)
+		SELECT count(*) FILTER (WHERE status = 'resolved') FROM d`, service, d.Tool, d.RuleID, d.Location, "dismissed on GitHub: "+d.Reason).Scan(&n)
+	return n, err
+}
+
+// detailStatus is a status as the Activity shows it, with a short reason
+// for an error.
+func detailStatus(st string, err error) string {
+	if st == StatusError {
 		return fmt.Sprintf("%s (%s)", st, reason(err))
 	}
 	return st
@@ -357,46 +431,10 @@ func reason(err error) string {
 	return r
 }
 
-func distinctTools(items []item) []string {
-	var out []string
-	for _, it := range items {
-		out = union(out, []string{it.tool})
-	}
-	return out
-}
-
-func union(a, b []string) []string {
-	for _, x := range b {
-		found := false
-		for _, y := range a {
-			found = found || x == y
-		}
-		if !found {
-			a = append(a, x)
-		}
-	}
-	return a
-}
-
-// githubTools lists the code scanning tools GitHub has reported for the
-// Service's open Findings, so a tool whose alerts all disappeared still
-// gets its Findings resolved even though this fetch no longer names it.
-func githubTools(ctx context.Context, tx pgx.Tx, service string) ([]string, error) {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT t FROM findings, jsonb_array_elements_text(detail->'github_tools') AS t
-		WHERE service_id = $1 AND status = 'open' AND jsonb_typeof(detail->'github_tools') = 'array' AND t NOT IN ($2, $3)`, service, toolDependabot, toolSecrets)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, pgx.RowTo[string])
-}
-
-// upsert raises the Finding or adds GitHub to an existing one. detail.tools
-// merges with other scanners; detail.github_tools records which tools GitHub
-// itself reported, so resolution never strips a tool that only CI reports.
+// upsert raises the Finding or adds the alert's tool to an existing one, so
+// a CVE Trivy also reports stays one Finding.
 func upsert(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (bool, error) {
 	it.detail["tools"] = []string{it.tool}
-	it.detail["github_tools"] = []string{it.tool}
-	it.detail["source"] = "github"
 	it.detail["service"] = v.slug
 	detail, err := json.Marshal(it.detail)
 	if err != nil {
@@ -408,41 +446,10 @@ func upsert(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (b
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET
 		    last_seen_at = now(),
-		    detail = CASE WHEN findings.detail->>'source' = 'github' THEN findings.detail || excluded.detail ELSE findings.detail END
-		        || jsonb_build_object(
-		            'tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'tools', '[]') || (excluded.detail->'tools')) AS t),
-		            'github_tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'github_tools', '[]') || (excluded.detail->'github_tools')) AS t)),
+		    detail = findings.detail || jsonb_build_object(
+		        'tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'tools', '[]') || (excluded.detail->'tools')) AS t)),
 		    severity = CASE WHEN array_position(ARRAY['critical','high','medium','low'], excluded.severity) < array_position(ARRAY['critical','high','medium','low'], findings.severity)
 		                    THEN excluded.severity ELSE findings.severity END
 		RETURNING (xmax = 0)`, tenant, it.kind, it.fingerprint, it.severity, title, detail, v.project, v.team, v.id).Scan(&inserted)
 	return inserted, err
-}
-
-// resolveAbsent resolves the Service's open Findings that GitHub reported
-// under tool but no longer lists. Findings that GitHub never reported under
-// that tool (a CI scan by a tool with the same name) are passed to
-// scans.ResolveAbsent as "current" so they are left alone.
-func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string) (int, error) {
-	if current == nil {
-		current = []string{} // a nil slice is SQL NULL
-	}
-	keep := append([]string{}, current...)
-	rows, err := tx.Query(ctx, `SELECT fingerprint FROM findings WHERE service_id = $1 AND status = 'open'
-		AND NOT (coalesce(detail->'github_tools', '[]') ? $2)`, service, tool)
-	if err != nil {
-		return 0, err
-	}
-	others, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return 0, err
-	}
-	keep = append(keep, others...)
-	n, err := scans.ResolveAbsent(ctx, tx, service, tool, keep)
-	if err != nil {
-		return 0, err
-	}
-	// Findings still open for other tools no longer carry this one from GitHub.
-	_, err = tx.Exec(ctx, `UPDATE findings SET detail = jsonb_set(detail, '{github_tools}', (detail->'github_tools') - $2)
-		WHERE service_id = $1 AND status = 'open' AND detail->'github_tools' ? $2 AND NOT (fingerprint = ANY ($3::text[]))`, service, tool, current)
-	return n, err
 }

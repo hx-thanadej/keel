@@ -1,11 +1,6 @@
 package ghalerts
 
-import (
-	"fmt"
-	"strconv"
-
-	"github.com/hx-thanadej/keel/internal/scans"
-)
+import "fmt"
 
 const (
 	toolDependabot = "dependabot"
@@ -55,28 +50,6 @@ func dedupe(in []item) []item {
 		out = append(out, it)
 	}
 	return out
-}
-
-func codeItems(alerts []CodeAlert, service string) []item {
-	out := make([]item, 0, len(alerts))
-	for _, a := range alerts {
-		loc := a.Path
-		if a.Line > 0 {
-			loc += ":" + strconv.Itoa(a.Line)
-		}
-		kind := scans.Kind(a.Tool, a.RuleID)
-		it := item{tool: a.Tool, kind: kind, severity: a.Severity, rule: a.RuleID, title: trim(a.Description, 200),
-			fingerprint: scans.Fingerprint(a.Tool, a.RuleID, service, nil, loc, a.Message),
-			detail:      map[string]any{"rule_id": a.RuleID, "message": trim(a.Message, 1000), "locations": []string{loc}, "alert_numbers": []int{a.Number}}}
-		if it.title == "" {
-			it.title = trim(a.Message, 200)
-		}
-		if kind == "vulnerability" {
-			it.vuln = a.RuleID
-		}
-		out = append(out, it)
-	}
-	return dedupe(out)
 }
 
 func dependabotItems(alerts []DependabotAlert, service string) []item {
