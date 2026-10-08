@@ -262,6 +262,28 @@ describe('finops screens', () => {
     expect((screen.getByLabelText('Justification') as HTMLSelectElement).required).toBe(true)
   })
 
+  it('access tab requests a grant, shows approvals needed and active grants, and lists standing access', async () => {
+    const calls = mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/teams`]: { items: [{ id: 't1', slug: 'crm', name: 'CRM' }] },
+      [`/v1/tenants/${tat}/access/templates`]: { items: [{ name: 'read-only', description: '', write: false, max_hours: 8 }, { name: 'operator', description: '', write: true, max_hours: 2 }] },
+      [`/v1/tenants/${tat}/access/roles`]: { items: [{ id: 'r1', environment_id: 'e1', team_id: 't1', template: 'operator', state: 'active', requested_by: 'u' }] },
+      [`/v1/tenants/${tat}/access/grants`]: (u: URL) => u.pathname && { items: [
+        { id: 'g1', role_id: 'r1', requester: 'user:eng@harmonyx.co', reason: 'incident 4711', hours: 2, state: 'requested', decision: { allow: true, reasons: [], approvals: ['team_lead', 'security_lead'], policy: 'keel-access@1' }, approvals: [{ role: 'team_lead', by: 'user:lead@harmonyx.co', at: '2026-10-07T10:00:00Z' }], error: null, expires_at: null },
+        { id: 'g2', role_id: 'r1', requester: 'user:ops@harmonyx.co', reason: 'disk full', hours: 1, state: 'active', decision: { allow: true, reasons: [], approvals: [], policy: 'keel-access@1' }, approvals: [], error: null, expires_at: '2026-10-07T12:00:00Z' }] },
+      [`/v1/tenants/${tat}/access/grants/g1/approve`]: { id: 'g1', state: 'active' },
+      [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f9', kind: 'standing_access', severity: 'critical', status: 'open', title: 'Standing production access in 100002: CAM user alice (standing credentials)', detail: {}, first_seen_at: '2026-10-07T00:00:00Z', resolution: null }] },
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Access' }))
+    expect(await screen.findByText(/CAM user alice/)).toBeTruthy()
+    expect(screen.getByText(/needs team_lead \+ security_lead · approved by lead@harmonyx.co \(team_lead\)/)).toBeTruthy()
+    expect(screen.getByText(/ops@harmonyx.co: operator in prod/)).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Approve access' }))
+    expect(calls).toContain(`/v1/tenants/${tat}/access/grants/g1/approve`)
+    expect((screen.getByLabelText('Hours') as HTMLInputElement).max).toBe('2')
+  })
+
   it('findings tab lists anomalies with severity label and contributors', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f1', kind: 'cost_anomaly', severity: 'critical', status: 'open', title: 'NAT Gateway spend 310.00 USD on 10 Sep', detail: { top_resources: [{ resource_id: 'nat-2', delta: '300.00' }] }, first_seen_at: '2026-09-11T03:00:00Z', resolution: null, due_at: '2026-09-18T03:00:00Z', overdue_at: '2026-09-19T00:00:00Z' }] } })
     render(<App />)
