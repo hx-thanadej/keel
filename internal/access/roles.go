@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/riverqueue/river"
 
 	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/store"
@@ -25,6 +26,7 @@ type Service struct {
 	Now       func() time.Time
 
 	role, grant rego.PreparedEvalQuery
+	river       *river.Client[pgx.Tx]
 }
 
 // New compiles the access policy.
