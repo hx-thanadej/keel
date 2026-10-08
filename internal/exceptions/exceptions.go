@@ -41,6 +41,8 @@ type Exception struct {
 	ExpiresAt    time.Time  `json:"expires_at"`
 	CreatedAt    time.Time  `json:"created_at"`
 	DecidedAt    *time.Time `json:"decided_at"`
+	ApprovedAt   *time.Time `json:"approved_at"`
+	RevokedAt    *time.Time `json:"revoked_at"`
 }
 
 // Request is what a requester submits.
@@ -75,11 +77,11 @@ type expireArgs struct {
 
 func (expireArgs) Kind() string { return "keel_exception_expire" }
 
-const cols = `id::text, project_id::text, finding_ids::text[], fingerprint, reason, state, requested_by, decided_by, decision_note, expires_at, created_at, decided_at`
+const cols = `id::text, project_id::text, finding_ids::text[], fingerprint, reason, state, requested_by, decided_by, decision_note, expires_at, created_at, decided_at, approved_at, revoked_at`
 
 func scan(r pgx.Row) (Exception, error) {
 	var e Exception
-	err := r.Scan(&e.ID, &e.ProjectID, &e.FindingIDs, &e.Fingerprint, &e.Reason, &e.State, &e.RequestedBy, &e.DecidedBy, &e.DecisionNote, &e.ExpiresAt, &e.CreatedAt, &e.DecidedAt)
+	err := r.Scan(&e.ID, &e.ProjectID, &e.FindingIDs, &e.Fingerprint, &e.Reason, &e.State, &e.RequestedBy, &e.DecidedBy, &e.DecisionNote, &e.ExpiresAt, &e.CreatedAt, &e.DecidedAt, &e.ApprovedAt, &e.RevokedAt)
 	return e, err
 }
 
@@ -160,7 +162,8 @@ func (s *Service) decide(ctx context.Context, tenant, id, to, note string, by ac
 		if to == "approved" && !cur.ExpiresAt.After(s.Now()) {
 			return fmt.Errorf("%w: it would already have expired; request a new one", ErrState)
 		}
-		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = $2, decided_by = $3, decision_note = nullif($4, ''), decided_at = now() WHERE id = $1 RETURNING `+cols,
+		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = $2, decided_by = $3, decision_note = nullif($4, ''), decided_at = now(),
+			approved_at = CASE WHEN $2 = 'approved' THEN now() END WHERE id = $1 RETURNING `+cols,
 			id, to, by.UID, note))
 		if err != nil {
 			return err
@@ -186,7 +189,7 @@ func (s *Service) Revoke(ctx context.Context, tenant, id, note string, by activi
 	var e Exception
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var err error
-		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = 'revoked', decision_note = $2, decided_at = now() WHERE id = $1 AND state = 'approved' RETURNING `+cols, id, note))
+		e, err = scan(tx.QueryRow(ctx, `UPDATE exceptions SET state = 'revoked', decision_note = $2, revoked_at = now() WHERE id = $1 AND state = 'approved' RETURNING `+cols, id, note))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrState
 		}

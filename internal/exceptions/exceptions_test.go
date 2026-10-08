@@ -93,3 +93,31 @@ func TestExceptionLifecycleWithDurableExpiry(t *testing.T) {
 		t.Fatalf("re-approve expired: %v", err)
 	}
 }
+
+func TestRevokeKeepsApprovalTime(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	tenant, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	svc := exceptions.New(s)
+	c, _ := flowtest.Client(t, s, svc.Register)
+	svc.SetClient(c)
+	e, err := svc.Create(ctx, tenant, exceptions.Request{Fingerprint: "vuln:CVE-2026-2:", Reason: "base image patch lands next sprint", ExpiresAt: time.Now().Add(time.Hour)}, eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(ctx, tenant, e.ID, "accepted risk", sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.ApprovedAt == nil || approved.RevokedAt != nil {
+		t.Fatalf("approved: approved_at %v revoked_at %v", approved.ApprovedAt, approved.RevokedAt)
+	}
+	revoked, err := svc.Revoke(ctx, tenant, e.ID, "patched early", sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.RevokedAt == nil || !revoked.DecidedAt.Equal(*approved.DecidedAt) || !revoked.ApprovedAt.Equal(*approved.ApprovedAt) {
+		t.Fatalf("revoke moved the approval: decided_at %v -> %v, approved_at %v -> %v, revoked_at %v",
+			approved.DecidedAt, revoked.DecidedAt, approved.ApprovedAt, revoked.ApprovedAt, revoked.RevokedAt)
+	}
+}
