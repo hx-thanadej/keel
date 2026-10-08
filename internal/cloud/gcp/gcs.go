@@ -1,0 +1,154 @@
+// Package gcp reads Google Cloud FOCUS exports from Cloud Storage. Keel
+// authenticates with Application Default Credentials restricted to keyless
+// kinds: workload identity federation (external_account), impersonation or
+// the GKE metadata server. Service-account key files are refused (ADR-0007).
+package gcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+
+	"github.com/hx-thanadej/keel/internal/cost"
+)
+
+// ReadOnlyScope is the Cloud Storage read scope.
+const ReadOnlyScope = "https://www.googleapis.com/auth/devstorage.read_only"
+
+// ErrKeyFile means ADC resolved to a long-lived service-account key.
+var ErrKeyFile = errors.New("gcp: service-account key files are not allowed; use workload identity federation")
+
+// Keyless returns a token source from Application Default Credentials,
+// refusing service-account key files.
+func Keyless(ctx context.Context, scopes ...string) (oauth2.TokenSource, error) {
+	creds, err := google.FindDefaultCredentials(ctx, scopes...)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkKeyless(creds.JSON); err != nil {
+		return nil, err
+	}
+	return creds.TokenSource, nil
+}
+
+func checkKeyless(raw []byte) error {
+	if len(raw) == 0 {
+		return nil // metadata server
+	}
+	var f struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return err
+	}
+	if f.Type == "service_account" {
+		return ErrKeyFile
+	}
+	return nil
+}
+
+// GCS lists and reads one bucket through the JSON API (cost.Objects with
+// ETags; generation is the content version).
+type GCS struct {
+	Bucket   string
+	Endpoint string // default https://storage.googleapis.com
+	Tokens   oauth2.TokenSource
+	HTTP     *http.Client
+}
+
+func (g GCS) base() string {
+	if g.Endpoint != "" {
+		return strings.TrimSuffix(g.Endpoint, "/")
+	}
+	return "https://storage.googleapis.com"
+}
+
+func (g GCS) do(ctx context.Context, u string) (*http.Response, error) {
+	tok, err := g.Tokens.Token()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	tok.SetAuthHeader(req)
+	c := g.HTTP
+	if c == nil {
+		c = &http.Client{Timeout: 5 * time.Minute}
+	}
+	res, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		_ = res.Body.Close()
+		return nil, fmt.Errorf("gcs %s: %s", res.Status, strings.TrimSpace(string(body)))
+	}
+	return res, nil
+}
+
+// ListWithETag lists objects under prefix, following page tokens.
+func (g GCS) ListWithETag(ctx context.Context, prefix string) ([]cost.ObjectInfo, error) {
+	var out []cost.ObjectInfo
+	page := ""
+	for {
+		q := url.Values{"prefix": {prefix}, "fields": {"items(name,generation),nextPageToken"}}
+		if page != "" {
+			q.Set("pageToken", page)
+		}
+		res, err := g.do(ctx, g.base()+"/storage/v1/b/"+url.PathEscape(g.Bucket)+"/o?"+q.Encode())
+		if err != nil {
+			return nil, err
+		}
+		var body struct {
+			Items []struct {
+				Name       string `json:"name"`
+				Generation string `json:"generation"`
+			} `json:"items"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		err = json.NewDecoder(io.LimitReader(res.Body, 64<<20)).Decode(&body)
+		_ = res.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("gcs list: %w", err)
+		}
+		for _, it := range body.Items {
+			out = append(out, cost.ObjectInfo{Key: it.Name, ETag: it.Generation})
+		}
+		if body.NextPageToken == "" {
+			return out, nil
+		}
+		page = body.NextPageToken
+	}
+}
+
+// List lists object names under prefix.
+func (g GCS) List(ctx context.Context, prefix string) ([]string, error) {
+	objs, err := g.ListWithETag(ctx, prefix)
+	keys := make([]string, len(objs))
+	for i, o := range objs {
+		keys[i] = o.Key
+	}
+	return keys, err
+}
+
+// Get reads an object's content.
+func (g GCS) Get(ctx context.Context, key string) ([]byte, error) {
+	res, err := g.do(ctx, g.base()+"/storage/v1/b/"+url.PathEscape(g.Bucket)+"/o/"+url.PathEscape(key)+"?alt=media")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Body.Close() }()
+	return io.ReadAll(io.LimitReader(res.Body, 4<<30))
+}

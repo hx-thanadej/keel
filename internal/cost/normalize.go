@@ -63,12 +63,18 @@ var tencentCategories = map[string]string{
 //     EffectiveCost 0 ("amortized"), and one zero-billed Usage row per day of
 //     its term carries the cost spread evenly ("amortization"), summing exactly.
 //
+// Azure's SubAccountId (an ARM path) becomes the bare subscription id.
 // Tencent also gets ServiceCategory from tencentCategories and a SkuId derived
 // from service and component, since its FOCUS export leaves both empty.
 func Normalize(provider string, lines []Line) []Line {
 	out := make([]Line, 0, len(lines))
 	var extra []Line
 	for _, l := range lines {
+		if provider == "azure" {
+			// Azure's SubAccountId is the subscription's ARM path; Cloud
+			// Accounts are registered by subscription id.
+			l.SubAccountID = strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(l.SubAccountID, "/subscriptions/"), "/SUBSCRIPTIONS/"))
+		}
 		if provider == "tencent" {
 			if l.ServiceCategory == "" {
 				l.ServiceCategory = tencentCategory(l.ServiceName)
