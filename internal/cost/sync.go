@@ -80,7 +80,7 @@ type SyncReport struct {
 	Skipped  []string     `json:"skipped"` // files for already-final periods
 }
 
-var billExt = []string{".csv", ".csv.gz", ".gz", ".zip"}
+var billExt = []string{".csv", ".csv.gz", ".gz", ".zip", ".parquet"}
 
 // Run loads every period with new files, and finalises periods whose
 // provider finality time has passed.
@@ -206,10 +206,18 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	for _, p := range periods {
 		// Files of this period that still exist, each at its current version.
 		var files []string
+		var newestSeen time.Time
+		newestDir := ""
 		for _, f := range known {
 			if f.period.Equal(p) && !slices.Contains(files, f.key) {
 				if etag, ok := current[f.key]; ok && etag == f.etag {
 					files = append(files, f.key)
+					// Export folders are named by run id (Azure) or
+					// overwritten in place (AWS), so the newest folder is
+					// the one Keel saw most recently, not the last by name.
+					if d := path.Dir(f.key); f.seen.After(newestSeen) || (f.seen.Equal(newestSeen) && d > newestDir) {
+						newestSeen, newestDir = f.seen, d
+					}
 				}
 			}
 		}
@@ -221,8 +229,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		case CumulativeFiles:
 			files = files[len(files)-1:]
 		case LatestExportFolder:
-			newest := path.Dir(files[len(files)-1])
-			files = slices.DeleteFunc(files, func(k string) bool { return path.Dir(k) != newest })
+			files = slices.DeleteFunc(files, func(k string) bool { return path.Dir(k) != newestDir })
 		}
 		var lines []Line
 		invoiced := true

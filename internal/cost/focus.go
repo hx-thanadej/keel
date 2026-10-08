@@ -46,12 +46,20 @@ var decimalRE = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 // ValidDecimal reports whether s is a plain decimal number.
 func ValidDecimal(s string) bool { return decimalRE.MatchString(s) }
 
-// ParseFOCUS reads a FOCUS CSV export, plain, gzip or zip (first .csv entry).
-// Columns are matched by name, so order and extra columns don't matter.
+// ParseFOCUS reads a FOCUS export: CSV (plain, gzip or zip with a .csv
+// entry) or Parquet (Azure and Google Cloud exports). Columns are matched by
+// name, so order and extra columns don't matter. Alibaba Cloud's standard
+// detailed bill is recognised by its headers and mapped to FOCUS.
 func ParseFOCUS(raw []byte) ([]Line, error) {
+	if isParquet(raw) {
+		return parseParquet(raw)
+	}
 	data, err := decompress(raw)
 	if err != nil {
 		return nil, err
+	}
+	if isParquet(data) {
+		return parseParquet(data)
 	}
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")) // UTF-8 BOM
 	r := csv.NewReader(bytes.NewReader(data))
@@ -64,9 +72,11 @@ func ParseFOCUS(raw []byte) ([]Line, error) {
 	for i, h := range header {
 		col[strings.TrimSpace(h)] = i
 	}
-	for _, c := range required {
-		if _, ok := col[c]; !ok {
-			return nil, fmt.Errorf("focus: required column %s missing", c)
+	has := func(c string) bool { _, ok := col[c]; return ok }
+	alibaba := isAlibabaBill(has)
+	if !alibaba {
+		if err := checkRequired(has); err != nil {
+			return nil, err
 		}
 	}
 	var out []Line
@@ -78,68 +88,118 @@ func ParseFOCUS(raw []byte) ([]Line, error) {
 		if err != nil {
 			return nil, fmt.Errorf("focus line %d: %w", n, err)
 		}
-		get := func(name string) string {
-			if i, ok := col[name]; ok && i < len(rec) {
-				return strings.TrimSpace(rec[i])
-			}
-			return ""
-		}
-		l := Line{
-			BillingAccountID: get("BillingAccountId"), SubAccountID: get("SubAccountId"), SubAccountName: get("SubAccountName"),
-			ChargeCategory: get("ChargeCategory"), ChargeClass: get("ChargeClass"), ChargeFrequency: get("ChargeFrequency"),
-			ServiceCategory: get("ServiceCategory"), ServiceName: get("ServiceName"), ServiceSubcat: get("ServiceSubcategory"),
-			SkuID: get("SkuId"), RegionID: get("RegionId"), AvailabilityZone: get("AvailabilityZone"),
-			ResourceID: get("ResourceId"), ResourceName: get("ResourceName"), ResourceType: get("ResourceType"),
-			PricingQuantity: get("PricingQuantity"), PricingUnit: get("PricingUnit"),
-			ConsumedQuantity: get("ConsumedQuantity"), ConsumedUnit: get("ConsumedUnit"),
-			ListCost: get("ListCost"), BilledCost: get("BilledCost"), EffectiveCost: get("EffectiveCost"),
-			ContractedCost: get("ContractedCost"), BillingCurrency: get("BillingCurrency"),
-			CommitmentDiscountID: get("CommitmentDiscountId"), CommitmentDiscountType: get("CommitmentDiscountType"),
-			CommitmentDiscountStatus: get("CommitmentDiscountStatus"), InvoiceID: get("InvoiceId"),
-			Tags: map[string]string{}, Vendor: map[string]string{},
-		}
-		for _, f := range []struct {
-			name string
-			dst  *time.Time
-		}{{"BillingPeriodStart", &l.BillingPeriodStart}, {"BillingPeriodEnd", &l.BillingPeriodEnd}, {"ChargePeriodStart", &l.ChargePeriodStart}, {"ChargePeriodEnd", &l.ChargePeriodEnd}} {
-			v := get(f.name)
-			if v == "" && f.name == "BillingPeriodEnd" {
-				continue
-			}
-			t, err := parseTime(v)
-			if err != nil {
-				return nil, fmt.Errorf("focus line %d: %s %q: %w", n, f.name, v, err)
-			}
-			*f.dst = t
-		}
-		if !ValidDecimal(l.BilledCost) {
-			return nil, fmt.Errorf("focus line %d: BilledCost %q is not a decimal", n, l.BilledCost)
-		}
-		for name, v := range map[string]string{"ListCost": l.ListCost, "EffectiveCost": l.EffectiveCost, "ContractedCost": l.ContractedCost, "PricingQuantity": l.PricingQuantity, "ConsumedQuantity": l.ConsumedQuantity} {
-			if v != "" && !ValidDecimal(v) {
-				return nil, fmt.Errorf("focus line %d: %s %q is not a decimal", n, name, v)
-			}
-		}
-		if tags := get("Tags"); tags != "" {
-			var m map[string]any
-			if err := json.Unmarshal([]byte(tags), &m); err != nil {
-				return nil, fmt.Errorf("focus line %d: Tags is not a JSON object: %w", n, err)
-			}
-			for k, v := range m {
-				l.Tags[k] = fmt.Sprint(v)
-			}
-		}
+		row := make(map[string]string, len(col))
 		for name, i := range col {
-			if strings.HasPrefix(name, "x_") && i < len(rec) && rec[i] != "" {
-				l.Vendor[name] = rec[i]
+			if i < len(rec) {
+				row[name] = rec[i]
 			}
+		}
+		if alibaba {
+			row = alibabaRow(row)
+		}
+		l, err := lineFrom(row)
+		if err != nil {
+			return nil, fmt.Errorf("focus line %d: %w", n, err)
 		}
 		out = append(out, l)
 	}
 }
 
+func checkRequired(has func(string) bool) error {
+	for _, c := range required {
+		if !has(c) {
+			return fmt.Errorf("focus: required column %s missing", c)
+		}
+	}
+	return nil
+}
+
+// lineFrom maps one row, by FOCUS column name, to a Line.
+func lineFrom(row map[string]string) (Line, error) {
+	get := func(name string) string { return strings.TrimSpace(row[name]) }
+	l := Line{
+		BillingAccountID: get("BillingAccountId"), SubAccountID: get("SubAccountId"), SubAccountName: get("SubAccountName"),
+		ChargeCategory: get("ChargeCategory"), ChargeClass: get("ChargeClass"), ChargeFrequency: get("ChargeFrequency"),
+		ServiceCategory: get("ServiceCategory"), ServiceName: get("ServiceName"), ServiceSubcat: get("ServiceSubcategory"),
+		SkuID: get("SkuId"), RegionID: get("RegionId"), AvailabilityZone: get("AvailabilityZone"),
+		ResourceID: get("ResourceId"), ResourceName: get("ResourceName"), ResourceType: get("ResourceType"),
+		PricingQuantity: get("PricingQuantity"), PricingUnit: get("PricingUnit"),
+		ConsumedQuantity: get("ConsumedQuantity"), ConsumedUnit: get("ConsumedUnit"),
+		ListCost: get("ListCost"), BilledCost: get("BilledCost"), EffectiveCost: get("EffectiveCost"),
+		ContractedCost: get("ContractedCost"), BillingCurrency: get("BillingCurrency"),
+		CommitmentDiscountID: get("CommitmentDiscountId"), CommitmentDiscountType: get("CommitmentDiscountType"),
+		CommitmentDiscountStatus: get("CommitmentDiscountStatus"), InvoiceID: get("InvoiceId"),
+		Tags: map[string]string{}, Vendor: map[string]string{},
+	}
+	for _, f := range []struct {
+		name string
+		dst  *time.Time
+	}{{"BillingPeriodStart", &l.BillingPeriodStart}, {"BillingPeriodEnd", &l.BillingPeriodEnd}, {"ChargePeriodStart", &l.ChargePeriodStart}, {"ChargePeriodEnd", &l.ChargePeriodEnd}} {
+		v := get(f.name)
+		if v == "" && f.name == "BillingPeriodEnd" {
+			continue
+		}
+		t, err := parseTime(v)
+		if err != nil {
+			return l, fmt.Errorf("%s %q: %w", f.name, v, err)
+		}
+		*f.dst = t
+	}
+	if !ValidDecimal(l.BilledCost) {
+		return l, fmt.Errorf("BilledCost %q is not a decimal", l.BilledCost)
+	}
+	for name, v := range map[string]string{"ListCost": l.ListCost, "EffectiveCost": l.EffectiveCost, "ContractedCost": l.ContractedCost, "PricingQuantity": l.PricingQuantity, "ConsumedQuantity": l.ConsumedQuantity} {
+		if v != "" && !ValidDecimal(v) {
+			return l, fmt.Errorf("%s %q is not a decimal", name, v)
+		}
+	}
+	// Tags; Google leaves it empty and carries labels in x_ columns, which
+	// its CSV exports hold as JSON (later sources win).
+	for _, c := range tagColumns {
+		if tags := get(c); tags != "" && tags != "[]" {
+			if err := parseTags(tags, l.Tags); err != nil {
+				return l, fmt.Errorf("%s: %w", c, err)
+			}
+		}
+	}
+	for name, v := range row {
+		// x_ columns; Alibaba writes X_.
+		if (strings.HasPrefix(name, "x_") || strings.HasPrefix(name, "X_")) && v != "" {
+			l.Vendor[name] = v
+		}
+	}
+	return l, nil
+}
+
+// parseTags reads Tags as a JSON object (FOCUS, Azure, AWS, Tencent) or as a
+// JSON array of {"key", "value"} pairs (Google Cloud's billing export shape).
+func parseTags(raw string, into map[string]string) error {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err == nil {
+		for k, v := range m {
+			into[k] = fmt.Sprint(v)
+		}
+		return nil
+	}
+	var kv []struct {
+		Key   string `json:"key"`
+		Value any    `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(raw), &kv); err != nil {
+		return errors.New("tags column is neither a JSON object nor a list of key/value pairs")
+	}
+	for _, p := range kv {
+		if p.Key != "" {
+			into[p.Key] = fmt.Sprint(p.Value)
+		}
+	}
+	return nil
+}
+
 func parseTime(v string) (time.Time, error) {
-	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05", "2006-01-02"} {
+	// RFC 3339; Azure FOCUS 1.0 without seconds; BigQuery CSV ("... UTC");
+	// plain date-times and dates as UTC.
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04Z07:00", "2006-01-02 15:04:05.999999999 MST", "2006-01-02 15:04:05", "2006-01-02"} {
 		if t, err := time.Parse(layout, v); err == nil {
 			return t.UTC(), nil
 		}

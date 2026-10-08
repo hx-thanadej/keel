@@ -93,7 +93,10 @@ import (
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
 	"github.com/hx-thanadej/keel/internal/ciidentity"
+	"github.com/hx-thanadej/keel/internal/cloud/alibaba"
 	awsadapter "github.com/hx-thanadej/keel/internal/cloud/aws"
+	"github.com/hx-thanadej/keel/internal/cloud/azure"
+	"github.com/hx-thanadej/keel/internal/cloud/gcp"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/controls"
 	"github.com/hx-thanadej/keel/internal/cost"
@@ -372,6 +375,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	if err := startAWSBillSync(ctx, st, evaluator); err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	if err := startMultiCloudBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
@@ -1292,4 +1299,68 @@ type failingInventory struct{ err error }
 
 func (f failingInventory) InstanceTypes(context.Context, string, []string) (map[string]string, error) {
 	return nil, f.err
+}
+
+// startMultiCloudBillSync loads FOCUS exports from Azure (Blob, workload
+// identity), Google Cloud (Cloud Storage, workload identity federation) and
+// Alibaba Cloud (OSS, RRSA) hourly when their bucket is configured (#153).
+// All three are keyless (ADR-0007).
+func startMultiCloudBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) error {
+	type source struct {
+		provider, account string
+		objects           cost.Objects
+		mode              cost.FileMode
+		prefix            string
+	}
+	var sources []source
+	if c := os.Getenv("KEEL_AZURE_BILL_CONTAINER"); c != "" {
+		acct, billing := os.Getenv("KEEL_AZURE_BILL_STORAGE_ACCOUNT"), os.Getenv("KEEL_AZURE_BILLING_ACCOUNT")
+		if acct == "" || billing == "" {
+			return errors.New("KEEL_AZURE_BILL_STORAGE_ACCOUNT and KEEL_AZURE_BILLING_ACCOUNT are required with KEEL_AZURE_BILL_CONTAINER")
+		}
+		auth, err := azure.FromEnv(azure.StorageScope)
+		if err != nil {
+			return err
+		}
+		sources = append(sources, source{"azure", billing, azure.Blob{Account: acct, Container: c, Auth: auth}, cost.LatestExportFolder, os.Getenv("KEEL_AZURE_BILL_PREFIX")})
+	}
+	if b := os.Getenv("KEEL_GCP_BILL_BUCKET"); b != "" {
+		billing := os.Getenv("KEEL_GCP_BILLING_ACCOUNT")
+		if billing == "" {
+			return errors.New("KEEL_GCP_BILLING_ACCOUNT is required with KEEL_GCP_BILL_BUCKET")
+		}
+		ts, err := gcp.Keyless(ctx, gcp.ReadOnlyScope)
+		if err != nil {
+			return err
+		}
+		sources = append(sources, source{"gcp", billing, gcp.GCS{Bucket: b, Tokens: ts}, cost.LatestExportFolder, os.Getenv("KEEL_GCP_BILL_PREFIX")})
+	}
+	if b := os.Getenv("KEEL_ALIBABA_BILL_BUCKET"); b != "" {
+		payer := os.Getenv("KEEL_ALIBABA_PAYER_ACCOUNT")
+		if payer == "" {
+			return errors.New("KEEL_ALIBABA_PAYER_ACCOUNT is required with KEEL_ALIBABA_BILL_BUCKET")
+		}
+		creds, err := alibaba.RRSAFromEnv()
+		if err != nil {
+			return err
+		}
+		// Each delivery is month-to-date in a timestamped folder.
+		sources = append(sources, source{"alibaba", payer, alibaba.OSS{Bucket: b, Region: envOr("KEEL_ALIBABA_REGION", "ap-southeast-1"), Creds: creds}, cost.LatestExportFolder, os.Getenv("KEEL_ALIBABA_BILL_PREFIX")})
+	}
+	for _, src := range sources {
+		bs := &cost.BillSync{Ingester: &cost.Ingester{Store: st}, Objects: src.objects, Provider: src.provider, BillingAccountID: src.account, Prefix: src.prefix, Mode: src.mode}
+		go every(ctx, time.Hour, src.provider+" bill sync", func(ctx context.Context) error {
+			rep, err := bs.Run(ctx)
+			if err != nil {
+				slog.Error("ALERT "+src.provider+" bill sync failed", "err", err)
+				return nil
+			}
+			slog.Info(src.provider+" bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads))
+			if len(rep.Loads) > 0 {
+				evaluate(ctx, ev)
+			}
+			return nil
+		})
+	}
+	return nil
 }
