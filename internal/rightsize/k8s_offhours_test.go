@@ -105,3 +105,25 @@ func TestK8sOffHoursNeverForProduction(t *testing.T) {
 		t.Fatalf("prod got %+v %+v", res, recs)
 	}
 }
+
+func TestK8sOffHoursNeedsEveryContainersRequest(t *testing.T) {
+	w := k8sOffHoursWorld(t, "dev")
+	var envID string
+	must(t, w.s.InTenant(context.Background(), w.tat, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `SELECT id::text FROM environments WHERE name = 'dev'`).Scan(&envID)
+	}))
+	var sums []utilisation.Summary
+	for i := 1; i <= 14; i++ { // a sidecar without a CPU request, busy around the clock
+		hourly := make([]float64, 24)
+		for h := range hourly {
+			hourly[h] = 0.3
+		}
+		sums = append(sums, utilisation.Summary{Provider: "k8s", ResourceID: "dev-tke/tat-crm/api/proxy", ResourceType: "k8s_container", Metric: "cpu_cores", Day: asOf.AddDate(0, 0, -i),
+			Samples: 2 * 1440, P95: 0.3, Max: 0.3, Hourly: hourly, Cluster: "dev-tke", Namespace: "tat-crm", Workload: "api", Container: "proxy"})
+	}
+	must(t, utilisation.Store{Store: w.s}.Save(context.Background(), w.tat, &w.project, &envID, sums))
+	res, recs := k8sOffHours(t, w)
+	if len(recs) != 0 || res.Skipped["no_request"] != 1 {
+		t.Fatalf("got %+v %+v", res, recs)
+	}
+}

@@ -44,10 +44,77 @@ type K8sResult struct {
 type container struct {
 	id, cluster, ns, workload, ctr string
 	project, env                   *string
+	prod                           bool
 	days                           map[time.Time]bool
 	cpuP95, memMax                 float64
 	cpuReq, memReq                 float64
 	samples                        int
+	cpuHourly                      []cpuHours
+}
+
+// cpuHours is one UTC day of per-hour CPU maxima in cores (-1: no sample).
+type cpuHours struct {
+	day    time.Time
+	hourly []float64
+}
+
+// loadContainers reads k8s_container utilisation in [from, to): per
+// container the latest requests and owner, the highest daily CPU p95 and
+// memory maximum, CPU samples (for replicas) and hourly CPU maxima.
+func loadContainers(ctx context.Context, tx pgx.Tx, from, to time.Time) (map[string]*container, error) {
+	rows, err := tx.Query(ctx, `SELECT u.resource_id, u.metric, u.day, u.p95, u.max, u.samples, u.request, u.project_id::text, u.environment_id::text,
+			coalesce(e.name IN ('prod', 'production', 'prd'), false), u.labels, u.hourly_max
+		FROM utilisation_daily u LEFT JOIN environments e ON e.id = u.environment_id
+		WHERE u.resource_type = 'k8s_container' AND u.day >= $1 AND u.day < $2 ORDER BY u.day`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cs := map[string]*container{}
+	for rows.Next() {
+		var id, metric string
+		var day time.Time
+		var p95, mx float64
+		var samples int
+		var req *float64
+		var project, env *string
+		var prod bool
+		var labels map[string]string
+		var hourly []float64
+		if err := rows.Scan(&id, &metric, &day, &p95, &mx, &samples, &req, &project, &env, &prod, &labels, &hourly); err != nil {
+			return nil, err
+		}
+		c := cs[id]
+		if c == nil {
+			c = &container{id: id, cluster: labels["cluster"], ns: labels["namespace"], workload: labels["workload"], ctr: labels["container"], days: map[time.Time]bool{}}
+			cs[id] = c
+		}
+		c.project, c.env, c.prod = project, env, prod
+		c.days[day] = true
+		switch metric {
+		case "cpu_cores":
+			c.cpuP95 = math.Max(c.cpuP95, p95)
+			c.samples += samples
+			if req != nil {
+				c.cpuReq = *req // latest (rows ordered by day)
+			}
+			if hourly != nil {
+				c.cpuHourly = append(c.cpuHourly, cpuHours{day: day, hourly: hourly})
+			}
+		case "memory_bytes":
+			c.memMax = math.Max(c.memMax, mx)
+			if req != nil {
+				c.memReq = *req
+			}
+		}
+	}
+	return cs, rows.Err()
+}
+
+// replicas is a container's average pod count: CPU samples (one a minute
+// per pod) over its observed days, at least 1.
+func replicas(c *container) float64 {
+	return math.Max(1, float64(c.samples)/(float64(max(len(c.days), 1))*1440))
 }
 
 // Run evaluates every Tenant.
@@ -78,65 +145,15 @@ func (e K8sEngine) tenant(ctx context.Context, tenant string, res *K8sResult) er
 	asOf := time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
 	from := asOf.AddDate(0, 0, -lookbackDays)
 
-	cs := map[string]*container{}
+	var cs map[string]*container
 	var currency string
-	prodEnv := map[string]bool{}
 	err := e.Service.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT currency FROM tenants WHERE id = $1`, tenant).Scan(&currency); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT id::text FROM environments WHERE name IN ('prod', 'production', 'prd')`)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			prodEnv[id] = true
-		}
-		rows.Close()
-		rows, err = tx.Query(ctx, `SELECT resource_id, metric, day, p95, max, samples, request, project_id::text, environment_id::text, labels
-			FROM utilisation_daily WHERE resource_type = 'k8s_container' AND day >= $1 AND day < $2 ORDER BY day`, from, asOf)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id, metric string
-			var day time.Time
-			var p95, mx float64
-			var samples int
-			var req *float64
-			var project, env *string
-			var labels map[string]string
-			if err := rows.Scan(&id, &metric, &day, &p95, &mx, &samples, &req, &project, &env, &labels); err != nil {
-				return err
-			}
-			c := cs[id]
-			if c == nil {
-				c = &container{id: id, cluster: labels["cluster"], ns: labels["namespace"], workload: labels["workload"], ctr: labels["container"], days: map[time.Time]bool{}}
-				cs[id] = c
-			}
-			c.project, c.env = project, env
-			c.days[day] = true
-			switch metric {
-			case "cpu_cores":
-				c.cpuP95 = math.Max(c.cpuP95, p95)
-				c.samples += samples
-				if req != nil {
-					c.cpuReq = *req // latest (rows ordered by day)
-				}
-			case "memory_bytes":
-				c.memMax = math.Max(c.memMax, mx)
-				if req != nil {
-					c.memReq = *req
-				}
-			}
-		}
-		return rows.Err()
+		var err error
+		cs, err = loadContainers(ctx, tx, from, asOf)
+		return err
 	})
 	if err != nil {
 		return err
@@ -164,7 +181,7 @@ func (e K8sEngine) tenant(ctx context.Context, tenant string, res *K8sResult) er
 		}
 		span := int(asOf.Sub(first).Hours() / 24)
 		confidence := math.Min(1, float64(days)/prodHistory) * float64(days) / float64(max(span, 1))
-		if c.env != nil && prodEnv[*c.env] && (days < prodHistory || confidence < prodConfidence) {
+		if c.prod && (days < prodHistory || confidence < prodConfidence) {
 			res.Skipped["low_confidence_prod"]++
 			continue
 		}
@@ -177,10 +194,9 @@ func (e K8sEngine) tenant(ctx context.Context, tenant string, res *K8sResult) er
 			res.Skipped["no_change"]++
 			continue
 		}
-		replicas := float64(c.samples) / float64(days*1440)
-		replicas = math.Max(1, math.Round(replicas*10)/10)
+		pods := math.Round(replicas(c)*10) / 10
 		p := prices[deref(c.env)]
-		saving := ((c.cpuReq-recCPU)*p.perCore + (reqMemMiB-recMemMiB)/1024*p.perGiB) * replicas * 30
+		saving := ((c.cpuReq-recCPU)*p.perCore + (reqMemMiB-recMemMiB)/1024*p.perGiB) * pods * 30
 		risk := map[string]any{"performance": "low", "reversible": true, "restart": "rolling (or in-place resize on Kubernetes ≥1.35)"}
 		if under {
 			risk["under_provisioned"] = true
@@ -191,7 +207,7 @@ func (e K8sEngine) tenant(ctx context.Context, tenant string, res *K8sResult) er
 			ProjectID: c.project, EnvironmentID: c.env, Action: "resize_requests",
 			Current:     map[string]any{"cpu": milli(c.cpuReq), "memory": fmt.Sprintf("%.0fMi", reqMemMiB)},
 			Recommended: map[string]any{"cpu": milli(recCPU), "memory": fmt.Sprintf("%.0fMi", recMemMiB)},
-			Evidence: map[string]any{"lookback_days": days, "replicas": replicas, "cpu_p95_max": milli(c.cpuP95), "memory_max": fmt.Sprintf("%.0fMi", c.memMax/(1<<20)),
+			Evidence: map[string]any{"lookback_days": days, "replicas": pods, "cpu_p95_max": milli(c.cpuP95), "memory_max": fmt.Sprintf("%.0fMi", c.memMax/(1<<20)),
 				"method": "max daily p95 CPU; max memory × 1.15", "cluster": c.cluster, "namespace": c.ns, "workload": c.workload, "container": c.ctr,
 				"price_per_core_month": fmt.Sprintf("%.2f", p.perCore*30), "price_per_gib_month": fmt.Sprintf("%.2f", p.perGiB*30)},
 			MonthlySavings: new(big.Rat).SetFloat64(saving).FloatString(2), Currency: currency, SavingsBasis: "effective",
@@ -219,9 +235,7 @@ type price struct{ perCore, perGiB float64 } // per day, Tenant currency
 func (e K8sEngine) unitPrices(ctx context.Context, tenant, currency string, cs map[string]*container, from, to time.Time) (map[string]price, error) {
 	requested := map[string]float64{} // env → core-equivalents requested
 	for _, c := range cs {
-		days := float64(max(len(c.days), 1))
-		replicas := math.Max(1, float64(c.samples)/(days*1440))
-		requested[deref(c.env)] += (c.cpuReq + c.memReq/(1<<30)*gibPerCorePrice) * replicas
+		requested[deref(c.env)] += (c.cpuReq + c.memReq/(1<<30)*gibPerCorePrice) * replicas(c)
 	}
 	out := map[string]price{}
 	err := e.Service.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
