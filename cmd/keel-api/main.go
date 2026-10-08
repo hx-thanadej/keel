@@ -351,6 +351,19 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	deps.Access = &api.AccessDeps{Authz: az, Service: acc}
+	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
+		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
+		standing := access.Standing{Store: st, Directory: dir, Users: func(account string) (access.Users, error) {
+			return tencent.NewCAMUsers(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+		}}
+		go daily(ctx, "standing access", func(ctx context.Context) error {
+			res, err := standing.Run(ctx)
+			if err == nil {
+				slog.Info("standing production access", "accounts", res.Accounts, "standing", res.Standing, "excused", res.Excused)
+			}
+			return err
+		})
+	}
 	excs := exceptions.New(st)
 	engine, stopJobs, err := startFlows(ctx, st, defs, excs, acc)
 	if err != nil {

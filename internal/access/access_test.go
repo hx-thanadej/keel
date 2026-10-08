@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -49,15 +50,15 @@ func (f *fakeDir) Unassign(_ context.Context, cfg string, acct int64, user strin
 	delete(f.assignments, fmt.Sprintf("%s|%d|%s", cfg, acct, user))
 	return nil
 }
-func (f *fakeDir) Assignments(context.Context, int64) ([]access.Assignment, error) {
+func (f *fakeDir) Assignments(_ context.Context, acct int64) ([]access.Assignment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []access.Assignment
 	for k := range f.assignments {
-		var cfg, user string
-		var acct int64
-		_, _ = fmt.Sscanf(k, "%s", &cfg)
-		out = append(out, access.Assignment{RoleConfiguration: cfg, PrincipalID: user, PrincipalType: "User", RoleName: fmt.Sprint(acct)})
+		parts := strings.Split(k, "|")
+		if parts[1] == fmt.Sprint(acct) {
+			out = append(out, access.Assignment{RoleConfiguration: parts[0], RoleName: parts[0], PrincipalID: parts[2], PrincipalType: "User"})
+		}
 	}
 	return out, nil
 }

@@ -146,3 +146,40 @@ func (b Boundaries) PutBoundary(ctx context.Context, roleName string, policyID i
 	}
 	return nil
 }
+
+// CAMUsers lists CAM sub-users of one member account (access.Users).
+type CAMUsers struct {
+	API interface {
+		ListUsersWithContext(context.Context, *cam.ListUsersRequest) (*cam.ListUsersResponse, error)
+	}
+}
+
+// Users implements access.Users.
+func (u CAMUsers) Users(ctx context.Context) ([]string, error) {
+	res, err := u.API.ListUsersWithContext(ctx, cam.NewListUsersRequest())
+	if err != nil {
+		return nil, fmt.Errorf("ListUsers: %w", err)
+	}
+	var out []string
+	if res.Response != nil {
+		for _, s := range res.Response.Data {
+			if s != nil && s.Name != nil {
+				out = append(out, *s.Name)
+			}
+		}
+	}
+	return out, nil
+}
+
+// NewCAMUsers builds the lister for one member account.
+func NewCAMUsers(creds common.Provider) (CAMUsers, error) {
+	api, err := NewCAM(creds)
+	if err != nil {
+		return CAMUsers{}, err
+	}
+	c, ok := api.(*cam.Client)
+	if !ok {
+		return CAMUsers{}, fmt.Errorf("unexpected CAM client")
+	}
+	return CAMUsers{API: c}, nil
+}
