@@ -22,7 +22,10 @@ import (
 // in x_ProjectLabels, x_Labels and x_Tags (repeated Key/Value records).
 var tagColumns = []string{"x_ProjectLabels", "x_Labels", "x_Tags", "Tags"}
 
-type kv struct{ keys, values []string }
+type kv struct {
+	keys   []*string
+	values []string
+}
 
 func isParquet(b []byte) bool {
 	return len(b) >= 8 && string(b[:4]) == "PAR1" && string(b[len(b)-4:]) == "PAR1"
@@ -80,15 +83,17 @@ func parseParquet(raw []byte) ([]Line, error) {
 					t = &kv{}
 					nested[p[0]] = t
 				}
+				// Key and value leaves pair by entry position; a null key
+				// keeps its slot so later values stay on their own keys.
 				switch strings.ToLower(p[len(p)-1]) {
 				case "key":
+					var k *string
 					if !v.IsNull() {
-						t.keys = append(t.keys, s)
+						k = &s
 					}
+					t.keys = append(t.keys, k)
 				case "value":
-					if len(t.values) < len(t.keys) {
-						t.values = append(t.values, s)
-					}
+					t.values = append(t.values, s)
 				}
 			}
 			// Nested labels become Tags; later sources win (Google: project
@@ -98,9 +103,12 @@ func parseParquet(raw []byte) ([]Line, error) {
 				for _, c := range tagColumns {
 					if t := nested[c]; t != nil {
 						for j, key := range t.keys {
-							m[key] = ""
+							if key == nil {
+								continue
+							}
+							m[*key] = ""
 							if j < len(t.values) {
-								m[key] = t.values[j]
+								m[*key] = t.values[j]
 							}
 						}
 					}

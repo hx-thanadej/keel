@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,11 +61,46 @@ func TestRRSAAndSignedOSS(t *testing.T) {
 	}
 }
 
-// The V1 signature for a known request (OSS documentation's algorithm:
-// base64(HMAC-SHA1(secret, VERB\nMD5\nType\nDate\nheaders+resource))).
+// Known-answer vector, derived once with
+// printf 'GET\n\n\nWed, 07 Oct 2026 03:00:00 GMT\nx-oss-security-token:tok\n/b/k' | openssl dgst -sha1 -hmac secret -binary | base64
 func TestSignV1(t *testing.T) {
 	got := sign(Credentials{AccessKeyID: "id", AccessKeySecret: "secret", SecurityToken: "tok"}, "Wed, 07 Oct 2026 03:00:00 GMT", "/b/k")
-	if got[:7] != "OSS id:" || len(got) != 7+28 {
-		t.Fatalf("%q", got)
+	if want := "OSS id:CMqOBR2DDOO4uBLMwSaSAy4iNBc="; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// OSS's SignatureDoesNotMatch body echoes StringToSign, which carries the
+// STS security token; STS errors may echo request inputs.
+func TestErrorsOmitResponseBodies(t *testing.T) {
+	const token = "CAIS-SECRET-TOKEN"
+	oss := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match</Message><RequestId>RID-1</RequestId><HostId>b.oss</HostId><StringToSign>GET\n\n\nDate\nx-oss-security-token:`+token+`\n/b/</StringToSign></Error>`)
+	}))
+	t.Cleanup(oss.Close)
+	o := OSS{Bucket: "b", Endpoint: oss.URL, Creds: staticCreds{Credentials{AccessKeyID: "STS.id", AccessKeySecret: "s", SecurityToken: token}}}
+	_, err := o.ListWithETag(context.Background(), "")
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "SignatureDoesNotMatch") || !strings.Contains(err.Error(), "RID-1") {
+		t.Fatalf("oss error %v: want status, Code and RequestId only", err)
+	}
+
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"Code":"InvalidParameter.OIDCToken","Message":"OIDCToken `+token+` is invalid","RequestId":"RID-2"}`)
+	}))
+	t.Cleanup(sts.Close)
+	_, err = (&RRSA{RoleArn: "r", ProviderArn: "p", TokenFile: tokenFile, Endpoint: sts.URL}).Credentials(context.Background())
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "InvalidParameter.OIDCToken") || !strings.Contains(err.Error(), "RID-2") {
+		t.Fatalf("sts error %v: want status, Code and RequestId only", err)
+	}
+}
+
+type staticCreds struct{ c Credentials }
+
+func (s staticCreds) Credentials(context.Context) (Credentials, error) { return s.c, nil }

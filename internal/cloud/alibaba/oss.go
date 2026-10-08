@@ -96,14 +96,15 @@ func (r *RRSA) Credentials(ctx context.Context) (Credentials, error) {
 			SecurityToken   string `json:"SecurityToken"`
 			Expiration      string `json:"Expiration"`
 		} `json:"Credentials"`
-		Code    string `json:"Code"`
-		Message string `json:"Message"`
+		Code      string `json:"Code"`
+		RequestID string `json:"RequestId"`
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&out); err != nil {
 		return Credentials{}, fmt.Errorf("alibaba sts: %s: %w", res.Status, err)
 	}
 	if res.StatusCode != http.StatusOK || out.Credentials.AccessKeyID == "" {
-		return Credentials{}, fmt.Errorf("alibaba sts: %s %s %s", res.Status, out.Code, out.Message)
+		// Message is omitted: it can echo request inputs such as the OIDC token.
+		return Credentials{}, fmt.Errorf("alibaba sts: %s code=%s request_id=%s", res.Status, out.Code, out.RequestID)
 	}
 	exp, err := time.Parse(time.RFC3339, out.Credentials.Expiration)
 	if err != nil {
@@ -167,9 +168,15 @@ func (o OSS) get(ctx context.Context, path, rawQuery, resource string) (*http.Re
 		return nil, err
 	}
 	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		// Only Code and RequestId: SignatureDoesNotMatch echoes StringToSign,
+		// which carries the STS security token.
+		var e struct {
+			Code      string `xml:"Code"`
+			RequestID string `xml:"RequestId"`
+		}
+		_ = xml.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&e)
 		_ = res.Body.Close()
-		return nil, fmt.Errorf("oss %s: %s", res.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("oss %s: code=%s request_id=%s", res.Status, e.Code, e.RequestID)
 	}
 	return res, nil
 }

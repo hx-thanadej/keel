@@ -1,7 +1,9 @@
 // Package gcp reads Google Cloud FOCUS exports from Cloud Storage. Keel
 // authenticates with Application Default Credentials restricted to keyless
-// kinds: workload identity federation (external_account), impersonation or
-// the GKE metadata server. Service-account key files are refused (ADR-0007).
+// kinds: the GKE metadata server, workload identity federation
+// (external_account), or impersonation whose source is itself keyless.
+// Service-account keys, user refresh tokens and unknown types are refused
+// (ADR-0007).
 package gcp
 
 import (
@@ -12,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,11 +27,11 @@ import (
 // ReadOnlyScope is the Cloud Storage read scope.
 const ReadOnlyScope = "https://www.googleapis.com/auth/devstorage.read_only"
 
-// ErrKeyFile means ADC resolved to a long-lived service-account key.
-var ErrKeyFile = errors.New("gcp: service-account key files are not allowed; use workload identity federation")
+// ErrKeyFile means ADC resolved to something other than a keyless credential.
+var ErrKeyFile = errors.New("gcp: only keyless credentials are allowed (metadata server, external_account, or impersonation from one); use workload identity federation")
 
 // Keyless returns a token source from Application Default Credentials,
-// refusing service-account key files.
+// refusing anything that carries a long-lived secret.
 func Keyless(ctx context.Context, scopes ...string) (oauth2.TokenSource, error) {
 	creds, err := google.FindDefaultCredentials(ctx, scopes...)
 	if err != nil {
@@ -40,20 +43,35 @@ func Keyless(ctx context.Context, scopes ...string) (oauth2.TokenSource, error) 
 	return creds.TokenSource, nil
 }
 
+type adcFile struct {
+	Type   string   `json:"type"`
+	Source *adcFile `json:"source_credentials"`
+}
+
+// checkKeyless allow-lists keyless ADC shapes. Errors name the credential
+// types only, never the file's content.
 func checkKeyless(raw []byte) error {
 	if len(raw) == 0 {
 		return nil // metadata server
 	}
-	var f struct {
-		Type string `json:"type"`
-	}
+	var f adcFile
 	if err := json.Unmarshal(raw, &f); err != nil {
-		return err
+		return fmt.Errorf("%w (credentials file is not valid JSON)", ErrKeyFile)
 	}
-	if f.Type == "service_account" {
-		return ErrKeyFile
+	chain := []string{}
+	for c := &f; ; c = c.Source {
+		if c == nil {
+			return fmt.Errorf("%w (%s without source_credentials)", ErrKeyFile, strings.Join(chain, " wrapping "))
+		}
+		chain = append(chain, strconv.Quote(c.Type))
+		switch c.Type {
+		case "external_account":
+			return nil
+		case "impersonated_service_account":
+			continue
+		}
+		return fmt.Errorf("%w (got %s)", ErrKeyFile, strings.Join(chain, " wrapping "))
 	}
-	return nil
 }
 
 // GCS lists and reads one bucket through the JSON API (cost.Objects with
@@ -91,9 +109,14 @@ func (g GCS) do(ctx context.Context, u string) (*http.Response, error) {
 		return nil, err
 	}
 	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&body)
 		_ = res.Body.Close()
-		return nil, fmt.Errorf("gcs %s: %s", res.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("gcs %s: %s", res.Status, clip(body.Error.Message))
 	}
 	return res, nil
 }
@@ -151,4 +174,13 @@ func (g GCS) Get(ctx context.Context, key string) ([]byte, error) {
 	}
 	defer func() { _ = res.Body.Close() }()
 	return io.ReadAll(io.LimitReader(res.Body, 4<<30))
+}
+
+// clip keeps an error message to one bounded line.
+func clip(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
 }

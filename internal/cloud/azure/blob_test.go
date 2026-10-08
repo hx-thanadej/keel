@@ -82,3 +82,20 @@ func TestFromEnvNeedsWorkloadIdentity(t *testing.T) {
 		t.Fatal("expected an error without workload identity")
 	}
 }
+
+func TestBlobErrorOmitsRawBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = fmt.Fprint(w, "\ufeff<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>AuthorizationPermissionMismatch</Code><Message>This request is not authorized. RequestId:r-1</Message><AuthenticationErrorDetail>Bearer at-SECRET</AuthenticationErrorDetail></Error>")
+	}))
+	t.Cleanup(srv.Close)
+	b := Blob{Account: "a", Container: "exports", Endpoint: srv.URL, Auth: staticToken("at-SECRET")}
+	_, err := b.ListWithETag(context.Background(), "")
+	if err == nil || strings.Contains(err.Error(), "at-SECRET") || !strings.Contains(err.Error(), "AuthorizationPermissionMismatch") || !strings.Contains(err.Error(), "This request is not authorized.") {
+		t.Fatalf("error %v: want Code and Message only", err)
+	}
+}
+
+type staticToken string
+
+func (s staticToken) Token(context.Context) (string, error) { return string(s), nil }
