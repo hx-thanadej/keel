@@ -30,17 +30,17 @@ async function save(url: string, filename: string) {
   document.body.appendChild(a)
   a.click()
   a.remove()
-  URL.revokeObjectURL(href)
+  setTimeout(() => URL.revokeObjectURL(href), 1000)
 }
 
 const SectionError = ({ text }: { text?: string }) => (text ? <p className="notice error" role="alert">{text}</p> : null)
 
-export function InsightsView({ tenantId, canSubmit }: { tenantId: string; canSubmit: boolean }) {
+export function InsightsView({ tenantId, canSubmit, canGenerate }: { tenantId: string; canSubmit: boolean; canGenerate: boolean }) {
   const [months, setMonths] = useState<DoraReport[]>([])
   const [cards, setCards] = useState<ScorecardReport | null>(null)
   const [reports, setReports] = useState<ReportSummary[]>([])
   const [maturity, setMaturity] = useState<MaturityView | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({})
   const [errors, setErrors] = useState<Errors>({})
   const [reload, setReload] = useState(0)
 
@@ -75,17 +75,32 @@ export function InsightsView({ tenantId, canSubmit }: { tenantId: string; canSub
     }
   }, [tenantId, reload])
 
-  const download = (url: string, filename: string) => (e: React.MouseEvent) => {
+  const setActionError = (key: string, text?: string) =>
+    setActionErrors((prev) => {
+      const { [key]: _, ...rest } = prev
+      return text ? { ...rest, [key]: text } : rest
+    })
+
+  const download = (key: string, url: string, filename: string) => (e: React.MouseEvent) => {
     e.preventDefault()
-    setError(null)
-    save(url, filename).catch((err) => setError(message(err)))
+    setActionError(key)
+    save(url, filename).catch((err) => setActionError(key, message(err)))
+  }
+
+  const regenerate = async (period: string) => {
+    const key = `regenerate:${period}`
+    setActionError(key)
+    try {
+      await insights.regenerateReport(tenantId, period)
+      setReload((n) => n + 1)
+    } catch (e) {
+      setActionError(key, message(e))
+    }
   }
 
   const latest = months[months.length - 1]
   return (
     <section className="delivery">
-      {error && <p className="notice error">{error}</p>}
-
       <h2>Delivery performance (production)</h2>
       <SectionError text={errors.dora} />
       {latest && (
@@ -110,15 +125,24 @@ export function InsightsView({ tenantId, canSubmit }: { tenantId: string; canSub
       {!errors.reports && reports.length === 0 && <p className="muted">The first report appears on the first of next month.</p>}
       {reports.map((r) => (
         <article key={r.period} className="card finding">
-          <strong>{monthName(r.period + '-01T00:00:00Z')}</strong>
-          <a href={insights.reportURL(tenantId, r.period)} download={`keel-report-${r.period}.html`} onClick={download(insights.reportURL(tenantId, r.period), `keel-report-${r.period}.html`)}>
+          <strong>
+            {monthName(r.period + '-01T00:00:00Z')}
+            {!r.final && <span className="meta"> provisional</span>}
+          </strong>
+          <a href={insights.reportURL(tenantId, r.period)} download={`keel-report-${r.period}.html`} onClick={download(`report:${r.period}`, insights.reportURL(tenantId, r.period), `keel-report-${r.period}.html`)}>
             Download report {r.period}
           </a>
+          {canGenerate && (
+            <button type="button" onClick={() => regenerate(r.period)}>
+              Regenerate {r.period}
+            </button>
+          )}
+          <SectionError text={actionErrors[`report:${r.period}`] ?? actionErrors[`regenerate:${r.period}`]} />
         </article>
       ))}
 
       <h2>Evidence export</h2>
-      <Evidence tenantId={tenantId} download={download} />
+      <Evidence tenantId={tenantId} download={download} error={actionErrors.evidence} />
 
       <h2>Platform maturity</h2>
       <SectionError text={errors.maturity} />
@@ -126,14 +150,16 @@ export function InsightsView({ tenantId, canSubmit }: { tenantId: string; canSub
         <Maturity view={maturity} canSubmit={canSubmit} onSubmit={async (q, a) => {
           try {
             await insights.submitMaturity(tenantId, q, a)
+            setActionError('maturity')
             setReload((n) => n + 1)
           } catch (e) {
-            setError(message(e))
+            setActionError('maturity', message(e))
           }
         }} />
       ) : (
         !errors.maturity && <p className="muted">No maturity data.</p>
       )}
+      <SectionError text={actionErrors.maturity} />
     </section>
   )
 }
@@ -259,21 +285,24 @@ function Decisions({ tenantId }: { tenantId: string }) {
   )
 }
 
-function Evidence({ tenantId, download }: { tenantId: string; download: (url: string, filename: string) => (e: React.MouseEvent) => void }) {
+function Evidence({ tenantId, download, error }: { tenantId: string; download: (key: string, url: string, filename: string) => (e: React.MouseEvent) => void; error?: string }) {
   const [from, setFrom] = useState(monthStarts(3)[0])
   const [to, setTo] = useState(monthStarts(1)[1])
   return (
-    <div className="toolbar">
-      <label>
-        From <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-      </label>
-      <label>
-        To <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-      </label>
-      <a className="button primary" href={insights.evidenceURL(tenantId, from, to)} download={`keel-evidence-${from}-${to}.json`} onClick={download(insights.evidenceURL(tenantId, from, to), `keel-evidence-${from}-${to}.json`)}>
-        Export evidence
-      </a>
-    </div>
+    <>
+      <div className="toolbar">
+        <label>
+          From <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </label>
+        <label>
+          To <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </label>
+        <a className="button primary" href={insights.evidenceURL(tenantId, from, to)} download={`keel-evidence-${from}-${to}.json`} onClick={download('evidence', insights.evidenceURL(tenantId, from, to), `keel-evidence-${from}-${to}.json`)}>
+          Export evidence
+        </a>
+      </div>
+      <SectionError text={error} />
+    </>
   )
 }
 

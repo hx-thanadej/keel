@@ -94,6 +94,7 @@ type Access struct {
 type Summary struct {
 	Period      string    `json:"period"`
 	GeneratedAt time.Time `json:"generated_at"`
+	Final       bool      `json:"final"` // false while some cost data may still change
 }
 
 // Service generates and serves reports.
@@ -352,7 +353,7 @@ func (s Service) generate(ctx context.Context, tenant string, period time.Time, 
 func (s Service) List(ctx context.Context, tenant string) ([]Summary, error) {
 	var out []Summary
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT to_char(period, 'YYYY-MM'), generated_at FROM tenant_reports ORDER BY period DESC`)
+		rows, err := tx.Query(ctx, `SELECT to_char(period, 'YYYY-MM'), generated_at, coalesce((data->>'final')::boolean, false) FROM tenant_reports ORDER BY period DESC`)
 		if err != nil {
 			return err
 		}

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from '../App'
 import { visibleTenantIds, type Principal } from '../api'
@@ -296,7 +296,7 @@ describe('finops screens', () => {
       [`/v1/tenants/${tat}/dora`]: () => dora(12),
       [`/v1/tenants/${tat}/scorecards`]: { version: 'keel-scorecard@1', score: 60, teams: [], services: [
         { service_id: 's1', service: 'crm-api', team_id: 't', score: 60, previous_score: 40, checks: [{ name: 'owner', control: 'PO.2.1', pass: true }, { name: 'scanned', control: 'PW.7.2', pass: false, why: 'no full scanner upload in the last 30 days' }] }] },
-      [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z' }],
+      [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z', final: true }],
       [`/v1/tenants/${tat}/decisions`]: { items: [{ service_id: 's1', service: 'crm-api', path: 'docs/decisions/0003-queue.md', number: 3, title: 'Use River for jobs', status: 'accepted', date: '2026-05-01', superseded_by: '', url: 'https://github.com/acme/crm-api/blob/main/docs/decisions/0003-queue.md' }] },
       [`/v1/tenants/${tat}/maturity`]: {
         quarter: '2026-Q4',
@@ -346,8 +346,81 @@ describe('finops screens', () => {
     render(<App />)
     await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
     await userEvent.click(await screen.findByRole('link', { name: 'Download report 2026-09' }))
-    expect(await screen.findByText('report store down')).toBeTruthy()
+    const row = (await screen.findByText('report store down')).closest('article') as HTMLElement
+    expect(within(row).getByRole('link', { name: 'Download report 2026-09' })).toBeTruthy()
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it('insights revokes the download URL only after the click', async () => {
+    const events: string[] = []
+    const blobURL = vi.fn(() => (events.push('create'), 'blob:x'))
+    const revoke = vi.fn(() => void events.push('revoke'))
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => void events.push('click'))
+    Object.assign(URL, { createObjectURL: blobURL, revokeObjectURL: revoke })
+    try {
+      mockFetch({
+        ...routes([]),
+        [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z', final: true }],
+        [`/v1/tenants/${tat}/reports/2026-09`]: new Response('<html></html>', { status: 200 }),
+      })
+      render(<App />)
+      await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+      await userEvent.click(await screen.findByRole('link', { name: 'Download report 2026-09' }))
+      await waitFor(() => expect(click).toHaveBeenCalled())
+      expect(revoke).not.toHaveBeenCalled()
+      await waitFor(() => expect(revoke).toHaveBeenCalledWith('blob:x'), { timeout: 3000 })
+      expect(events).toEqual(['create', 'click', 'revoke'])
+    } finally {
+      click.mockRestore()
+      Reflect.deleteProperty(URL, 'createObjectURL')
+      Reflect.deleteProperty(URL, 'revokeObjectURL')
+    }
+  })
+
+  it('insights marks provisional reports and lets a finops_lead regenerate one', async () => {
+    let list = [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z', final: false }]
+    const calls = mockFetch({
+      ...routes([]),
+      '/auth/me': { ...member, bindings: [{ role: 'finops_lead', tenant_id: tat }] },
+      [`/v1/tenants/${tat}/reports`]: () => list,
+      [`/v1/tenants/${tat}/reports/2026-09/regenerate`]: () => {
+        list = [{ ...list[0], final: true }]
+        return {}
+      },
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    expect(await screen.findByText('provisional')).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate 2026-09' }))
+    await waitFor(() => expect(screen.queryByText('provisional')).toBeNull())
+    expect(calls).toContain(`/v1/tenants/${tat}/reports/2026-09/regenerate`)
+    expect(calls.filter((c) => c === `/v1/tenants/${tat}/reports`).length).toBe(2)
+  })
+
+  it('insights shows a regenerate failure next to its report', async () => {
+    mockFetch({
+      ...routes([]),
+      '/auth/me': { ...member, bindings: [{ role: 'platform_admin', tenant_id: tat }] },
+      [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z', final: false }],
+      [`/v1/tenants/${tat}/reports/2026-09/regenerate`]: new Response('{"error":"cost data unavailable"}', { status: 500 }),
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Regenerate 2026-09' }))
+    const row = (await screen.findByText('cost data unavailable')).closest('article') as HTMLElement
+    expect(within(row).getByRole('button', { name: 'Regenerate 2026-09' })).toBeTruthy()
+  })
+
+  it('insights hides Regenerate from principals without report.generate', async () => {
+    mockFetch({
+      ...routes([]),
+      '/auth/me': approver,
+      [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z', final: false }],
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    expect(await screen.findByText('provisional')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Regenerate/ })).toBeNull()
   })
 
   it('insights hides Save for a tenant_viewer but still shows the trend', async () => {
