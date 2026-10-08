@@ -43,18 +43,27 @@ export class ApiError extends Error {
   }
 }
 
+async function failure(res: Response): Promise<ApiError> {
+  let msg = `HTTP ${res.status}`
+  try {
+    msg = (await res.json()).error ?? msg
+  } catch {
+    /* non-JSON error body */
+  }
+  return new ApiError(res.status, msg)
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { credentials: 'same-origin', ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`
-    try {
-      msg = (await res.json()).error ?? msg
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, msg)
-  }
+  if (!res.ok) throw await failure(res)
   return res.status === 204 ? (undefined as T) : res.json()
+}
+
+/** Fetches a file with the session cookie; a non-OK response throws instead of being saved. */
+export async function fetchBlob(path: string): Promise<Blob> {
+  const res = await fetch(path, { credentials: 'same-origin' })
+  if (!res.ok) throw await failure(res)
+  return res.blob()
 }
 
 const list = async <T,>(path: string) => (await request<{ items: T[] }>(path)).items
@@ -287,4 +296,61 @@ export function windowFor(period: Period, date: string): { from: string; to: str
   if (period === 'day') return { from: iso(d), to: iso(new Date(d.getTime() + 86400000)) }
   if (period === 'month') return { from: iso(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1))), to: iso(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))) }
   return { from: `${d.getUTCFullYear()}-01-01`, to: `${d.getUTCFullYear() + 1}-01-01` }
+}
+
+export type DoraMetrics = {
+  scope: string
+  deployments: number
+  deployments_per_day: number
+  lead_time_hours: number | null
+  change_fail_rate: number | null
+  recovery_hours: number | null
+  rework_rate: number | null
+  failed: number
+  rework: number
+}
+export type DoraReport = { from: string; to: string; tenant: DoraMetrics; services: DoraMetrics[] | null }
+export type ScoreCheck = { name: string; control: string; pass: boolean; why?: string }
+export type Scorecard = { service_id: string; service: string; team_id: string; score: number; checks: ScoreCheck[]; previous_score: number | null }
+export type ScorecardReport = { version: string; services: Scorecard[] | null; teams: { team_id: string; team: string; services: number; score: number }[] | null; score: number }
+export type DecisionEntry = { service_id: string; service: string; path: string; number: number | null; title: string; status: string; date: string; superseded_by: string; url: string }
+export type ReportSummary = { period: string; generated_at: string }
+export type MaturityAspect = { id: string; title: string; question: string; measured?: string; levels: string[] }
+export type MaturityAnswer = { level: number; note?: string }
+export type MaturityIndicators = {
+  services: number
+  template_adoption: number | null
+  environments: number
+  self_service_environments: number | null
+  dora: DoraMetrics
+  suggested_levels: Record<string, number> | null
+}
+export type MaturityAssessment = { quarter: string; version: string; answers: Record<string, MaturityAnswer>; indicators: MaturityIndicators; submitted_by: string; submitted_at: string }
+export type MaturityView = {
+  questionnaire: { version: string; levels: string[]; aspects: MaturityAspect[] }
+  quarter: string
+  indicators: MaturityIndicators
+  assessments: MaturityAssessment[]
+}
+
+export const insights = {
+  dora: (t: string, from: string, to: string) => request<DoraReport>(`/v1/tenants/${t}/dora?from=${from}&to=${to}`),
+  scorecards: (t: string) => request<ScorecardReport>(`/v1/tenants/${t}/scorecards`),
+  decisions: (t: string, q: string) => list<DecisionEntry>(`/v1/tenants/${t}/decisions?q=${encodeURIComponent(q)}`),
+  reports: (t: string) => request<ReportSummary[]>(`/v1/tenants/${t}/reports`),
+  reportURL: (t: string, period: string) => `/v1/tenants/${t}/reports/${period}?format=html`,
+  evidenceURL: (t: string, from: string, to: string) => `/v1/tenants/${t}/evidence?from=${from}&to=${to}`,
+  maturity: (t: string) => request<MaturityView>(`/v1/tenants/${t}/maturity`),
+  submitMaturity: (t: string, quarter: string, answers: Record<string, MaturityAnswer>) =>
+    request<MaturityAssessment>(`/v1/tenants/${t}/maturity/${quarter}`, { method: 'PUT', body: JSON.stringify({ answers }) }),
+}
+
+/** The first days of the last n calendar months (UTC), oldest first, plus the next month's first day. */
+export function monthStarts(n: number, today = new Date()): string[] {
+  const out: string[] = []
+  for (let i = n - 1; i >= -1; i--) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - i, 1))
+    out.push(d.toISOString().slice(0, 10))
+  }
+  return out
 }

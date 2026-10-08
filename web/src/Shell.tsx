@@ -9,8 +9,9 @@ import { SavingsView } from './SavingsView'
 import { DeliveryView } from './DeliveryView'
 import { SecurityView } from './SecurityView'
 import { AccessView } from './AccessView'
+import { InsightsView } from './InsightsView'
 
-type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'delivery' | 'security' | 'access' | 'catalog' | 'activity'
+type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'delivery' | 'security' | 'access' | 'insights' | 'catalog' | 'activity'
 const tabs: [Tab, string][] = [
   ['budgets', 'Budgets'],
   ['costs', 'Costs'],
@@ -19,6 +20,7 @@ const tabs: [Tab, string][] = [
   ['delivery', 'Delivery'],
   ['security', 'Security'],
   ['access', 'Access'],
+  ['insights', 'Insights'],
   ['catalog', 'Projects'],
   ['activity', 'Activity'],
 ]
@@ -87,6 +89,7 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
             {tab === 'delivery' && <DeliveryView key={current.id} tenantId={current.id} />}
             {tab === 'security' && <SecurityView key={current.id} tenantId={current.id} />}
             {tab === 'access' && <AccessView key={current.id} tenantId={current.id} />}
+            {tab === 'insights' && <InsightsView key={current.id} tenantId={current.id} canSubmit={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'tenant_approver'))} />}
             {tab === 'catalog' && <TenantView key={current.id} tenant={current} />}
             {tab === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
           </>

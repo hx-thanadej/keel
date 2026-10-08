@@ -9,13 +9,14 @@ const tat = 't-1'
 
 type Routes = Record<string, unknown | ((url: URL) => unknown)>
 
-function mockFetch(routes: Routes) {
+function mockFetch(routes: Routes, bodies: Record<string, unknown> = {}) {
   const calls: string[] = []
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: string) => {
+    vi.fn(async (input: string, init?: RequestInit) => {
       const url = new URL(input, 'http://keel.test')
       calls.push(url.pathname + url.search)
+      if (typeof init?.body === 'string') bodies[url.pathname] = JSON.parse(init.body)
       const key = Object.keys(routes).find((k) => url.pathname === k)
       if (!key) return new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 })
       const v = routes[key]
@@ -44,6 +45,8 @@ const operator: Principal = {
   ],
 }
 const member: Principal = { subject: 'user:somchai@tat.or.th', kind: 'human', tenant_id: tat, home: false, bindings: [{ role: 'tenant_viewer', tenant_id: tat }] }
+
+const approver: Principal = { ...member, bindings: [{ role: 'tenant_approver', tenant_id: tat }] }
 
 const tenantRoutes: Routes = {
   [`/v1/tenants/${home}`]: { id: home, slug: 'harmonyx', name: 'HarmonyX', is_home: true },
@@ -282,6 +285,85 @@ describe('finops screens', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Approve access' }))
     expect(calls).toContain(`/v1/tenants/${tat}/access/grants/g1/approve`)
     expect((screen.getByLabelText('Hours') as HTMLInputElement).max).toBe('2')
+  })
+
+  it('insights tab shows DORA per month, failing scorecard checks, reports, evidence and maturity', async () => {
+    const dora = (n: number) => ({ from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z', tenant: { scope: 'tenant', deployments: n, deployments_per_day: n / 30, lead_time_hours: 5, change_fail_rate: 0.1, recovery_hours: 2, rework_rate: 0, failed: 1, rework: 0 }, services: [] })
+    const bodies: Record<string, unknown> = {}
+    const calls = mockFetch({
+      ...routes([]),
+      '/auth/me': approver,
+      [`/v1/tenants/${tat}/dora`]: () => dora(12),
+      [`/v1/tenants/${tat}/scorecards`]: { version: 'keel-scorecard@1', score: 60, teams: [], services: [
+        { service_id: 's1', service: 'crm-api', team_id: 't', score: 60, previous_score: 40, checks: [{ name: 'owner', control: 'PO.2.1', pass: true }, { name: 'scanned', control: 'PW.7.2', pass: false, why: 'no full scanner upload in the last 30 days' }] }] },
+      [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z' }],
+      [`/v1/tenants/${tat}/decisions`]: { items: [{ service_id: 's1', service: 'crm-api', path: 'docs/decisions/0003-queue.md', number: 3, title: 'Use River for jobs', status: 'accepted', date: '2026-05-01', superseded_by: '', url: 'https://github.com/acme/crm-api/blob/main/docs/decisions/0003-queue.md' }] },
+      [`/v1/tenants/${tat}/maturity`]: {
+        quarter: '2026-Q4',
+        questionnaire: { version: 'keel-maturity@1', levels: ['Provisional', 'Operational', 'Scalable', 'Optimizing'], aspects: [
+          { id: 'adoption', title: 'Adoption', question: 'How do teams come to use the platform?', measured: 'template_adoption', levels: ['a1', 'a2', 'a3', 'a4'] }] },
+        indicators: { services: 4, template_adoption: 0.75, environments: 2, self_service_environments: 0.5, dora: dora(12).tenant, suggested_levels: { adoption: 3 } },
+        assessments: [{ quarter: '2026-Q3', version: 'keel-maturity@1', answers: { adoption: { level: 2 } }, indicators: {}, submitted_by: 'user:lead@tat.or.th', submitted_at: '2026-09-20T00:00:00Z' }],
+      },
+      [`/v1/tenants/${tat}/maturity/2026-Q4`]: { quarter: '2026-Q4' },
+    }, bodies)
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    expect(await screen.findByText('Deployments this month')).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'Production deployments per month' })).toBeTruthy()
+    expect(calls.filter((c) => c.startsWith(`/v1/tenants/${tat}/dora?`)).length).toBe(6)
+    expect(screen.getByText(/scanned \(no full scanner upload in the last 30 days\)/)).toBeTruthy()
+    expect(screen.getByText(/60 ↑/)).toBeTruthy()
+    expect((screen.getByRole('link', { name: 'Download report 2026-09' }) as HTMLAnchorElement).getAttribute('href')).toBe(`/v1/tenants/${tat}/reports/2026-09?format=html`)
+    expect((screen.getByRole('link', { name: 'Export evidence' }) as HTMLAnchorElement).getAttribute('href')).toMatch(new RegExp(`^/v1/tenants/${tat}/evidence\\?from=\\d{4}-\\d{2}-01&to=`))
+    expect(screen.getByText('Operational')).toBeTruthy() // Q3 trend cell
+    expect(screen.getByText('Keel measures Scalable')).toBeTruthy()
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('3') // pre-filled from the measure
+    await userEvent.type(screen.getByLabelText(/Search decisions/), 'queue')
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+    expect(await screen.findByText(/crm-api: ADR-0003 Use River for jobs/)).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Save 2026-Q4 assessment' }))
+    await waitFor(() => expect(calls).toContain(`/v1/tenants/${tat}/maturity/2026-Q4`))
+    expect(bodies[`/v1/tenants/${tat}/maturity/2026-Q4`]).toEqual({ answers: { adoption: { level: 3 } } })
+  })
+
+  it('insights shows a load error instead of the empty state', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/scorecards`]: new Response('{"error":"forbidden"}', { status: 403 }), [`/v1/tenants/${tat}/reports`]: [] })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    expect(await screen.findAllByText('You are not allowed to see this here.')).not.toHaveLength(0)
+    expect(screen.queryByText('No Services yet.')).toBeNull()
+  })
+
+  it('insights report download that fails shows the error and saves nothing', async () => {
+    const create = vi.fn(() => 'blob:x')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() }))
+    mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/reports`]: [{ period: '2026-09', generated_at: '2026-10-01T01:00:00Z' }],
+      [`/v1/tenants/${tat}/reports/2026-09`]: new Response('{"error":"report store down"}', { status: 500 }),
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    await userEvent.click(await screen.findByRole('link', { name: 'Download report 2026-09' }))
+    expect(await screen.findByText('report store down')).toBeTruthy()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('insights hides Save for a tenant_viewer but still shows the trend', async () => {
+    mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/maturity`]: {
+        quarter: '2026-Q4',
+        questionnaire: { version: 'keel-maturity@1', levels: ['Provisional', 'Operational', 'Scalable', 'Optimizing'], aspects: [{ id: 'adoption', title: 'Adoption', question: 'q?', measured: 'template_adoption', levels: ['a1', 'a2', 'a3', 'a4'] }] },
+        indicators: { services: 4, template_adoption: 0.75, environments: 2, self_service_environments: 0.5, suggested_levels: {} },
+        assessments: [{ quarter: '2026-Q3', version: 'keel-maturity@1', answers: { adoption: { level: 2 } }, indicators: {}, submitted_by: 'user:lead@tat.or.th', submitted_at: '2026-09-20T00:00:00Z' }],
+      },
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
+    expect(await screen.findByText('Operational')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Save .* assessment/ })).toBeNull()
   })
 
   it('findings tab lists anomalies with severity label and contributors', async () => {
