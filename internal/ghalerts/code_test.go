@@ -316,7 +316,7 @@ func TestGitHubSourceWithoutRepositoryIDSyncsNoCodeScanning(t *testing.T) {
 
 // With GitHub as the source, CI's SARIF neither raises nor resolves code
 // scanning Findings, and still raises and resolves vulnerabilities.
-func TestCISARIFForGitHubSourceOnlyReportsVulnerabilities(t *testing.T) {
+func TestCISARIFForGitHubSourceSkipsCodeScanningOnly(t *testing.T) {
 	e := setup(t, "acme/crm-api")
 	e.upload(t, "full", sarifOf("CodeQL", sqli))
 	e.setSource(t, scans.SourceGitHub) // bypasses the switch, so CI's Finding stays open

@@ -79,13 +79,13 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		if err != nil {
 			return err
 		}
-		// With GitHub as the code scanning source, CI's SARIF only reports
-		// vulnerabilities: its code scanning results are GitHub's to raise.
-		vulnOnly := source == SourceGitHub
+		// With GitHub as the code scanning source, its code scanning results
+		// are GitHub's to raise. Every other kind of CI result flows as usual.
+		leaveCodeScanning := source == SourceGitHub
 		skipped := 0
 		current := make([]string, 0, len(results))
 		for _, r := range results {
-			if vulnOnly && r.Kind != "vulnerability" {
+			if leaveCodeScanning && CodeScanning(r.Kind) {
 				skipped++
 				continue
 			}
@@ -124,7 +124,7 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		}
 		if u.Scope == "full" {
 			for _, tool := range tools {
-				n, err := resolveAbsent(ctx, tx, service, tool, current, vulnOnly)
+				n, err := resolveAbsent(ctx, tx, service, tool, current, leaveCodeScanning)
 				if err != nil {
 					return err
 				}
@@ -154,14 +154,14 @@ func ResolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current
 
 // resolveAbsent: a full scan by tool that no longer reports a Finding removes
 // the tool from it; with no tool left reporting, the Finding is resolved.
-// vulnOnly limits it to vulnerability Findings.
-func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string, vulnOnly bool) (int, error) {
+// leaveCodeScanning keeps it off code scanning Findings.
+func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string, leaveCodeScanning bool) (int, error) {
 	if current == nil {
 		current = []string{} // a nil slice is SQL NULL, and "x = ANY(NULL)" is never false
 	}
 	if _, err := tx.Exec(ctx, `UPDATE findings SET detail = jsonb_set(detail, '{tools}', (detail->'tools') - $2)
 		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND NOT (fingerprint = ANY ($3::text[]))
-		  AND (NOT $4 OR kind = 'vulnerability')`, service, tool, current, vulnOnly); err != nil {
+		  AND (NOT $4 OR kind NOT IN ('sast', 'code_scan'))`, service, tool, current, leaveCodeScanning); err != nil {
 		return 0, err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'no longer reported by a full scan'
@@ -169,15 +169,17 @@ func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current
 	return int(tag.RowsAffected()), err
 }
 
-// ResolveOtherCodeScanning resolves the open code scanning Findings of a
-// Service that did not come from source, after the Service switched to it.
+// ResolveOtherCodeScanning resolves the open code scanning Findings (kinds
+// sast and code_scan) of a Service that did not come from source, after the
+// Service switched to it. Secret, IaC, workflow and vulnerability Findings
+// stay open.
 // CI's are the "scan:" Findings of SARIF tools; GitHub's carry
 // GitHubCodeScanningTool.
 func ResolveOtherCodeScanning(ctx context.Context, tx pgx.Tx, service, source string) (int, error) {
 	fromGitHub := source == SourceKeel // the Findings to resolve
 	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'code scanning source changed to ' || $2::text
 		WHERE service_id = $1 AND status = 'open' AND fingerprint LIKE 'scan:%'
-		  AND coalesce(detail->'tools' ? $3, false) = $4`, service, source, GitHubCodeScanningTool, fromGitHub)
+		  AND kind IN ('sast', 'code_scan') AND coalesce(detail->'tools' ? $3, false) = $4`, service, source, GitHubCodeScanningTool, fromGitHub)
 	return int(tag.RowsAffected()), err
 }
 

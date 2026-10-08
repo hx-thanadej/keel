@@ -87,6 +87,11 @@ func Kind(tool, rule string) string {
 	return "code_scan"
 }
 
+// CodeScanning reports whether a Finding kind is a code scanning kind, the
+// only kinds a Service's code scanning source governs. Vulnerabilities,
+// secrets, IaC and workflow results are not: other sources own them.
+func CodeScanning(kind string) bool { return kind == "sast" || kind == "code_scan" }
+
 // ParseSARIF normalises every result of every run. service scopes the
 // fingerprints, so the same rule in two Services is two Findings.
 func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err error) {

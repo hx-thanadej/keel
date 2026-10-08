@@ -42,16 +42,18 @@ scanning, Dependabot and secret scanning alerts.
 
 - Each Service has one code scanning source, `code_scanning_source`. It is
   `keel` by default, which means CI's SARIF uploads. The other value is
-  `github`, which means GitHub's code scanning alerts. Keel never merges the
-  two, so a Service that leaves the default gets no code scanning Findings
-  from CI, and a Service that keeps it gets none from GitHub. Set it with
+  `github`, which means GitHub's code scanning alerts. The source applies to
+  code scanning results only, the kinds `sast` and `code_scan` (CodeQL,
+  Semgrep, gosec, Bandit and unrecognised tools). Keel never merges the two,
+  so a Service on `github` gets none of those from CI, and a Service on
+  `keel` gets none from GitHub. Set it with
   `PATCH /v1/tenants/{tenant}/services/{service}` and a body such as
   `{"code_scanning_source": "github", "why": "..."}`. This needs the
   `service.update` permission for the Service's Team.
 - Switching the source resolves the open code scanning Findings of the old
   source with the resolution `code scanning source changed to <source>`. The
-  Activity records how many it resolved. Vulnerability Findings are not
-  touched.
+  Activity records how many it resolved. Only code scanning Findings are
+  resolved. Vulnerability, secret, IaC and workflow Findings are not touched.
 - With `keel`, the sync records code scanning as `keel` and reads nothing
   from GitHub code scanning. CI uploads work as before.
 - With `github`, each GitHub alert is one Finding,
@@ -63,13 +65,17 @@ scanning, Dependabot and secret scanning alerts.
   reopening the alert raises it again, as a new Finding. A Service without a
   `repository_id` cannot be keyed this way. Its code scanning status is
   `no_repository_id` and nothing is synced.
-- With `github`, CI's SARIF uploads still raise and resolve vulnerability
-  results such as Trivy's CVEs. They skip every other result and never
-  resolve a code scanning Finding.
-- A GitHub alert whose rule is a CVE, for example from Trivy results
-  uploaded to GitHub, is a GitHub alert Finding like any other. If CI also
-  uploads those Trivy results to Keel, the CVE shows twice: once under its
-  alert number and once as `vuln:<CVE>:<service>`.
+- With `github`, CI's SARIF uploads skip only results of the code scanning
+  kinds, and a full upload never resolves a Finding of those kinds. Results
+  of other kinds keep flowing and resolving as with `keel`: Trivy's CVEs,
+  secret scanners (gitleaks, trufflehog), IaC scanners (checkov, tfsec, kics)
+  and workflow scanners (zizmor).
+- GitHub code scanning alerts of other kinds are skipped. A CVE-rule alert,
+  for example from Trivy results uploaded to GitHub, raises no Finding, so a
+  CVE is never counted twice and an Exception on its `vuln:` Finding covers
+  it. The cost is that a CVE known only from a Trivy SARIF uploaded to GitHub
+  and not to Keel is not synced. Dependabot, the SBOM/OSV matcher and CI's
+  vulnerability results report vulnerabilities.
 - Exceptions name Finding ids, so an Exception covers one GitHub alert. It
   stays in force while that alert stays open, wherever the alert moves. A
   new alert of the same rule needs its own Exception.

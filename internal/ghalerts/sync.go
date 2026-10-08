@@ -262,6 +262,9 @@ func (s Syncer) fetchCode(ctx context.Context, tenant string, v svcRow, repo str
 	if c.open, err = s.Source.OpenCodeAlerts(ctx, repo); err != nil {
 		return c, err
 	}
+	// A CVE-rule, secret, IaC or workflow alert belongs to the sources of
+	// those kinds, not to the code scanning source.
+	c.open = slices.DeleteFunc(c.open, func(a CodeAlert) bool { return !scans.CodeScanning(scans.Kind(a.Tool, a.RuleID)) })
 	var findings []string
 	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT fingerprint FROM findings WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2`, v.id, scans.GitHubCodeScanningTool)
