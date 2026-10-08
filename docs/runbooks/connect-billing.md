@@ -52,3 +52,58 @@ Run OpenCost in each shared TKE cluster and set
 `KEEL_OPENCOST=shared-tke=http://opencost.opencost:9003`; then map namespaces
 (`PUT /v1/tenants/{home}/k8s-namespaces/{cluster}/{namespace}`) and add a
 `k8s` allocation rule for the cluster's account.
+
+## Azure (FOCUS export to Blob Storage)
+
+1. Cost Management → Exports → *Cost and usage details (FOCUS)*, daily,
+   month-to-date, CSV (gzip) or Parquet (snappy), **Overwrite data on** so
+   each month folder keeps only the latest run. Scope: billing account (EA/MCA;
+   pay-as-you-go MOSA accounts cannot export FOCUS).
+2. Give Keel's workload identity (Entra app with a federated credential for
+   the `keel-api` service account) *Storage Blob Data Reader* on the container.
+   No client secret, no storage key.
+3. Set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_FEDERATED_TOKEN_FILE`
+   (the workload identity webhook does this), `KEEL_AZURE_BILL_STORAGE_ACCOUNT`,
+   `KEEL_AZURE_BILL_CONTAINER`, `KEEL_AZURE_BILL_PREFIX` and
+   `KEEL_AZURE_BILLING_ACCOUNT`.
+4. Register Cloud Accounts with the **subscription id** (GUID); Keel strips
+   the `/subscriptions/` ARM prefix from `SubAccountId`.
+5. Finality: final from the 6th (Azure can change charges until the 5th).
+
+## Google Cloud (FOCUS table → Cloud Storage)
+
+1. Enable the detailed usage cost and pricing exports, then the FOCUS dataset
+   (`gcp_billing_export_focus_<BILLING_ACCOUNT_ID>`, Pre-GA).
+2. Google does not deliver to Cloud Storage: schedule a BigQuery query that
+   runs `EXPORT DATA OPTIONS(uri='gs://<bucket>/focus/<YYYY-MM>/*.parquet',
+   format='PARQUET', overwrite=true)` for the current and previous month.
+   Parquet keeps `x_Tags`/`x_Labels` nested and Keel reads them as Tags; for
+   CSV, select them as `TO_JSON_STRING(x_Tags)`.
+3. Keel authenticates with workload identity federation
+   (`GOOGLE_APPLICATION_CREDENTIALS` pointing at an `external_account` config,
+   or GKE Workload Identity) with *Storage Object Viewer* on the bucket.
+   Service-account key files are refused.
+4. Set `KEEL_GCP_BILL_BUCKET`, `KEEL_GCP_BILL_PREFIX`, `KEEL_GCP_BILLING_ACCOUNT`.
+   Cloud Accounts are GCP **project ids** (`SubAccountId`).
+5. Finality: Google gives no hard close (invoice by the 5th business day,
+   late adjustments booked to later months); Keel treats a month final from
+   the 16th.
+
+## Alibaba Cloud (bill subscription to OSS)
+
+1. Expenses and Costs → Bills → Bill Subscription → OSS Subscription. Use
+   *Standard Bill FOCUS* if the account is in the preview (parsed as FOCUS;
+   `X_` columns kept), otherwise the new-version standard detailed bill,
+   which Keel maps to FOCUS (gaps listed in `internal/cost/alibaba.go`: daily
+   charge periods, categories by keyword, no amortized cost).
+2. Keel uses RRSA on ACK: a RAM role trusting the cluster's OIDC provider with
+   `oss:GetObject` and `oss:ListObjects` on the bucket. Set
+   `ALIBABA_CLOUD_ROLE_ARN`, `ALIBABA_CLOUD_OIDC_PROVIDER_ARN`,
+   `ALIBABA_CLOUD_OIDC_TOKEN_FILE` (the RRSA webhook does this), and
+   `KEEL_ALIBABA_BILL_BUCKET`, `KEEL_ALIBABA_REGION`, `KEEL_ALIBABA_BILL_PREFIX`,
+   `KEEL_ALIBABA_PAYER_ACCOUNT`.
+3. Cloud Accounts are Alibaba account (UID) numbers.
+4. Finality: 12:00 UTC+8 on the 6th (bill final on the 3rd/4th, amortized
+   cost on the 6th).
+5. Verify on the first real delivery: the FOCUS file name token and whether
+   `ResourceTag` uses the `key:k value:v;` format.
