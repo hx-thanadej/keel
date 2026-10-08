@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -40,16 +39,18 @@ type Upload struct {
 	CommitSHA string
 	Ref       string
 	SARIF     []byte
-	// Dismissed fingerprints are neither raised nor kept open: the source
-	// already decided them (GitHub code scanning dismissals).
-	Dismissed []string
-	// GitHubAnalysisIDs are the GitHub code scanning analyses this SARIF
-	// came from, so the GitHub sync ingests each analysis once.
-	GitHubAnalysisIDs []int64
-	// Categories, when set, limits what a full scan resolves to the Findings
-	// of these SARIF categories: the upload saw only them.
-	Categories []string
 }
+
+// Code scanning sources of a Service (services.code_scanning_source). A
+// Service takes its code scanning Findings from exactly one of them.
+const (
+	SourceKeel   = "keel"   // CI's SARIF uploads
+	SourceGitHub = "github" // GitHub's code scanning alerts
+)
+
+// GitHubCodeScanningTool is the detail.tools entry of Findings raised from
+// GitHub code scanning alerts.
+const GitHubCodeScanningTool = "github-code-scanning"
 
 // Service ingests scans.
 type Service struct {
@@ -70,17 +71,22 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 	}
 	run := Run{ServiceID: service, Tool: strings.Join(tools, ","), Scope: u.Scope, CommitSHA: u.CommitSHA, Ref: u.Ref, Results: len(results)}
 	err = s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-		var project, team, slug string
-		err := tx.QueryRow(ctx, `SELECT project_id::text, team_id::text, slug FROM services WHERE id = $1 AND archived_at IS NULL`, service).Scan(&project, &team, &slug)
+		var project, team, slug, source string
+		err := tx.QueryRow(ctx, `SELECT project_id::text, team_id::text, slug, code_scanning_source FROM services WHERE id = $1 AND archived_at IS NULL FOR SHARE`, service).Scan(&project, &team, &slug, &source)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
 			return err
 		}
+		// With GitHub as the code scanning source, CI's SARIF only reports
+		// vulnerabilities: its code scanning results are GitHub's to raise.
+		vulnOnly := source == SourceGitHub
+		skipped := 0
 		current := make([]string, 0, len(results))
 		for _, r := range results {
-			if slices.Contains(u.Dismissed, r.Fingerprint) {
+			if vulnOnly && r.Kind != "vulnerability" {
+				skipped++
 				continue
 			}
 			current = append(current, r.Fingerprint)
@@ -105,8 +111,7 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 				    last_seen_at = now(),
 				    detail = findings.detail || jsonb_build_object(
 				        'tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'tools', '[]') || (excluded.detail->'tools')) AS t),
-				        'locations', excluded.detail->'locations', 'commit', excluded.detail->'commit', 'message', excluded.detail->'message')
-				        || jsonb_strip_nulls(jsonb_build_object('category', excluded.detail->'category')),
+				        'locations', excluded.detail->'locations', 'commit', excluded.detail->'commit', 'message', excluded.detail->'message'),
 				    severity = CASE WHEN array_position(ARRAY['critical','high','medium','low'], excluded.severity) < array_position(ARRAY['critical','high','medium','low'], findings.severity)
 				                    THEN excluded.severity ELSE findings.severity END
 				RETURNING (xmax = 0)`, tenant, r.Kind, r.Fingerprint, r.Severity, title, detail, project, team, service).Scan(&inserted)
@@ -119,22 +124,23 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		}
 		if u.Scope == "full" {
 			for _, tool := range tools {
-				n, err := resolveAbsent(ctx, tx, service, tool, current, u.Categories)
+				n, err := resolveAbsent(ctx, tx, service, tool, current, vulnOnly)
 				if err != nil {
 					return err
 				}
 				run.Resolved += n
 			}
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO scan_runs (tenant_id, service_id, tool, scope, commit_sha, ref, results, raised, resolved, uploaded_by, github_analysis_ids)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id::text, created_at`,
-			tenant, service, run.Tool, run.Scope, run.CommitSHA, run.Ref, run.Results, run.Raised, run.Resolved, by.UID, u.GitHubAnalysisIDs).Scan(&run.ID, &run.CreatedAt); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO scan_runs (tenant_id, service_id, tool, scope, commit_sha, ref, results, raised, resolved, uploaded_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id::text, created_at`,
+			tenant, service, run.Tool, run.Scope, run.CommitSHA, run.Ref, run.Results, run.Raised, run.Resolved, by.UID).Scan(&run.ID, &run.CreatedAt); err != nil {
 			return err
 		}
 		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/scans", Type: "keel.scan.ingested", Subject: "service/" + service,
 			Operation: "IngestScan", Kind: activity.Create, Actor: by, Outcome: activity.Success,
-			Resources:    []activity.Resource{{Type: "service", UID: service, OwnerTeam: team}, {Type: "scan_run", UID: run.ID}},
-			StatusDetail: fmt.Sprintf("%s %s scan of %s@%.12s: %d results, %d new, %d resolved", run.Tool, run.Scope, slug, u.CommitSHA, run.Results, run.Raised, run.Resolved)})
+			Resources: []activity.Resource{{Type: "service", UID: service, OwnerTeam: team}, {Type: "scan_run", UID: run.ID}},
+			StatusDetail: fmt.Sprintf("%s %s scan of %s@%.12s: %d results, %d new, %d resolved, %d code scanning results left to GitHub",
+				run.Tool, run.Scope, slug, u.CommitSHA, run.Results, run.Raised, run.Resolved, skipped)})
 		return err
 	})
 	return run, err
@@ -143,23 +149,35 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 // ResolveAbsent is resolveAbsent for other sources of vulnerability
 // Findings (OSV re-matching) that report under their own tool name.
 func ResolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string) (int, error) {
-	return resolveAbsent(ctx, tx, service, tool, current, nil)
+	return resolveAbsent(ctx, tx, service, tool, current, false)
 }
 
 // resolveAbsent: a full scan by tool that no longer reports a Finding removes
 // the tool from it; with no tool left reporting, the Finding is resolved.
-// Non-nil categories limit this to Findings of those SARIF categories.
-func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current, categories []string) (int, error) {
+// vulnOnly limits it to vulnerability Findings.
+func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string, vulnOnly bool) (int, error) {
 	if current == nil {
 		current = []string{} // a nil slice is SQL NULL, and "x = ANY(NULL)" is never false
 	}
 	if _, err := tx.Exec(ctx, `UPDATE findings SET detail = jsonb_set(detail, '{tools}', (detail->'tools') - $2)
 		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND NOT (fingerprint = ANY ($3::text[]))
-		  AND ($4::text[] IS NULL OR coalesce(detail->>'category', '') = ANY ($4))`, service, tool, current, categories); err != nil {
+		  AND (NOT $4 OR kind = 'vulnerability')`, service, tool, current, vulnOnly); err != nil {
 		return 0, err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'no longer reported by a full scan'
 		WHERE service_id = $1 AND status = 'open' AND detail ? 'tools' AND jsonb_array_length(detail->'tools') = 0`, service)
+	return int(tag.RowsAffected()), err
+}
+
+// ResolveOtherCodeScanning resolves the open code scanning Findings of a
+// Service that did not come from source, after the Service switched to it.
+// CI's are the "scan:" Findings of SARIF tools; GitHub's carry
+// GitHubCodeScanningTool.
+func ResolveOtherCodeScanning(ctx context.Context, tx pgx.Tx, service, source string) (int, error) {
+	fromGitHub := source == SourceKeel // the Findings to resolve
+	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'code scanning source changed to ' || $2::text
+		WHERE service_id = $1 AND status = 'open' AND fingerprint LIKE 'scan:%'
+		  AND coalesce(detail->'tools' ? $3, false) = $4`, service, source, GitHubCodeScanningTool, fromGitHub)
 	return int(tag.RowsAffected()), err
 }
 

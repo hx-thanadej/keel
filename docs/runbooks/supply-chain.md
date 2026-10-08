@@ -34,40 +34,61 @@ matches against deployed software start the EU CRA reporting clock
 
 ## GitHub alerts
 
-With `KEEL_GITHUB_ADMIN_TOKEN` set, Keel syncs GitHub code scanning,
-Dependabot and secret scanning for every Service with a GitHub `repository`
-every 6 hours (#121). The token needs read access to code scanning alerts
-(which covers analyses), Dependabot alerts and secret scanning alerts.
+With `KEEL_GITHUB_ADMIN_TOKEN` set, Keel syncs GitHub Dependabot and secret
+scanning alerts for every Service with a GitHub `repository` every 6 hours
+(#121). It also syncs code scanning alerts for the Services that choose
+GitHub as their code scanning source. The token needs read access to code
+scanning, Dependabot and secret scanning alerts.
 
-- Code scanning comes in as the SARIF GitHub itself holds. For each tool,
-  Keel downloads the newest analysis of every category on the default branch
-  and ingests them together as one full scan, once per analysis. A fixed alert
-  resolves when the next analysis no longer reports it.
-- Every code scanning Finding, from CI or from GitHub, is
-  `scan:<tool>:<rule>:<service>:<hash>`, where the hash covers the
-  repository-relative path and the message. `partialFingerprints` and line
-  numbers are ignored, because GitHub adds `primaryLocationLineHash` to a
-  third-party tool's upload: CI's copy and GitHub's copy of one result are one
-  Finding. The same rule and message twice in one file is one Finding with
-  both locations, and editing a result's message raises a new Finding.
-- An alert dismissed on GitHub resolves as `dismissed on GitHub: <reason>` and
-  is left out of later ingests. It matches on tool, rule and path (`./`,
-  `file://` and `%SRCROOT%` forms normalised), and on the line only when both
-  sides have one.
-- A Dependabot alert is `vuln:<CVE or GHSA>:<service>` (CVE preferred), so the
-  same CVE from Trivy or OSV is one Finding with several `tools`. A secret alert
-  is a critical `secret` Finding (`secret:github:<repository id>:<number>`).
-  The secret value is never requested (`hide_secret=true`), read or stored.
-  Alerts no longer open on GitHub resolve the Finding (a Finding another
-  scanner still reports stays open). VEX statements and Exceptions apply as for
-  CI scans.
+- Each Service has one code scanning source, `code_scanning_source`. It is
+  `keel` by default, which means CI's SARIF uploads. The other value is
+  `github`, which means GitHub's code scanning alerts. Keel never merges the
+  two, so a Service that leaves the default gets no code scanning Findings
+  from CI, and a Service that keeps it gets none from GitHub. Set it with
+  `PATCH /v1/tenants/{tenant}/services/{service}` and a body such as
+  `{"code_scanning_source": "github", "why": "..."}`. This needs the
+  `service.update` permission for the Service's Team.
+- Switching the source resolves the open code scanning Findings of the old
+  source with the resolution `code scanning source changed to <source>`. The
+  Activity records how many it resolved. Vulnerability Findings are not
+  touched.
+- With `keel`, the sync records code scanning as `keel` and reads nothing
+  from GitHub code scanning. CI uploads work as before.
+- With `github`, each GitHub alert is one Finding,
+  `scan:github:<repository id>:<alert number>`. It stays the same Finding
+  when the code around it moves. Its detail holds the tool, the rule, the
+  alert's most recent location and its GitHub link. When GitHub fixes the
+  alert, the Finding resolves as `fixed on GitHub`. When someone dismisses
+  it on GitHub, it resolves as `dismissed on GitHub: <reason>`. Only GitHub
+  reopening the alert raises it again, as a new Finding. A Service without a
+  `repository_id` cannot be keyed this way. Its code scanning status is
+  `no_repository_id` and nothing is synced.
+- With `github`, CI's SARIF uploads still raise and resolve vulnerability
+  results such as Trivy's CVEs. They skip every other result and never
+  resolve a code scanning Finding.
+- A GitHub alert whose rule is a CVE, for example from Trivy results
+  uploaded to GitHub, is a GitHub alert Finding like any other. If CI also
+  uploads those Trivy results to Keel, the CVE shows twice: once under its
+  alert number and once as `vuln:<CVE>:<service>`.
+- Exceptions name Finding ids, so an Exception covers one GitHub alert. It
+  stays in force while that alert stays open, wherever the alert moves. A
+  new alert of the same rule needs its own Exception.
+- A Dependabot alert is `vuln:<CVE or GHSA>:<service>`, with the CVE
+  preferred. The same CVE from Trivy or OSV is therefore one Finding with
+  several `tools`. A secret alert is a critical `secret` Finding,
+  `secret:github:<repository id>:<number>`. The secret value is never
+  requested (`hide_secret=true`), read or stored. An alert no longer open on
+  GitHub resolves its Finding unless another scanner still reports it. VEX
+  statements and Exceptions apply as for CI scans.
 - Private repositories need GitHub Advanced Security (Code Security, Secret
   Protection) for these APIs. Each sync records, per Service, `ok`,
   `not_enabled`, `forbidden` or `error` for each alert type in the Service's
-  `SyncGitHubAlerts` Activity (`status_detail`); `error` carries the HTTP
+  `SyncGitHubAlerts` Activity (`status_detail`). An `error` carries the HTTP
   status and GitHub's message. `not_enabled`, `forbidden` and `error` mean
-  "unknown", never "no alerts": nothing of that type is ingested or resolved.
-  A tool whose newest analysis failed on GitHub is left as it is. Lists follow
-  GitHub's `Link` cursor, up to 100 pages of 100. For analyses that means the
-  newest 10,000 on the default branch. When that cap is reached, only the
-  categories seen resolve; the Findings of any other category stay open.
+  "unknown", never "no alerts", so nothing of that type is raised or
+  resolved. Lists follow GitHub's `Link` cursor, up to 100 pages of 100.
+- To learn why an alert closed, Keel reads the dismissed and fixed lists,
+  most recently updated first, and stops once it has found every alert it
+  is looking for. A Finding whose alert is in neither list resolves as
+  `no longer on GitHub`, for example after its analysis was deleted. If
+  either list reaches the page cap first, that Finding stays open.

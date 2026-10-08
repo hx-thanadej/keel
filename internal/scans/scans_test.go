@@ -123,23 +123,3 @@ func TestSeverityAndKinds(t *testing.T) {
 		t.Fatalf("%+v %v", rs, err)
 	}
 }
-
-// A code scanning fingerprint is rule, path and message: partial
-// fingerprints, lines, path spelling and message whitespace do not change
-// it, and the same result twice in one file is one Finding.
-func TestCodeScanFingerprintIgnoresPartialFingerprintsAndLines(t *testing.T) {
-	raw, _ := json.Marshal(map[string]any{"version": "2.1.0", "runs": []any{map[string]any{
-		"tool": map[string]any{"driver": map[string]any{"name": "Semgrep"}},
-		"results": []any{
-			res("r1", "./db.go", 3, map[string]any{"partialFingerprints": map[string]string{"primaryLocationLineHash": "aa:1"}}),
-			res("r1", "db.go", 9, map[string]any{"message": map[string]any{"text": "r1  found\n"}}),
-			res("r1", "web.go", 3, nil),
-		}}}})
-	_, rs, err := scans.ParseSARIF(raw, "svc")
-	if err != nil || len(rs) != 2 {
-		t.Fatalf("%+v %v", rs, err)
-	}
-	if got := rs[0].Detail["locations"]; len(got.([]string)) != 2 || got.([]string)[0] != "db.go:3" || got.([]string)[1] != "db.go:9" {
-		t.Fatalf("locations %v", got)
-	}
-}

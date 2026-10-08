@@ -1,6 +1,11 @@
 package ghalerts
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/hx-thanadej/keel/internal/scans"
+)
 
 const (
 	toolDependabot = "dependabot"
@@ -17,6 +22,9 @@ type item struct {
 	title       string
 	vuln        string // vulnerability id for the VEX check, else ""
 	detail      map[string]any
+	// own: the Finding is this alert's alone, so each sync replaces its
+	// detail (a code scanning alert's location moves with the code).
+	own bool
 }
 
 var severityRank = map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -50,6 +58,33 @@ func dedupe(in []item) []item {
 		out = append(out, it)
 	}
 	return out
+}
+
+// codeFingerprint is GitHub's identity for a code scanning alert: the
+// repository's immutable id and the alert number.
+func codeFingerprint(repoID int64, number int) string {
+	return codePrefix(repoID) + strconv.Itoa(number)
+}
+
+func codePrefix(repoID int64) string { return fmt.Sprintf("scan:github:%d:", repoID) }
+
+func codeItem(a CodeAlert, repoID int64) item {
+	loc := a.Path
+	if a.Line > 0 {
+		loc += ":" + strconv.Itoa(a.Line)
+	}
+	kind := scans.Kind(a.Tool, a.RuleID)
+	it := item{tool: scans.GitHubCodeScanningTool, kind: kind, severity: a.Severity, rule: a.RuleID, title: trim(a.Description, 200), own: true,
+		fingerprint: codeFingerprint(repoID, a.Number),
+		detail: map[string]any{"tool": a.Tool, "rule_id": a.RuleID, "message": trim(a.Message, 1000), "locations": []string{loc},
+			"alert_url": a.URL, "alert_number": a.Number}}
+	if it.title == "" {
+		it.title = trim(a.Message, 200)
+	}
+	if kind == "vulnerability" {
+		it.vuln = a.RuleID
+	}
+	return it
 }
 
 func dependabotItems(alerts []DependabotAlert, service string) []item {

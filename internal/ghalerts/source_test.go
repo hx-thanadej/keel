@@ -122,7 +122,7 @@ func TestGitHubSourceMapsRefusals(t *testing.T) {
 			}))
 			defer srv.Close()
 			g := ghalerts.GitHub{Client: ghapi.Client{BaseURL: srv.URL}}
-			if _, err := g.DismissedCodeAlerts(context.Background(), "acme/crm"); !errors.Is(err, tc.want) {
+			if _, err := g.OpenCodeAlerts(context.Background(), "acme/crm"); !errors.Is(err, tc.want) {
 				t.Fatalf("code scanning: %v, want %v", err, tc.want)
 			}
 		})

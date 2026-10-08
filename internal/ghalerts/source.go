@@ -8,13 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
-	"sort"
 	"strings"
-	"time"
 
 	"github.com/hx-thanadej/keel/internal/ghapi"
-	"github.com/hx-thanadej/keel/internal/scans"
 )
 
 // Fetch failures that mean "unknown", never "no alerts".
@@ -29,22 +25,19 @@ var (
 	ErrTooManyPages = fmt.Errorf("more than %d pages", maxPages)
 )
 
-// Analysis is GitHub's latest code scanning analysis of one tool and
-// category on the repository's default branch.
-type Analysis struct {
-	ID        int64
-	Tool      string // lowercased, as SARIF ingest names tools
-	Category  string
-	CommitSHA string
-	Ref       string
-	CreatedAt time.Time
-	Error     string // GitHub's error for a failed analysis, else ""
-}
-
-// DismissedAlert is a code scanning alert dismissed on GitHub.
-type DismissedAlert struct {
-	Tool, RuleID, Reason string
-	Location             scans.Location
+// CodeAlert is a GitHub code scanning alert, at its most recent instance.
+type CodeAlert struct {
+	Number          int
+	State           string // open, dismissed or fixed
+	DismissedReason string
+	Tool            string // lowercased, as SARIF ingest names tools
+	RuleID          string
+	Severity        string
+	Description     string
+	Message         string
+	Path            string
+	Line            int
+	URL             string
 }
 
 // DependabotAlert is an open Dependabot alert.
@@ -69,20 +62,17 @@ type SecretAlert struct {
 
 // Source reads one repository ("owner/name") on GitHub.
 type Source interface {
-	// Analyses lists the newest analysis per tool and category. truncated
-	// means the list ended at the page cap, so a category missing from it
-	// may still exist.
-	Analyses(ctx context.Context, repo string) (latest []Analysis, truncated bool, err error)
-	// SARIF downloads an analysis as the SARIF GitHub holds for it.
-	SARIF(ctx context.Context, repo string, analysis int64) ([]byte, error)
-	DismissedCodeAlerts(ctx context.Context, repo string) ([]DismissedAlert, error)
+	OpenCodeAlerts(ctx context.Context, repo string) ([]CodeAlert, error)
+	// ClosedCodeAlerts finds the alerts numbered numbers among the dismissed
+	// and fixed ones. complete means both lists were read to the end (or
+	// every number was found), so a number missing from closed is in neither.
+	ClosedCodeAlerts(ctx context.Context, repo string, numbers []int) (closed map[int]CodeAlert, complete bool, err error)
 	Dependabot(ctx context.Context, repo string) ([]DependabotAlert, error)
 	SecretScanning(ctx context.Context, repo string) ([]SecretAlert, error)
 }
 
 // GitHub is a Source on the REST API. The token needs read access to code
-// scanning alerts (which covers analyses), Dependabot alerts and secret
-// scanning alerts.
+// scanning alerts, Dependabot alerts and secret scanning alerts.
 type GitHub struct {
 	Client ghapi.Client
 }
@@ -97,20 +87,29 @@ const (
 // too. At maxPages it returns what it read with ErrTooManyPages.
 func list[T any](ctx context.Context, c ghapi.Client, path, query string) ([]T, error) {
 	var all []T
+	err := walk(ctx, c, path, query, func(page []T) bool {
+		all = append(all, page...)
+		return true
+	})
+	return all, err
+}
+
+// walk hands each page of a list endpoint to page until page returns false
+// or the list ends. At maxPages it stops with ErrTooManyPages.
+func walk[T any](ctx context.Context, c ghapi.Client, path, query string, page func([]T) bool) error {
 	next := fmt.Sprintf("%s?per_page=%d&%s", path, perPage, query)
 	for range maxPages {
 		var got []T
 		var err error
 		next, err = c.DoList(ctx, next, &got)
 		if err != nil {
-			return nil, classify(err)
+			return classify(err)
 		}
-		all = append(all, got...)
-		if next == "" {
-			return all, nil
+		if !page(got) || next == "" {
+			return nil
 		}
 	}
-	return all, fmt.Errorf("%s: %w", path, ErrTooManyPages)
+	return fmt.Errorf("%s: %w", path, ErrTooManyPages)
 }
 
 // classify maps GitHub's "this feature is off" responses to ErrNotEnabled
@@ -131,94 +130,92 @@ func classify(err error) error {
 	return fmt.Errorf("%w: %v", ErrForbidden, err)
 }
 
-// Analyses implements Source: the newest analysis per tool and category
-// on the default branch. GitHub lists analyses newest first and keeps every
-// one, so only the newest maxPages pages are read.
-func (g GitHub) Analyses(ctx context.Context, repo string) ([]Analysis, bool, error) {
-	var r struct {
-		DefaultBranch string `json:"default_branch"`
-	}
-	if err := g.Client.Do(ctx, http.MethodGet, "/repos/"+repo, nil, &r); err != nil {
-		return nil, false, classify(err)
-	}
-	if r.DefaultBranch == "" {
-		return nil, false, fmt.Errorf("%s has no default branch", repo)
-	}
-	type wire struct {
-		ID        int64     `json:"id"`
-		Ref       string    `json:"ref"`
-		CommitSHA string    `json:"commit_sha"`
-		Category  string    `json:"category"`
-		Error     string    `json:"error"`
-		CreatedAt time.Time `json:"created_at"`
-		Tool      struct {
-			Name string `json:"name"`
-		} `json:"tool"`
-	}
-	raw, err := list[wire](ctx, g.Client, "/repos/"+repo+"/code-scanning/analyses",
-		"direction=desc&sort=created&ref="+url.QueryEscape("refs/heads/"+r.DefaultBranch))
-	truncated := errors.Is(err, ErrTooManyPages)
-	if err != nil && !truncated {
-		return nil, false, err
-	}
-	latest := map[[2]string]Analysis{}
-	for _, w := range raw {
-		a := Analysis{ID: w.ID, Tool: strings.ToLower(w.Tool.Name), Category: w.Category, CommitSHA: w.CommitSHA, Ref: w.Ref, CreatedAt: w.CreatedAt, Error: w.Error}
-		k := [2]string{a.Tool, a.Category}
-		if old, ok := latest[k]; !ok || a.CreatedAt.After(old.CreatedAt) {
-			latest[k] = a
-		}
-	}
-	out := make([]Analysis, 0, len(latest))
-	for _, a := range latest {
-		out = append(out, a)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Tool != out[j].Tool {
-			return out[i].Tool < out[j].Tool
-		}
-		return out[i].Category < out[j].Category
-	})
-	return out, truncated, nil
+type codeAlertWire struct {
+	Number          int    `json:"number"`
+	State           string `json:"state"`
+	DismissedReason string `json:"dismissed_reason"`
+	HTMLURL         string `json:"html_url"`
+	Rule            struct {
+		ID                    string `json:"id"`
+		Severity              string `json:"severity"`
+		SecuritySeverityLevel string `json:"security_severity_level"`
+		Description           string `json:"description"`
+	} `json:"rule"`
+	Tool struct {
+		Name string `json:"name"`
+	} `json:"tool"`
+	MostRecentInstance struct {
+		Location struct {
+			Path      string `json:"path"`
+			StartLine int    `json:"start_line"`
+		} `json:"location"`
+		Message struct {
+			Text string `json:"text"`
+		} `json:"message"`
+	} `json:"most_recent_instance"`
 }
 
-// SARIF implements Source.
-func (g GitHub) SARIF(ctx context.Context, repo string, analysis int64) ([]byte, error) {
-	raw, err := g.Client.Get(ctx, fmt.Sprintf("/repos/%s/code-scanning/analyses/%d", repo, analysis), "application/sarif+json")
-	if err != nil {
-		return nil, classify(err)
+func (w codeAlertWire) alert() CodeAlert {
+	sev := strings.ToLower(w.Rule.SecuritySeverityLevel)
+	if sev == "" {
+		switch w.Rule.Severity {
+		case "error":
+			sev = "high"
+		case "warning":
+			sev = "medium"
+		default:
+			sev = "low"
+		}
 	}
-	return raw, nil
+	return CodeAlert{Number: w.Number, State: w.State, DismissedReason: w.DismissedReason, Tool: strings.ToLower(w.Tool.Name), RuleID: w.Rule.ID,
+		Severity: sev, Description: w.Rule.Description, Message: w.MostRecentInstance.Message.Text,
+		Path: w.MostRecentInstance.Location.Path, Line: w.MostRecentInstance.Location.StartLine, URL: w.HTMLURL}
 }
 
-// DismissedCodeAlerts implements Source.
-func (g GitHub) DismissedCodeAlerts(ctx context.Context, repo string) ([]DismissedAlert, error) {
-	type wire struct {
-		Rule struct {
-			ID string `json:"id"`
-		} `json:"rule"`
-		Tool struct {
-			Name string `json:"name"`
-		} `json:"tool"`
-		DismissedReason    string `json:"dismissed_reason"`
-		MostRecentInstance struct {
-			Location struct {
-				Path      string `json:"path"`
-				StartLine int    `json:"start_line"`
-			} `json:"location"`
-		} `json:"most_recent_instance"`
-	}
-	raw, err := list[wire](ctx, g.Client, "/repos/"+repo+"/code-scanning/alerts", "state=dismissed")
+// OpenCodeAlerts implements Source.
+func (g GitHub) OpenCodeAlerts(ctx context.Context, repo string) ([]CodeAlert, error) {
+	raw, err := list[codeAlertWire](ctx, g.Client, "/repos/"+repo+"/code-scanning/alerts", "state=open")
 	if err != nil {
 		return nil, err
 	}
-	out := make([]DismissedAlert, 0, len(raw))
+	out := make([]CodeAlert, 0, len(raw))
 	for _, w := range raw {
-		l := w.MostRecentInstance.Location
-		out = append(out, DismissedAlert{Tool: strings.ToLower(w.Tool.Name), RuleID: w.Rule.ID, Reason: w.DismissedReason,
-			Location: scans.Location{Path: scans.NormalizePath(l.Path), Line: max(l.StartLine, 0)}})
+		out = append(out, w.alert())
 	}
 	return out, nil
+}
+
+// ClosedCodeAlerts implements Source. Both lists are read most recently
+// updated first, so an alert closed since the last sync is near the top and
+// the walk stops once every number is found.
+func (g GitHub) ClosedCodeAlerts(ctx context.Context, repo string, numbers []int) (map[int]CodeAlert, bool, error) {
+	want := map[int]bool{}
+	for _, n := range numbers {
+		want[n] = true
+	}
+	closed := map[int]CodeAlert{}
+	complete := true
+	for _, state := range []string{"dismissed", "fixed"} {
+		if len(closed) == len(want) {
+			break
+		}
+		err := walk(ctx, g.Client, "/repos/"+repo+"/code-scanning/alerts", "state="+state+"&sort=updated&direction=desc", func(page []codeAlertWire) bool {
+			for _, w := range page {
+				if want[w.Number] {
+					closed[w.Number] = w.alert()
+				}
+			}
+			return len(closed) < len(want)
+		})
+		if errors.Is(err, ErrTooManyPages) {
+			complete = false
+			continue
+		}
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	return closed, complete || len(closed) == len(want), nil
 }
 
 // Dependabot implements Source.

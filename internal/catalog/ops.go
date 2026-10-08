@@ -12,6 +12,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/scans"
 )
 
 // ---------- Tenants ----------
@@ -165,8 +166,7 @@ func (s *Service) SetTenantTimeZone(ctx context.Context, p auth.Principal, tenan
 func (s *Service) ListServices(ctx context.Context, p auth.Principal, tenantID string) ([]ServiceEntry, error) {
 	var out []ServiceEntry
 	err := s.read(ctx, p, "service.read", authz.Resource{Type: "service", TenantID: tenantID}, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id::text, project_id::text, team_id::text, slug, name, repository, template, template_version
-			FROM services WHERE archived_at IS NULL ORDER BY slug`)
+		rows, err := tx.Query(ctx, `SELECT `+serviceCols+` FROM services WHERE archived_at IS NULL ORDER BY slug`)
 		if err != nil {
 			return err
 		}
@@ -174,6 +174,56 @@ func (s *Service) ListServices(ctx context.Context, p auth.Principal, tenantID s
 		return err
 	})
 	return out, mapErr(err)
+}
+
+const serviceCols = `id::text, project_id::text, team_id::text, slug, name, repository, template, template_version, code_scanning_source`
+
+// SetCodeScanningSource chooses where a Service's code scanning Findings
+// come from: "keel" (CI's SARIF uploads) or "github" (GitHub's code
+// scanning alerts). The open code scanning Findings of the other source are
+// resolved, so the Service never shows one result twice.
+func (s *Service) SetCodeScanningSource(ctx context.Context, p auth.Principal, tenantID, id, source, why string) (ServiceEntry, error) {
+	if source != scans.SourceKeel && source != scans.SourceGitHub {
+		return ServiceEntry{}, invalid("code_scanning_source must be keel or github")
+	}
+	var team string
+	err := s.store.InTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT team_id::text FROM services WHERE id = $1`, id).Scan(&team)
+	})
+	if err != nil && !errors.Is(mapErr(err), ErrNotFound) { // a missing Service is the policy's call first, as in projectTeam
+		return ServiceEntry{}, mapErr(err)
+	}
+	w := write{action: "service.update", res: authz.Resource{Type: "service", ID: id, TenantID: tenantID, TeamID: team},
+		operation: "SetCodeScanningSource", kind: activity.Update, why: why}
+	d, err := s.authorize(ctx, p, w.action, w.res)
+	if err != nil || !d.Allow {
+		s.recordDenied(ctx, p, w, d)
+		if err != nil {
+			return ServiceEntry{}, fmt.Errorf("authorize: %w", err)
+		}
+		return ServiceEntry{}, ErrForbidden
+	}
+	var sv ServiceEntry
+	err = s.store.InTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `UPDATE services SET code_scanning_source = $2 WHERE id = $1 AND archived_at IS NULL RETURNING `+serviceCols, id, source).
+			Scan(&sv.ID, &sv.ProjectID, &sv.TeamID, &sv.Slug, &sv.Name, &sv.Repository, &sv.Template, &sv.TemplateVersion, &sv.CodeScanningSource); err != nil {
+			return err
+		}
+		resolved, err := scans.ResolveOtherCodeScanning(ctx, tx, id, source)
+		if err != nil {
+			return err
+		}
+		// The count is the Activity's point, so it is recorded here rather than through do.
+		_, err = activity.Record(ctx, tx, activity.Activity{
+			TenantID: tenantID, Source: "keel/catalog", Type: "keel.service.code_scanning_source_changed",
+			Subject: "service/" + id, Operation: w.operation, Kind: w.kind, Actor: actorOf(p),
+			Resources: []activity.Resource{{Type: "service", UID: id, OwnerTeam: sv.TeamID}},
+			Why:       activity.Why{Reason: why}, Outcome: activity.Success,
+			StatusDetail: fmt.Sprintf("code scanning source %s; %d open code scanning Findings of the other source resolved; %s", source, resolved, d),
+		})
+		return err
+	})
+	return sv, mapErr(err)
 }
 
 // ListProjects lists active Projects.

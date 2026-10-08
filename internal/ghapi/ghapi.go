@@ -43,19 +43,9 @@ func Status(err error) int {
 
 // Do sends in as JSON (if not nil) and decodes the response into out (if not nil).
 func (c Client) Do(ctx context.Context, method, path string, in, out any) error {
-	_, err := c.do(ctx, method, path, jsonMedia, in, out)
+	_, err := c.do(ctx, method, path, in, out)
 	return err
 }
-
-// Get GETs path as the media type accept and returns the body as is, for
-// responses that are not GitHub's JSON (a SARIF download).
-func (c Client) Get(ctx context.Context, path, accept string) ([]byte, error) {
-	var raw []byte
-	_, err := c.do(ctx, http.MethodGet, path, accept, nil, &raw)
-	return raw, err
-}
-
-const jsonMedia = "application/vnd.github+json"
 
 // maxBody is the largest response read. A longer one is an error, never a
 // silently truncated body.
@@ -67,7 +57,7 @@ const maxBody = 32 << 20
 // counting pages. A next link outside BaseURL is an error, so the token is
 // never sent to another host.
 func (c Client) DoList(ctx context.Context, path string, out any) (next string, err error) {
-	h, err := c.do(ctx, http.MethodGet, path, jsonMedia, nil, out)
+	h, err := c.do(ctx, http.MethodGet, path, nil, out)
 	if err != nil {
 		return "", err
 	}
@@ -178,9 +168,8 @@ func (c Client) base() string {
 	return c.BaseURL
 }
 
-// do decodes a JSON response into out, or copies the body into out when it
-// is a *[]byte.
-func (c Client) do(ctx context.Context, method, path, accept string, in, out any) (http.Header, error) {
+// do decodes a JSON response into out and returns its headers.
+func (c Client) do(ctx context.Context, method, path string, in, out any) (http.Header, error) {
 	base := c.base()
 	var body io.Reader
 	if in != nil {
@@ -194,7 +183,7 @@ func (c Client) do(ctx context.Context, method, path, accept string, in, out any
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", accept)
+	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -220,10 +209,6 @@ func (c Client) do(ctx context.Context, method, path, accept string, in, out any
 	}
 	if len(raw) > maxBody {
 		return nil, fmt.Errorf("github %s %s: response larger than %d bytes", method, path, maxBody)
-	}
-	if b, ok := out.(*[]byte); ok {
-		*b = raw
-		return res.Header, nil
 	}
 	if out != nil && len(raw) > 0 {
 		return res.Header, json.Unmarshal(raw, out)

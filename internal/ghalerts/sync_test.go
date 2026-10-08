@@ -17,32 +17,23 @@ import (
 )
 
 // fake is a Source with canned Dependabot and secret scanning alerts. Code
-// scanning goes to code (a GitHub client on a test server) when set, and
-// lists no analyses otherwise.
+// scanning goes to code (a GitHub client on a test server) when set.
 type fake struct {
 	code             ghalerts.Source
 	deps             []ghalerts.DependabotAlert
 	secrets          []ghalerts.SecretAlert
 	codeErr, depsErr error
 	secretsErr       error
-	repos            []string
 }
 
-func (f *fake) Analyses(ctx context.Context, repo string) ([]ghalerts.Analysis, bool, error) {
-	f.repos = append(f.repos, repo)
+func (f *fake) OpenCodeAlerts(ctx context.Context, repo string) ([]ghalerts.CodeAlert, error) {
 	if f.code == nil || f.codeErr != nil {
-		return nil, false, f.codeErr
+		return nil, f.codeErr
 	}
-	return f.code.Analyses(ctx, repo)
+	return f.code.OpenCodeAlerts(ctx, repo)
 }
-func (f *fake) SARIF(ctx context.Context, repo string, id int64) ([]byte, error) {
-	return f.code.SARIF(ctx, repo, id)
-}
-func (f *fake) DismissedCodeAlerts(ctx context.Context, repo string) ([]ghalerts.DismissedAlert, error) {
-	if f.code == nil {
-		return nil, nil
-	}
-	return f.code.DismissedCodeAlerts(ctx, repo)
+func (f *fake) ClosedCodeAlerts(ctx context.Context, repo string, numbers []int) (map[int]ghalerts.CodeAlert, bool, error) {
+	return f.code.ClosedCodeAlerts(ctx, repo, numbers)
 }
 func (f *fake) Dependabot(context.Context, string) ([]ghalerts.DependabotAlert, error) {
 	return f.deps, f.depsErr
@@ -196,15 +187,16 @@ func TestSecretAlertIsCriticalAndCarriesNoSecret(t *testing.T) {
 func TestUnavailableAlertTypeIsReportedNotResolved(t *testing.T) {
 	ctx := context.Background()
 	e := setup(t, "acme/crm-api")
+	e.setSource(t, scans.SourceGitHub)
 	gh := newGitHub(t)
-	gh.analysis("codeql", "", codeql(sqli))
+	gh.alert(1, "go/sql-injection", "db.go", 7)
 	src := &fake{code: gh.source(), deps: []ghalerts.DependabotAlert{{Number: 1, GHSA: "GHSA-aaaa-bbbb-cccc", Severity: "high", Summary: "s"}},
 		secrets: []ghalerts.SecretAlert{{Number: 1, Type: "t"}}}
 	if res, err := e.syncer(src).Run(ctx); err != nil || res.Raised != 3 {
 		t.Fatalf("%+v %v", res, err)
 	}
 	// Plan limitations on the next sync: every fetch fails differently.
-	gh.analysis("codeql", "", codeql())
+	gh.close(1, "fixed", "")
 	src.deps, src.secrets = nil, nil
 	src.codeErr = ghalerts.ErrNotEnabled
 	src.depsErr = ghalerts.ErrForbidden

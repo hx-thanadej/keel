@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -27,6 +29,12 @@ const (
 	StatusNotEnabled = "not_enabled"
 	StatusForbidden  = "forbidden"
 	StatusError      = "error"
+	// StatusKeel: the Service takes code scanning from CI's SARIF, so
+	// GitHub code scanning is not synced.
+	StatusKeel = "keel"
+	// StatusNoRepositoryID: the Service takes code scanning from GitHub but
+	// has no repository id to key its alerts by, so nothing is synced.
+	StatusNoRepositoryID = "no_repository_id"
 )
 
 var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:ghalerts"}
@@ -60,6 +68,7 @@ type Result struct {
 type svcRow struct {
 	id, slug, project, team, repo string
 	repoID                        *int64
+	codeSource                    string
 }
 
 // Run syncs every non-archived Service of every Tenant. A failing alert
@@ -78,14 +87,14 @@ func (s Syncer) Run(ctx context.Context) (Result, error) {
 	for _, tenant := range tenants {
 		var svcs []svcRow
 		if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-			rows, err := tx.Query(ctx, `SELECT id::text, slug, project_id::text, team_id::text, repository, repository_id FROM services
+			rows, err := tx.Query(ctx, `SELECT id::text, slug, project_id::text, team_id::text, repository, repository_id, code_scanning_source FROM services
 				WHERE archived_at IS NULL AND repository <> '' ORDER BY slug`)
 			if err != nil {
 				return err
 			}
 			svcs, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (svcRow, error) {
 				var v svcRow
-				err := r.Scan(&v.id, &v.slug, &v.project, &v.team, &v.repo, &v.repoID)
+				err := r.Scan(&v.id, &v.slug, &v.project, &v.team, &v.repo, &v.repoID, &v.codeSource)
 				return v, err
 			})
 			return err
@@ -147,23 +156,54 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 		repoKey = fmt.Sprint(*v.repoID) // immutable, survives renames
 	}
 	// All GitHub calls happen before any write.
-	code, codeErr := s.fetchCode(ctx, tenant, v.id, repo)
+	var code codeScan
+	var codeErr error
+	switch {
+	case v.codeSource != scans.SourceGitHub:
+		st.CodeScanning = StatusKeel
+	case v.repoID == nil:
+		st.CodeScanning = StatusNoRepositoryID
+	default:
+		code, codeErr = s.fetchCode(ctx, tenant, v, repo)
+		st.CodeScanning = status(codeErr)
+	}
 	deps, depErr := s.Source.Dependabot(ctx, repo)
 	secrets, secErr := s.Source.SecretScanning(ctx, repo)
-	st.CodeScanning, st.Dependabot, st.SecretScanning = status(codeErr), status(depErr), status(secErr)
+	st.Dependabot, st.SecretScanning = status(depErr), status(secErr)
 
 	var raised, resolved int
 	codeDetail := detailStatus(st.CodeScanning, codeErr)
-	if codeErr == nil {
-		r, n, err := s.applyCode(ctx, tenant, v.id, code)
-		if err != nil {
-			return st, err
-		}
-		raised += r
-		resolved += n
-		codeDetail += " " + code.summary()
-	}
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		if st.CodeScanning == StatusOK {
+			// The lock orders this against SetCodeScanningSource, which
+			// resolves GitHub's Findings when the Service leaves GitHub.
+			if err := tx.QueryRow(ctx, `SELECT code_scanning_source FROM services WHERE id = $1 FOR SHARE`, v.id).Scan(&v.codeSource); err != nil {
+				return err
+			}
+			if v.codeSource != scans.SourceGitHub {
+				st.CodeScanning, codeDetail = StatusKeel, StatusKeel
+			}
+		}
+		if st.CodeScanning == StatusOK {
+			for _, a := range code.open {
+				created, err := raise(ctx, tx, tenant, v, codeItem(a, *v.repoID))
+				if err != nil {
+					return err
+				}
+				if created {
+					raised++
+				}
+			}
+			for fp, resolution := range code.closed {
+				tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $3
+					WHERE service_id = $1 AND fingerprint = $2 AND status = 'open'`, v.id, fp, resolution)
+				if err != nil {
+					return err
+				}
+				resolved += int(tag.RowsAffected())
+			}
+			codeDetail += fmt.Sprintf(" (%d open, %d closed)", len(code.open), len(code.closed))
+		}
 		type group struct {
 			ok    bool
 			items []item
@@ -179,16 +219,7 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 			current := []string{}
 			for _, it := range g.items {
 				current = append(current, it.fingerprint)
-				if it.vuln != "" {
-					var suppressed bool
-					if err := tx.QueryRow(ctx, `SELECT vex_suppressed($1, $2)`, it.vuln, v.id).Scan(&suppressed); err != nil {
-						return err
-					}
-					if suppressed {
-						continue // a VEX statement says this Service is not affected
-					}
-				}
-				created, err := upsert(ctx, tx, tenant, v, it)
+				created, err := raise(ctx, tx, tenant, v, it)
 				if err != nil {
 					return err
 				}
@@ -216,203 +247,68 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 	return st, err
 }
 
-// codeScan is what one sync fetched from GitHub code scanning.
+// codeScan is what one sync learned from GitHub code scanning.
 type codeScan struct {
-	ingest    []toolSARIF      // tools with an analysis Keel has not ingested
-	unchanged []string         // tools whose latest analyses Keel already ingested
-	failed    []string         // tools whose latest analysis failed on GitHub: left as they are
-	dismissed []DismissedAlert // alerts dismissed on GitHub
+	open   []CodeAlert
+	closed map[string]string // fingerprint of an open Finding whose alert closed → its resolution
 }
 
-// toolSARIF is the latest analysis of every category of one tool, merged
-// into one SARIF log so a full ingest never resolves another category's
-// results.
-type toolSARIF struct {
-	tool           string
-	ids            []int64
-	categories     []string // set when the analyses list was truncated: resolve only these
-	commitSHA, ref string
-	sarif          []byte
-	dismissed      []string // fingerprints of results dismissed on GitHub
-}
-
-func (c codeScan) summary() string {
-	var parts []string
-	for _, t := range c.ingest {
-		parts = append(parts, fmt.Sprintf("ingested %s (%d analyses)", t.tool, len(t.ids)))
-	}
-	if len(c.unchanged) > 0 {
-		parts = append(parts, "unchanged "+strings.Join(c.unchanged, ", "))
-	}
-	if len(c.failed) > 0 {
-		parts = append(parts, "kept "+strings.Join(c.failed, ", ")+": latest analysis failed on GitHub")
-	}
-	parts = append(parts, fmt.Sprintf("%d dismissed on GitHub", len(c.dismissed)))
-	return "(" + strings.Join(parts, "; ") + ")"
-}
-
-// fetchCode reads the latest analysis per tool and category and downloads
-// the SARIF of each tool with an analysis Keel has not ingested yet. Any
-// failed call fails the whole alert type, so nothing is resolved on a
-// partial view.
-func (s Syncer) fetchCode(ctx context.Context, tenant, service, repo string) (codeScan, error) {
-	var c codeScan
-	analyses, truncated, err := s.Source.Analyses(ctx, repo)
-	if err != nil {
+// fetchCode lists the open alerts and looks up why each open Finding whose
+// alert is no longer open closed. A Finding whose alert is in no list
+// stays open unless both closed lists were read to the end.
+func (s Syncer) fetchCode(ctx context.Context, tenant string, v svcRow, repo string) (codeScan, error) {
+	c := codeScan{closed: map[string]string{}}
+	var err error
+	if c.open, err = s.Source.OpenCodeAlerts(ctx, repo); err != nil {
 		return c, err
 	}
-	if c.dismissed, err = s.Source.DismissedCodeAlerts(ctx, repo); err != nil {
-		return c, err
-	}
-	ids := make([]int64, 0, len(analyses))
-	byTool := map[string][]Analysis{}
-	var tools []string
-	for _, a := range analyses {
-		ids = append(ids, a.ID)
-		if byTool[a.Tool] == nil {
-			tools = append(tools, a.Tool)
-		}
-		byTool[a.Tool] = append(byTool[a.Tool], a)
-	}
-	var seen map[int64]bool
+	var findings []string
 	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT DISTINCT a FROM scan_runs, unnest(github_analysis_ids) AS a WHERE service_id = $1 AND a = ANY ($2)`, service, ids)
+		rows, err := tx.Query(ctx, `SELECT fingerprint FROM findings WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2`, v.id, scans.GitHubCodeScanningTool)
 		if err != nil {
 			return err
 		}
-		got, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-		seen = map[int64]bool{}
-		for _, id := range got {
-			seen[id] = true
-		}
+		findings, err = pgx.CollectRows(rows, pgx.RowTo[string])
 		return err
 	}); err != nil {
 		return c, err
 	}
-	for _, tool := range tools {
-		as := byTool[tool]
-		if slices.ContainsFunc(as, func(a Analysis) bool { return a.Error != "" }) {
-			c.failed = append(c.failed, tool)
+	open := map[string]bool{}
+	for _, a := range c.open {
+		open[codeFingerprint(*v.repoID, a.Number)] = true
+	}
+	prefix := codePrefix(*v.repoID)
+	byNumber := map[int]string{}
+	for _, fp := range findings {
+		if open[fp] {
 			continue
 		}
-		if !slices.ContainsFunc(as, func(a Analysis) bool { return !seen[a.ID] }) {
-			c.unchanged = append(c.unchanged, tool)
+		n, err := strconv.Atoi(strings.TrimPrefix(fp, prefix))
+		if !strings.HasPrefix(fp, prefix) || err != nil {
+			c.closed[fp] = "no longer on GitHub" // an alert of the Service's previous repository
 			continue
 		}
-		t := toolSARIF{tool: tool}
-		var runs []map[string]any
-		var newest time.Time
-		for _, a := range as {
-			raw, err := s.Source.SARIF(ctx, repo, a.ID)
-			if err != nil {
-				return c, err
-			}
-			var log struct {
-				Runs []map[string]any `json:"runs"`
-			}
-			if err := json.Unmarshal(raw, &log); err != nil {
-				return c, fmt.Errorf("analysis %d: not SARIF JSON: %w", a.ID, err)
-			}
-			for _, run := range log.Runs {
-				// The category GitHub filed the analysis under, as SARIF writes it.
-				run["automationDetails"] = map[string]any{"id": a.Category + "/"}
-				runs = append(runs, run)
-			}
-			if truncated {
-				// A category outside the window may still exist: its Findings stay open.
-				t.categories = append(t.categories, a.Category)
-			}
-			t.ids = append(t.ids, a.ID)
-			if a.CreatedAt.After(newest) {
-				newest, t.commitSHA, t.ref = a.CreatedAt, a.CommitSHA, a.Ref
-			}
+		byNumber[n] = fp
+	}
+	if len(byNumber) == 0 {
+		return c, nil
+	}
+	closed, complete, err := s.Source.ClosedCodeAlerts(ctx, repo, slices.Sorted(maps.Keys(byNumber)))
+	if err != nil {
+		return c, err
+	}
+	for n, fp := range byNumber {
+		a, ok := closed[n]
+		switch {
+		case ok && a.State == "dismissed":
+			c.closed[fp] = "dismissed on GitHub: " + a.DismissedReason
+		case ok:
+			c.closed[fp] = a.State + " on GitHub"
+		case complete:
+			c.closed[fp] = "no longer on GitHub"
 		}
-		if t.sarif, err = json.Marshal(map[string]any{"version": "2.1.0", "runs": runs}); err != nil {
-			return c, err
-		}
-		got, results, err := scans.ParseSARIF(t.sarif, service)
-		// A full scan resolves per tool, so the SARIF must name only this one.
-		if err == nil && (len(got) == 0 || slices.ContainsFunc(got, func(g string) bool { return g != tool })) {
-			err = fmt.Errorf("SARIF runs are %v, want %s only", got, tool)
-		}
-		if err != nil {
-			return c, fmt.Errorf("%s analyses %v: %w", tool, t.ids, err)
-		}
-		for _, r := range results {
-			locs, _ := r.Detail["locations"].([]string)
-			if slices.ContainsFunc(c.dismissed, func(d DismissedAlert) bool { return d.covers(tool, r.RuleID, locs) }) {
-				t.dismissed = append(t.dismissed, r.Fingerprint)
-			}
-		}
-		c.ingest = append(c.ingest, t)
 	}
 	return c, nil
-}
-
-// applyCode resolves the Findings of alerts dismissed on GitHub, then
-// ingests each new SARIF as a full scan of its tool. Dismissals go first so
-// their Findings carry GitHub's reason, and the ingest leaves dismissed
-// results out so it never raises them again.
-func (s Syncer) applyCode(ctx context.Context, tenant, service string, c codeScan) (raised, resolved int, err error) {
-	if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-		for _, d := range c.dismissed {
-			n, err := dismiss(ctx, tx, service, d)
-			if err != nil {
-				return err
-			}
-			resolved += n
-		}
-		return nil
-	}); err != nil {
-		return 0, 0, err
-	}
-	for _, t := range c.ingest {
-		run, err := scans.Service{Store: s.Store}.Ingest(ctx, tenant, service, scans.Upload{Scope: "full", CommitSHA: t.commitSHA, Ref: t.ref,
-			SARIF: t.sarif, Dismissed: t.dismissed, GitHubAnalysisIDs: t.ids, Categories: t.categories}, keelActor)
-		if err != nil {
-			return 0, 0, fmt.Errorf("%s analyses %v: %w", t.tool, t.ids, err)
-		}
-		raised += run.Raised
-		resolved += run.Resolved
-	}
-	return raised, resolved, nil
-}
-
-// covers reports whether d is the alert of a result of tool and rule at one
-// of locs (a Finding's detail.locations).
-func (d DismissedAlert) covers(tool, rule string, locs []string) bool {
-	return d.Tool == tool && d.RuleID == rule && slices.ContainsFunc(locs, func(l string) bool { return d.Location.Matches(scans.ParseLocation(l)) })
-}
-
-// dismiss takes d's tool off the open Findings at its rule and location and
-// resolves those no other tool still reports.
-func dismiss(ctx context.Context, tx pgx.Tx, service string, d DismissedAlert) (int, error) {
-	rows, err := tx.Query(ctx, `SELECT id::text, coalesce(detail->'locations', '[]') FROM findings
-		WHERE service_id = $1 AND status = 'open' AND detail->'tools' ? $2 AND detail->>'rule_id' = $3`, service, d.Tool, d.RuleID)
-	if err != nil {
-		return 0, err
-	}
-	var id string
-	var locs []string
-	var ids []string
-	if _, err := pgx.ForEachRow(rows, []any{&id, &locs}, func() error {
-		if d.covers(d.Tool, d.RuleID, locs) {
-			ids = append(ids, id)
-		}
-		return nil
-	}); err != nil || len(ids) == 0 {
-		return 0, err
-	}
-	var n int
-	err = tx.QueryRow(ctx, `WITH d AS (UPDATE findings SET
-		    detail = jsonb_set(detail, '{tools}', (detail->'tools') - $1),
-		    status = CASE WHEN (detail->'tools') - $1 = '[]' THEN 'resolved' ELSE status END,
-		    resolved_at = CASE WHEN (detail->'tools') - $1 = '[]' THEN now() ELSE resolved_at END,
-		    resolution = CASE WHEN (detail->'tools') - $1 = '[]' THEN $3 ELSE resolution END
-		WHERE id = ANY ($2::uuid[])
-		RETURNING status)
-		SELECT count(*) FILTER (WHERE status = 'resolved') FROM d`, d.Tool, ids, "dismissed on GitHub: "+d.Reason).Scan(&n)
-	return n, err
 }
 
 // detailStatus is a status as the Activity shows it, with a short reason
@@ -458,6 +354,17 @@ func reason(err error) string {
 	return r
 }
 
+// raise upserts it unless a VEX statement says the Service is not affected.
+func raise(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (bool, error) {
+	if it.vuln != "" {
+		var suppressed bool
+		if err := tx.QueryRow(ctx, `SELECT vex_suppressed($1, $2)`, it.vuln, v.id).Scan(&suppressed); err != nil || suppressed {
+			return false, err
+		}
+	}
+	return upsert(ctx, tx, tenant, v, it)
+}
+
 // upsert raises the Finding or adds the alert's tool to an existing one, so
 // a CVE Trivy also reports stays one Finding.
 func upsert(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (bool, error) {
@@ -467,16 +374,20 @@ func upsert(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (b
 	if err != nil {
 		return false, err
 	}
+	refresh := []byte("{}")
+	if it.own {
+		refresh = detail
+	}
 	title := fmt.Sprintf("%s in %s: %s", it.rule, v.slug, it.title)
 	var inserted bool
 	err = tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, owner_team_id, service_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET
 		    last_seen_at = now(),
-		    detail = findings.detail || jsonb_build_object(
+		    detail = findings.detail || $10::jsonb || jsonb_build_object(
 		        'tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'tools', '[]') || (excluded.detail->'tools')) AS t)),
 		    severity = CASE WHEN array_position(ARRAY['critical','high','medium','low'], excluded.severity) < array_position(ARRAY['critical','high','medium','low'], findings.severity)
 		                    THEN excluded.severity ELSE findings.severity END
-		RETURNING (xmax = 0)`, tenant, it.kind, it.fingerprint, it.severity, title, detail, v.project, v.team, v.id).Scan(&inserted)
+		RETURNING (xmax = 0)`, tenant, it.kind, it.fingerprint, it.severity, title, detail, v.project, v.team, v.id, refresh).Scan(&inserted)
 	return inserted, err
 }

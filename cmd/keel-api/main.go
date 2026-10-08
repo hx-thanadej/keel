@@ -37,8 +37,8 @@
 //	KEEL_WASTE_GRACE_DAYS     days a waste recommendation must stay open first (default 7)
 //	KEEL_GITHUB_WRITE_TOKEN   lets Keel open rightsizing pull requests (contents:write, pull_requests:write)
 //	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
-//	KEEL_GITHUB_ADMIN_TOKEN  also syncs GitHub code scanning analyses, Dependabot and secret scanning alerts into
-//	                    Findings every 6h (alerts: read for each of the three; code scanning covers analyses)
+//	KEEL_GITHUB_ADMIN_TOKEN  also syncs GitHub Dependabot and secret scanning alerts into Findings every 6h, and
+//	                    code scanning alerts for Services whose code_scanning_source is github (alerts: read for each)
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
@@ -371,8 +371,8 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		})
 	}
 	if tok := os.Getenv("KEEL_GITHUB_ADMIN_TOKEN"); tok != "" {
-		// Needs read access to code scanning alerts (which covers analyses
-		// and their SARIF), Dependabot alerts and secret scanning alerts (#121).
+		// Needs read access to code scanning, Dependabot and secret
+		// scanning alerts (#121).
 		alerts := ghalerts.Syncer{Store: st, Source: ghalerts.GitHub{Client: ghapi.Client{Token: tok}}}
 		go every(ctx, 6*time.Hour, "github alert sync", func(ctx context.Context) error {
 			res, err := alerts.Run(ctx)
@@ -382,7 +382,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			limited := 0
 			for _, s := range res.Statuses {
 				for _, status := range []string{s.CodeScanning, s.Dependabot, s.SecretScanning} {
-					if status != ghalerts.StatusOK {
+					if status != ghalerts.StatusOK && status != ghalerts.StatusKeel {
 						limited++
 					}
 				}
