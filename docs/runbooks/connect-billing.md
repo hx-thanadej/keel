@@ -3,7 +3,7 @@
 Everything in M1 is built and tested against fixtures. These steps connect it
 to real money. Each needs someone with access to the payer / management account.
 
-## Tencent Cloud (payer UIN 200045645249) — ticket #29
+## Tencent Cloud (payer UIN 200045645249), ticket #29
 
 **Use the wizard.** Run `scripts/wizards/tencent-payer-billing.sh` with
 `tccli` signed in as the payer (`TCCLI_PROFILE=<name>` picks a profile). It
