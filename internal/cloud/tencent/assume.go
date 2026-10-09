@@ -3,6 +3,7 @@ package tencent
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,8 @@ type MemberRole struct {
 	Account string // member UIN
 	Role    string // role name in the member account, e.g. KeelReadOnly
 	Region  string
+	// Endpoint overrides the STS host (scheme://host), for tests.
+	Endpoint string
 
 	mu      sync.Mutex
 	cached  common.CredentialIface
@@ -41,7 +44,11 @@ func (m *MemberRole) GetCredential() (common.CredentialIface, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := sts.NewClient(base, m.Region, profile.NewClientProfile())
+	cpf := profile.NewClientProfile()
+	if scheme, host, ok := strings.Cut(m.Endpoint, "://"); ok {
+		cpf.HttpProfile.Scheme, cpf.HttpProfile.Endpoint = scheme, host
+	}
+	c, err := sts.NewClient(base, m.Region, cpf)
 	if err != nil {
 		return nil, err
 	}

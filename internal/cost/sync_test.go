@@ -164,3 +164,49 @@ func TestReconcileMismatchRecorded(t *testing.T) {
 		t.Errorf("stored %s %s", status, diff)
 	}
 }
+
+func TestBillSyncSkipsNonFOCUSFiles(t *testing.T) {
+	w := setup(t)
+	objs := &memObjects{objs: map[string][]byte{
+		"bills/2026-09-01.csv": splitByDay(t, "01", "02"),
+		"bills/cost-allocation-2026-09.csv": []byte("PayerUin,OwnerUin,BusinessCodeName,ProductCodeName,BillMonth,RealTotalCost\n" +
+			"200045645249,100001,CVM,Standard S5,2026-09,99.00\n"),
+	}}
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: w.s}, Objects: objs, Provider: "tencent", BillingAccountID: "200045645249",
+		Prefix: "bills/", Mode: cost.PerDayFiles, Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) }}
+	rep, err := bs.Run(context.Background())
+	must(t, err)
+	if rep.NewFiles != 1 || len(rep.NotFOCUS) != 1 || rep.NotFOCUS[0] != "bills/cost-allocation-2026-09.csv" {
+		t.Fatalf("run %+v", rep)
+	}
+	if got := billedTotal(t, w); got != "42.80" {
+		t.Fatalf("billed = %s, want the FOCUS file alone (42.80)", got)
+	}
+	skips := func() int {
+		var n int
+		must(t, w.s.InTenant(context.Background(), w.home, func(tx pgx.Tx) error {
+			return tx.QueryRow(context.Background(), `SELECT count(*) FROM activities WHERE type = 'keel.cost.bill_file_skipped' AND subject LIKE '%cost-allocation-2026-09.csv@'`).Scan(&n)
+		}))
+		return n
+	}
+	if n := skips(); n != 1 {
+		t.Fatalf("skip activities = %d, want 1", n)
+	}
+
+	rep, err = bs.Run(context.Background())
+	must(t, err)
+	if len(rep.NotFOCUS) != 0 || skips() != 1 {
+		t.Fatalf("second run re-reported the skipped file: %+v, activities %d", rep, skips())
+	}
+}
+
+func TestBillSyncFailsOnMalformedFOCUSFile(t *testing.T) {
+	w := setup(t)
+	bad := strings.Replace(string(splitByDay(t, "01")), "SubAccountId", "SubAccount", 1)
+	objs := &memObjects{objs: map[string][]byte{"bills/2026-09-01.csv": []byte(bad)}}
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: w.s}, Objects: objs, Provider: "tencent", BillingAccountID: "200045645249",
+		Prefix: "bills/", Mode: cost.PerDayFiles, Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) }}
+	if _, err := bs.Run(context.Background()); err == nil || errors.Is(err, cost.ErrNotFOCUS) {
+		t.Fatalf("err = %v, want a malformed-FOCUS failure", err)
+	}
+}

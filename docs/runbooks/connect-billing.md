@@ -32,6 +32,14 @@ to real money. Each needs someone with access to the payer / management account.
    Cloud Accounts are registered (`POST …/discoveries/tencent` then register
    the suggested accounts).
 
+`KEEL_TENCENT_BILL_ROLE` names a CAM role in the payer UIN
+(`KEEL_TENCENT_PAYER_UIN`) that holds the billing and bill-bucket permissions
+from step 2. Keel assumes it with STS AssumeRole from its base keyless identity
+and uses it only for bill sync and invoice reconciliation, renewing it before
+expiry. The role must trust Keel's base identity, and the base identity needs
+`sts:AssumeRole` on it. Unset, bill sync uses the base identity and Keel logs a
+warning at startup.
+
 Until then, a FOCUS export downloaded from the console can be uploaded:
 `POST /v1/tenants/{home}/cost-loads?provider=tencent&billing_account=200045645249&period=YYYY-MM`.
 
