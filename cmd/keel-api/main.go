@@ -24,7 +24,8 @@
 //	KEEL_TENCENT_BILL_BUCKET   COS bucket where the payer's Bill Storage delivers FOCUS bills
 //	KEEL_TENCENT_BILL_PREFIX   object prefix of the FOCUS bill files
 //	KEEL_TENCENT_PAYER_UIN     payer account id (FOCUS BillingAccountId)
-//	KEEL_TENCENT_BILL_MODE     per-day (default) | cumulative; confirm on first delivery
+//	KEEL_TENCENT_BILL_ROLE     name of the payer CAM role Keel's base identity assumes for bill sync and invoices
+//	KEEL_TENCENT_BILL_MODE     per-day (default) | cumulative (daily FOCUS files are month-to-date); confirm on first delivery
 //	KEEL_TENCENT_REGION        region for billing API and COS (default ap-bangkok)
 //	KEEL_AWS_BILL_BUCKET      S3 bucket of the AWS Data Exports FOCUS 1.2 export (CSV)
 //	KEEL_AWS_BILL_PREFIX      export prefix
