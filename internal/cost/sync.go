@@ -171,13 +171,21 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		if seen[key+"\x00"+o.ETag] || notFOCUS[subject] || !slices.ContainsFunc(billExt, func(e string) bool { return strings.HasSuffix(strings.ToLower(key), e) }) {
 			continue
 		}
-		raw, err := b.Objects.Get(ctx, key)
-		if err != nil {
-			return rep, fmt.Errorf("get %s: %w", key, err)
+		var lines []Line
+		skip := costAllocationBill(key)
+		if skip == nil {
+			raw, err := b.Objects.Get(ctx, key)
+			if err != nil {
+				return rep, fmt.Errorf("get %s: %w", key, err)
+			}
+			if lines, err = ParseFOCUS(raw); errors.Is(err, ErrNotFOCUS) {
+				skip = err
+			} else if err != nil {
+				return rep, fmt.Errorf("%s: %w", key, err)
+			}
 		}
-		lines, err := ParseFOCUS(raw)
-		if errors.Is(err, ErrNotFOCUS) {
-			detail := err.Error()
+		if skip != nil {
+			detail := skip.Error()
 			if err := b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
 				_, err := activity.Record(ctx, tx, activity.Activity{TenantID: home, Source: "keel/cost", Type: notFOCUSType,
 					Subject: subject, Operation: "SkipBillFile", Kind: activity.Read, Actor: actor, Outcome: activity.Success,
@@ -188,9 +196,6 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 			}
 			rep.NotFOCUS = append(rep.NotFOCUS, key)
 			continue
-		}
-		if err != nil {
-			return rep, fmt.Errorf("%s: %w", key, err)
 		}
 		counts := map[time.Time]int{}
 		for _, l := range lines {
@@ -297,6 +302,17 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 }
 
 const notFOCUSType = "keel.cost.bill_file_skipped"
+
+// costAllocationBill rejects Tencent's Cost Allocation Bill (FOCUS), named
+// "<uin>-<date>-FOCUS-Cost Allocation Bill-Component-detail.zip" in Bill
+// Storage (docs 555/43521). It is FOCUS-shaped and repeats the Standard bill
+// (FOCUS) charges, so ingesting it beside that bill would double-count.
+func costAllocationBill(key string) error {
+	if strings.Contains(strings.ToLower(path.Base(key)), "cost allocation bill") {
+		return errors.New("cost allocation bill: only the standard bill (FOCUS) is ingested")
+	}
+	return nil
+}
 
 func monthOf(t time.Time) time.Time {
 	t = t.UTC()

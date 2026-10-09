@@ -105,9 +105,10 @@ func ParseFOCUS(raw []byte) ([]Line, error) {
 	}
 }
 
-// ErrNotFOCUS marks a file with none of the FOCUS required columns, such as
-// another bill type delivered under the same prefix. A file with some but not
-// all of them is a malformed FOCUS file and fails with a plain error.
+// ErrNotFOCUS marks a file with none of the FOCUS required columns, or a zip
+// with no CSV inside, such as another bill type delivered under the same
+// prefix. A file with some but not all of them is a malformed FOCUS file and
+// fails with a plain error.
 var ErrNotFOCUS = errors.New("not a FOCUS bill")
 
 func checkRequired(has func(string) bool) error {
@@ -242,7 +243,7 @@ func decompress(raw []byte) ([]byte, error) {
 				return io.ReadAll(io.LimitReader(rc, 4<<30))
 			}
 		}
-		return nil, errors.New("zip contains no .csv")
+		return nil, fmt.Errorf("%w: zip contains no .csv", ErrNotFOCUS)
 	case len(raw) == 0:
 		return nil, errors.New("empty file")
 	default:

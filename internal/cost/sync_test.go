@@ -1,6 +1,7 @@
 package cost_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -208,5 +209,74 @@ func TestBillSyncFailsOnMalformedFOCUSFile(t *testing.T) {
 		Prefix: "bills/", Mode: cost.PerDayFiles, Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) }}
 	if _, err := bs.Run(context.Background()); err == nil || errors.Is(err, cost.ErrNotFOCUS) {
 		t.Fatalf("err = %v, want a malformed-FOCUS failure", err)
+	}
+}
+
+func zipped(t *testing.T, name string, body []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create(name)
+	must(t, err)
+	_, err = w.Write(body)
+	must(t, err)
+	must(t, zw.Close())
+	return buf.Bytes()
+}
+
+func skipActivities(t *testing.T, w world, key string) int {
+	t.Helper()
+	var n int
+	must(t, w.s.InTenant(context.Background(), w.home, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `SELECT count(*) FROM activities WHERE type = 'keel.cost.bill_file_skipped' AND subject LIKE '%/' || $1 || '@'`, key).Scan(&n)
+	}))
+	return n
+}
+
+func TestBillSyncSkipsCostAllocationFOCUSBill(t *testing.T) {
+	w := setup(t)
+	alloc := "bills/200045645249-20260902-FOCUS-Cost Allocation Bill-Component-detail.zip"
+	objs := &memObjects{objs: map[string][]byte{
+		"bills/200045645249-20260902-by_used_time-FOCUS-Bill Details.zip": zipped(t, "bill.csv", splitByDay(t, "01", "02")),
+		alloc: zipped(t, "bill.csv", splitByDay(t, "01", "02")),
+	}}
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: w.s}, Objects: objs, Provider: "tencent", BillingAccountID: "200045645249",
+		Prefix: "bills/", Mode: cost.PerDayFiles, Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) }}
+	rep, err := bs.Run(context.Background())
+	must(t, err)
+	if rep.NewFiles != 1 || len(rep.NotFOCUS) != 1 || rep.NotFOCUS[0] != alloc {
+		t.Fatalf("run %+v", rep)
+	}
+	if got := billedTotal(t, w); got != "42.80" {
+		t.Fatalf("billed = %s, want the standard bill alone (42.80)", got)
+	}
+	rep, err = bs.Run(context.Background())
+	must(t, err)
+	if len(rep.NotFOCUS) != 0 || skipActivities(t, w, alloc) != 1 {
+		t.Fatalf("second run re-reported the allocation bill: %+v, activities %d", rep, skipActivities(t, w, alloc))
+	}
+}
+
+func TestBillSyncSkipsZipWithoutCSV(t *testing.T) {
+	w := setup(t)
+	pack := "bills/200045645249-202609-by_used_time-bill_pack.zip"
+	objs := &memObjects{objs: map[string][]byte{
+		"bills/2026-09-01.zip": zipped(t, "BILL.CSV", splitByDay(t, "01", "02")),
+		pack:                   zipped(t, "bill.xlsx", []byte("not a csv")),
+	}}
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: w.s}, Objects: objs, Provider: "tencent", BillingAccountID: "200045645249",
+		Prefix: "bills/", Mode: cost.PerDayFiles, Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) }}
+	rep, err := bs.Run(context.Background())
+	must(t, err)
+	if rep.NewFiles != 1 || len(rep.NotFOCUS) != 1 || rep.NotFOCUS[0] != pack {
+		t.Fatalf("run %+v", rep)
+	}
+	if got := billedTotal(t, w); got != "42.80" {
+		t.Fatalf("billed = %s, want the upper-case .CSV zip loaded (42.80)", got)
+	}
+	rep, err = bs.Run(context.Background())
+	must(t, err)
+	if len(rep.NotFOCUS) != 0 || skipActivities(t, w, pack) != 1 {
+		t.Fatalf("second run re-reported the zip: %+v, activities %d", rep, skipActivities(t, w, pack))
 	}
 }
