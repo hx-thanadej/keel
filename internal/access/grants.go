@@ -14,6 +14,7 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/auth"
+	"github.com/hx-thanadej/keel/internal/catalog"
 )
 
 // GrantDecision is the policy's answer for a grant.
@@ -80,6 +81,7 @@ func (expireArgs) Kind() string { return "keel_access_grant_expire" }
 type target struct {
 	role                      Role
 	envName, account, project string
+	cloudAccount              string // Catalog id of account, "" when the Environment has none
 	requiresApproval          bool
 }
 
@@ -91,8 +93,9 @@ func (s *Service) target(ctx context.Context, tx pgx.Tx, roleID string) (target,
 	} else if err != nil {
 		return t, err
 	}
-	err = tx.QueryRow(ctx, `SELECT e.name, e.project_id::text, e.requires_approval, coalesce((SELECT external_id FROM cloud_accounts a WHERE a.environment_id = e.id AND a.provider = 'tencent' AND a.archived_at IS NULL), '')
-		FROM environments e WHERE e.id = $1`, t.role.EnvironmentID).Scan(&t.envName, &t.project, &t.requiresApproval, &t.account)
+	err = tx.QueryRow(ctx, `SELECT e.name, e.project_id::text, e.requires_approval, coalesce(a.external_id, ''), coalesce(a.id::text, '')
+		FROM environments e LEFT JOIN cloud_accounts a ON a.environment_id = e.id AND a.provider = 'tencent' AND a.archived_at IS NULL
+		WHERE e.id = $1`, t.role.EnvironmentID).Scan(&t.envName, &t.project, &t.requiresApproval, &t.account, &t.cloudAccount)
 	return t, err
 }
 
@@ -245,7 +248,7 @@ func (s *Service) activate(ctx context.Context, tenant, id string) (Grant, error
 	}); err != nil {
 		return g, err
 	}
-	principal, assignErr := s.assign(ctx, t, g)
+	principal, assignErr := s.assign(ctx, tenant, t, g)
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var err error
 		if assignErr != nil {
@@ -268,12 +271,20 @@ func (s *Service) activate(ctx context.Context, tenant, id string) (Grant, error
 		return record(ctx, tx, tenant, "keel.access.grant_active", "ActivateAccessGrant", "access_grant/"+id, activity.Update, activity.Success, keelActor,
 			fmt.Sprintf("%s holds %s in %s (%s) until %s", g.Requester, t.role.Template, t.envName, t.account, exp.Format(time.RFC3339)), activity.Resource{Type: "access_grant", UID: id})
 	})
+	if err == nil && errors.Is(assignErr, catalog.ErrClientOwned) {
+		return g, assignErr
+	}
 	return g, err
 }
 
 var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:access"}
 
-func (s *Service) assign(ctx context.Context, t target, g Grant) (string, error) {
+func (s *Service) assign(ctx context.Context, tenant string, t target, g Grant) (string, error) {
+	if t.cloudAccount != "" {
+		if err := catalog.RequirePlatformOwned(ctx, s.Store, tenant, t.cloudAccount, "AssignAccessGrant", keelActor); err != nil {
+			return "", err
+		}
+	}
 	if s.Directory == nil {
 		return "", errors.New("identity Center is not configured (KEEL_CIC_ZONE_ID)")
 	}
@@ -326,8 +337,19 @@ func (s *Service) end(ctx context.Context, tenant, id, state, why string, by act
 	}
 	acct, _ := strconv.ParseInt(t.account, 10, 64)
 	if s.Directory != nil && t.role.RoleConfiguration != nil {
-		if err := s.Directory.Unassign(ctx, *t.role.RoleConfiguration, acct, principal); err != nil {
-			return g, err // retried: the role must not outlive the grant
+		var err error
+		if t.cloudAccount != "" {
+			err = catalog.RequirePlatformOwned(ctx, s.Store, tenant, t.cloudAccount, "UnassignAccessGrant", keelActor)
+		}
+		switch {
+		case errors.Is(err, catalog.ErrClientOwned):
+			why += "; the account became client-owned, so its owner removes the assignment"
+		case err != nil:
+			return g, err
+		default:
+			if err := s.Directory.Unassign(ctx, *t.role.RoleConfiguration, acct, principal); err != nil {
+				return g, err // retried: the role must not outlive the grant
+			}
 		}
 	}
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {

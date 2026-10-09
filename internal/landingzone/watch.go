@@ -3,6 +3,7 @@ package landingzone
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/store"
 )
@@ -20,6 +22,9 @@ var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:landing-zone
 func Step(st *store.Store, org Org, b Baseline) flow.Step {
 	return flow.Step{Name: "landing_zone", Do: func(ctx context.Context, r *flow.Run) (map[string]any, error) {
 		account := r.Out("account", "account_id")
+		if err := catalog.RequirePlatformOwned(ctx, st, r.Tenant, r.Out("register", "cloud_account_id"), "ApplyLandingZone", keelActor); err != nil {
+			return nil, flow.Permanent(err)
+		}
 		if err := Apply(ctx, org, b, account); err != nil {
 			return nil, err
 		}
@@ -113,12 +118,11 @@ func (w Watcher) Run(ctx context.Context) (WatchResult, error) {
 			if len(drift) > 0 {
 				res.Drifted++
 			}
-			remediated := false
-			if len(drift) > 0 && w.Remediate {
-				if err := Apply(ctx, w.Org, w.Baseline, a.external); err != nil {
-					return res, fmt.Errorf("remediate %s: %w", a.external, err)
-				}
-				remediated = true
+			remediated, err := w.remediate(ctx, tenant, a, drift)
+			if err != nil {
+				return res, err
+			}
+			if remediated {
 				res.Remediated++
 			}
 			if err := w.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
@@ -129,6 +133,25 @@ func (w Watcher) Run(ctx context.Context) (WatchResult, error) {
 		}
 	}
 	return res, nil
+}
+
+// remediate re-applies the baseline to a drifted account unless remediation
+// is off or the account is client-owned, where drift is only reported.
+func (w Watcher) remediate(ctx context.Context, tenant string, a baselined, drift []Drift) (bool, error) {
+	if len(drift) == 0 || !w.Remediate {
+		return false, nil
+	}
+	err := catalog.RequirePlatformOwned(ctx, w.Store, tenant, a.id, "RemediateLandingZone", keelActor)
+	if errors.Is(err, catalog.ErrClientOwned) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := Apply(ctx, w.Org, w.Baseline, a.external); err != nil {
+		return false, fmt.Errorf("remediate %s: %w", a.external, err)
+	}
+	return true, nil
 }
 
 func (w Watcher) record(ctx context.Context, tx pgx.Tx, tenant string, a baselined, drift []Drift, remediated bool) error {
