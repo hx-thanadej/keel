@@ -14,7 +14,7 @@ frameworks:
   - {id: SOC2, name: "AICPA Trust Services Criteria (2017, revised points of focus 2022)"}
 policies:
   - {name: keel-authz@1, point: api, description: "Every API call decided by OPA; default deny; Tenant isolation"}
-  - {name: keel-access@1, point: cloud, description: "Just-in-time Access Grants: eligible role, time-boxed, approved by someone other than the requester"}
+  - {name: keel-access@1, point: cloud, description: "Just-in-time Access Grants: role eligibility per Team and Environment, time-boxed; write or production grants need approval by a Team Lead (plus a second approver for production write) who is not the requester; read-only non-production grants are self-served"}
   - {name: keel-github@1, point: pr, description: "Rulesets (review, CODEOWNERS, checks), secret scanning + push protection, Actions SHA pinning, read-only token"}
   - {name: keel-scans@1, point: pipeline, description: "SARIF from secrets/SAST/SCA/IaC scanners → owned Findings"}
   - {name: keel-release@1, point: pipeline, description: "Sigstore-verified SLSA provenance from Keel's builder; VSA per image"}

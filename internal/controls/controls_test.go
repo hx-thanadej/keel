@@ -158,3 +158,85 @@ func TestReportCountsCoveredAndGapsPerFramework(t *testing.T) {
 		t.Fatal("unknown framework accepted")
 	}
 }
+
+func TestAccessPolicyCoverageCountsServicesInProjectsWithActiveRoles(t *testing.T) {
+	r, err := controls.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	s := storetest.New(t)
+	tenant, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	other, _ := s.CreateTenant(ctx, "other", "Other", false)
+
+	// seed builds a project with one Environment per entry in roleStates (an
+	// Access Role in that state on it) and live Services plus archived ones.
+	seed := func(tn, slug string, live, archived int, roleStates ...string) error {
+		return s.InTenant(ctx, tn, func(tx pgx.Tx) error {
+			var team, project string
+			if err := tx.QueryRow(ctx, `INSERT INTO teams (tenant_id, slug, name) VALUES ($1, $2, $2) RETURNING id`, tn, slug).Scan(&team); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `INSERT INTO projects (tenant_id, team_id, slug, name) VALUES ($1, $2, $3, $3) RETURNING id`, tn, team, slug).Scan(&project); err != nil {
+				return err
+			}
+			for i := 0; i < live+archived; i++ {
+				archivedAt := "NULL"
+				if i >= live {
+					archivedAt = "now()"
+				}
+				if _, err := tx.Exec(ctx, fmt.Sprintf(`INSERT INTO services (tenant_id, project_id, team_id, slug, name, archived_at) VALUES ($1, $2, $3, $4, $4, %s)`, archivedAt), tn, project, team, fmt.Sprintf("%s-svc-%d", slug, i)); err != nil {
+					return err
+				}
+			}
+			for i, state := range roleStates {
+				var env string
+				if err := tx.QueryRow(ctx, `INSERT INTO environments (tenant_id, project_id, name, promotion_order) VALUES ($1, $2, $3, $4) RETURNING id`, tn, project, fmt.Sprintf("env-%d", i), i+1).Scan(&env); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO access_roles (tenant_id, environment_id, team_id, template, state, requested_by) VALUES ($1, $2, $3, 'read-only', $4, 'u')`, tn, env, team, state); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	for _, c := range []struct {
+		tenant, slug  string
+		live, archive int
+		roles         []string
+	}{
+		{tenant, "active", 2, 1, []string{"active", "retired"}},
+		{tenant, "retired", 3, 0, []string{"retired"}},
+		{tenant, "norole", 1, 0, nil},
+		{other, "foreign", 4, 0, []string{"active"}},
+	} {
+		if err := seed(c.tenant, c.slug, c.live, c.archive, c.roles...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rep, err := controls.Service{Store: s, Registry: r}.Report(ctx, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]controls.ControlView{}
+	for _, c := range rep.Controls {
+		byID[c.Framework+" "+c.ID] = c
+	}
+	for _, id := range []string{"ISO27001 8.2", "SOC2 CC6.2"} {
+		c := byID[id]
+		if c.Gap {
+			t.Fatalf("%s is a gap with an active Access Role: %+v", id, c)
+		}
+		got := -1
+		for _, pc := range c.Coverage {
+			if pc.Name == "keel-access@1" {
+				got = pc.Covered
+			}
+		}
+		if got != 2 {
+			t.Errorf("%s: keel-access@1 covered %d Services, want 2 (live Services in the project with an active role; not archived, retired-only, role-less or other-Tenant)", id, got)
+		}
+	}
+}
