@@ -235,6 +235,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		periods = append(periods, p)
 	}
 	slices.SortFunc(periods, func(a, b time.Time) int { return a.Compare(b) })
+	var failed []error
 	for _, p := range periods {
 		// Files of this period that still exist, each at its current version.
 		var files []string
@@ -265,6 +266,12 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 		var lines []Line
 		invoiced := true
+		// Per-day files must not share a (sub-account, day): a month-to-date
+		// file in this mode would double count. Export folder parts are split
+		// by size, not by day, so they legitimately share keys.
+		type subDay struct{ sub, day string }
+		supplier := map[subDay]string{}
+		var overlap error
 		for _, key := range files {
 			raw, err := b.Objects.Get(ctx, key)
 			if err != nil {
@@ -275,11 +282,27 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 				return rep, fmt.Errorf("%s: %w", key, err)
 			}
 			for _, l := range ls {
-				if monthOf(l.BillingPeriodStart).Equal(p) {
-					lines = append(lines, l)
-					invoiced = invoiced && l.InvoiceID != ""
+				if !monthOf(l.BillingPeriodStart).Equal(p) {
+					continue
 				}
+				if b.Mode == PerDayFiles && overlap == nil {
+					k := subDay{l.SubAccountID, l.ChargePeriodStart.UTC().Format(time.DateOnly)}
+					if first, ok := supplier[k]; !ok {
+						supplier[k] = key
+					} else if first != key {
+						overlap = fmt.Errorf("%s and %s both hold sub-account %s on %s: files overlap; check KEEL_TENCENT_BILL_MODE or the bill types delivered to the prefix", first, key, k.sub, k.day)
+					}
+				}
+				lines = append(lines, l)
+				invoiced = invoiced && l.InvoiceID != ""
 			}
+		}
+		if overlap != nil {
+			if err := b.recordOverlap(ctx, home, p, overlap); err != nil {
+				return rep, err
+			}
+			failed = append(failed, fmt.Errorf("period %s: %w", p.Format("2006-01"), overlap))
+			continue
 		}
 		final := PeriodFinal(b.Provider, p, now(), invoiced && len(lines) > 0)
 		res, err := b.Ingester.Load(ctx, Load{Provider: b.Provider, BillingAccountID: b.BillingAccountID, BillingPeriod: p,
@@ -298,7 +321,17 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 		rep.Loads = append(rep.Loads, sl)
 	}
-	return rep, nil
+	return rep, errors.Join(failed...)
+}
+
+// recordOverlap records a period left unloaded because its files overlap.
+func (b *BillSync) recordOverlap(ctx context.Context, home string, period time.Time, cause error) error {
+	return b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
+		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: home, Source: "keel/cost", Type: "keel.cost.bill_files_overlap",
+			Subject: "cost_period/" + b.Provider + "/" + b.BillingAccountID + "/" + period.Format("2006-01"), Operation: "LoadBill",
+			Kind: activity.Read, Actor: actor, Outcome: activity.Failure, StatusDetail: cause.Error()})
+		return err
+	})
 }
 
 const notFOCUSType = "keel.cost.bill_file_skipped"
