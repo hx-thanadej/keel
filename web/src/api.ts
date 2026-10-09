@@ -213,11 +213,13 @@ export type ControlView = {
   id: string
   framework: string
   title: string
-  policies: string[]
+  covered_by: string[]
+  gap_reason?: string
   coverage: { name: string; point: string; covered_services: number }[]
   gap: boolean
 }
-export type ControlReport = { version: string; services: number; controls: ControlView[] }
+export type FrameworkCoverage = { id: string; name: string; controls: number; mapped: number; covered: number; gaps: number }
+export type ControlReport = { version: string; services: number; frameworks: FrameworkCoverage[]; controls: ControlView[] }
 export type Exception = {
   id: string
   fingerprint: string

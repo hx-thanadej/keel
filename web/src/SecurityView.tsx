@@ -133,6 +133,15 @@ export function SecurityView({ tenantId }: { tenantId: string }) {
         </p>
       )}
       {controls && (
+        <ul className="meta">
+          {controls.frameworks.map((f) => (
+            <li key={f.id}>
+              {f.name}: {f.covered} of {f.controls} covered, {f.mapped} mapped to a Keel policy
+            </li>
+          ))}
+        </ul>
+      )}
+      {controls && (
         <div className="table-wrap">
           <table className="data-table controls">
             <thead>
@@ -147,7 +156,7 @@ export function SecurityView({ tenantId }: { tenantId: string }) {
                   <td>
                     <span className={`status ${c.gap ? 'critical' : 'good'}`}>{c.gap ? '✕' : '✓'}</span> {c.framework} {c.id} — {c.title}
                   </td>
-                  <td>{c.coverage.length === 0 ? 'no Keel policy yet' : c.coverage.map((p) => `${p.name} @${p.point} (${p.covered_services})`).join(', ')}</td>
+                  <td>{c.coverage.length === 0 ? `no Keel policy: ${c.gap_reason ?? 'not yet mapped'}` : c.coverage.map((p) => `${p.name} @${p.point} (${p.covered_services})`).join(', ')}</td>
                 </tr>
               ))}
             </tbody>
