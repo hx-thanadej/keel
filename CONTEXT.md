@@ -128,6 +128,8 @@ _Avoid_: waiver, suppression, ignore, allowlist entry
 A billing- and blast-radius-isolated account in a cloud organisation (a Tencent
 Cloud member account, an AWS account). Belongs to exactly one Environment, or to
 the platform itself (shared tooling, logging, billing ingestion).
+Either **platform-owned** (vended and governed by Keel) or **client-owned**
+(in the Tenant's own organisation, where Keel holds only a read-only role).
 _Avoid_: subscription, project, tenant
 
 **Landing Zone**:

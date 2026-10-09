@@ -351,14 +351,14 @@ milestone is shippable on the existing Tencent estate before the next starts
 
 | # | Question | Blocks |
 |---|---|---|
-| Q1 | Which GitHub plan? Required workflows, audit-log streaming and private-repo attestations need **Enterprise Cloud**. On Team plan, Keel must use reusable workflows + rulesets status checks instead. | M3, M4 |
+| Q1 | ~~GitHub plan~~ decided: GitHub Free for now; Keel reports the protections Free cannot enforce on private repos ([ADR-0016](./adr/0016-github-free-plan-report-not-enforce.md)). | — |
 | Q2 | Who owns the Tencent payer UIN (200045645249) and can grant Keel a read-only billing role there? Member accounts return zero. | M1 |
 | Q3 | ~~Providers~~ decided: Tencent + AWS in year 1. | — |
 | Q4 | ~~Stack~~ decided: Go + Postgres + River ([ADR-0014](./adr/0014-keel-implementation-stack.md)). | — |
-| Q5 | Do any Tenants contractually require a CAB or specific frameworks (ISO 27001, PDPA, SOC 2)? | M4, M6 |
-| Q6 | Are there Tenants whose cloud accounts are in *their* organisation (not ours)? That needs cross-org connectors and changes the account-vending flow. | M1, M3 |
+| Q5 | ~~Compliance~~ decided: ISO 27001, SOC 2 and PDPA (Thailand); no CAB, ADR-0005's per-Tenant prod approval Policy stays ([ADR-0017](./adr/0017-compliance-frameworks-iso27001-soc2-pdpa.md)). | — |
+| Q6 | ~~Client-owned orgs~~ decided: yes, on Tencent, AWS, Azure, GCP and Alibaba; Keel is read-only there ([ADR-0018](./adr/0018-client-owned-organisations-read-only.md)). | — |
 | Q7 | ~~Currency~~ decided: per-Tenant (THB or USD), daily FX. | — |
-| Q8 | Is Tencent COS object-lock allowlisting obtainable for the log archive? | M0 |
+| Q8 | ~~COS object lock~~ decided: the log archive uses AWS S3 Object Lock instead (ADR-0019, #15). | — |
 
 ---
 

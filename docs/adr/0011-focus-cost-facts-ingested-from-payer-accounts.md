@@ -36,3 +36,5 @@ and Alibaba export no finer; hourly lines are kept where present.
   spend is a reported KPI.
 - Both billed and effective (amortised, after discounts) cost are stored;
   Budgets default to effective cost.
+- Amended by [ADR-0018](./0018-client-owned-organisations-read-only.md).
+  Client payers are ingested through the client's read-only role.

@@ -294,3 +294,19 @@ Format: `YYYY-MM-DD — actor — what — why/outcome — links`
   accounts; IdP client registrations; tokens and roles listed in
   `docs/runbooks/vending.md`, `delivery.md`, `supply-chain.md`, `access.md`
   and `connect-billing.md`.
+
+## 2026-10-09 — thanadej@harmonyx.co → Claude — Decisions on Q1, Q5, Q6, Q8
+
+- **Q1 GitHub plan (#8).** Stay on GitHub Free. Keel reports the protections
+  Free cannot enforce on private repositories →
+  [ADR-0016](./adr/0016-github-free-plan-report-not-enforce.md).
+- **Q5 Compliance (#12).** Tenants require ISO 27001, SOC 2 and PDPA. No CAB;
+  ADR-0005's per-Tenant production approval Policy stays →
+  [ADR-0017](./adr/0017-compliance-frameworks-iso27001-soc2-pdpa.md).
+- **Q6 Client-owned organisations (#13).** Some Tenants own their cloud
+  organisations. Keel is read-only there and amends ADR-0002 and ADR-0011 →
+  [ADR-0018](./adr/0018-client-owned-organisations-read-only.md).
+- **Q8 Log archive (#15).** AWS S3 Object Lock replaces Tencent COS object
+  lock. ADR-0019 lands with the implementation PR.
+- **Planned:** Epic M7 client-owned organisations (read-only) and Epic M8
+  compliance frameworks, filed as issues.
