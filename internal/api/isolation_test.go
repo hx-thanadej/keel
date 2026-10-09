@@ -28,6 +28,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/leaks"
 	"github.com/hx-thanadej/keel/internal/maturity"
+	"github.com/hx-thanadej/keel/internal/pdpa"
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/reports"
 	"github.com/hx-thanadej/keel/internal/rightsize"
@@ -95,6 +96,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		Scorecards: &api.ScorecardDeps{Authz: az, Service: scorecard.Service{Store: s}},
 		DORA:       &api.DORADeps{Authz: az, Service: dora.Service{Store: s}},
 		Reports:    &api.ReportDeps{Authz: az, Service: reports.Service{Store: s}},
+		PDPA:       &api.PDPADeps{Authz: az, Service: pdpa.Service{Store: s}},
 		Maturity:   &api.MaturityDeps{Authz: az, Service: maturity.Service{Store: s, DORA: dora.Service{Store: s}}},
 		Webhooks:   &api.WebhookDeps{Leaks: &leaks.Service{Store: s}},
 		BreakGlass: &api.BreakGlassDeps{Authz: az, Service: breakglass.Service{Store: s}, Home: func(*http.Request) (string, error) { return home, nil }},
@@ -179,6 +181,10 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/reject":                   {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/revoke":                   {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/reports/{period}/regenerate":                     {},
+		"PUT /v1/tenants/{tenant}/pdpa/settings":                                    {"data_regions": []string{"us-east-1"}, "deletion_enabled": true},
+		"POST /v1/tenants/{tenant}/pdpa/breaches":                                   {"title": "pwn breach"},
+		"POST /v1/tenants/{tenant}/pdpa/breaches/{breach}/notify":                   {"reference": "pwn"},
+		"POST /v1/tenants/{tenant}/pdpa/breaches/{breach}/close":                    {"reason": "pwn"},
 	}
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/budgets", map[string]any{"project_id": project, "name": "Victim Budget", "year": 2026, "amount": "123456"})
 	victimBudget := body["id"].(string)
@@ -199,7 +205,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var victimService, victimRelease, victimPromotion, victimException, victimRole, victimGrant string
+	var victimService, victimRelease, victimPromotion, victimException, victimRole, victimGrant, victimBreach string
 	if err := s.InTenant(t.Context(), a, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(t.Context(), `INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, 'victim-svc', 'Victim Service') RETURNING id::text`, a, project, team).Scan(&victimService); err != nil {
 			return err
@@ -222,6 +228,12 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		if _, err := tx.Exec(t.Context(), `INSERT INTO tenant_reports (tenant_id, period, data, html) VALUES ($1, '2026-09-01', '{"tenant_name": "victim-report-data"}', '<p>victim-report-page</p>')`, a); err != nil {
 			return err
 		}
+		if err := tx.QueryRow(t.Context(), `INSERT INTO pdpa_breaches (tenant_id, title, description, aware_at, declared_at, declared_by) VALUES ($1, 'victim-breach-title', 'victim-breach-description', now(), now(), 'user:victim') RETURNING id::text`, a).Scan(&victimBreach); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(t.Context(), `INSERT INTO pdpa_settings (tenant_id, data_regions, legal_hold, updated_at, updated_by) VALUES ($1, '{victim-region-1}', 'victim-legal-hold', now(), 'user:victim')`, a); err != nil {
+			return err
+		}
 		return tx.QueryRow(t.Context(), `INSERT INTO exceptions (tenant_id, fingerprint, reason, requested_by, expires_at) VALUES ($1, 'victim-fp', 'victim exception reason', 'user:victim', now() + interval '1 day') RETURNING id::text`, a).Scan(&victimException)
 	}); err != nil {
 		t.Fatal(err)
@@ -229,8 +241,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	bodies["POST /v1/tenants/{tenant}/vex"]["service_id"] = victimService
 	bodies["POST /v1/tenants/{tenant}/access/grants"]["role_id"] = victimRole
 	v := victim{
-		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole, "grant": victimGrant, "period": "2026-09", "quarter": "2026-Q3"},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole, victimGrant, "victim grant reason", "victim-report-data", "victim-report-page", "victim-maturity-note"},
+		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole, "grant": victimGrant, "period": "2026-09", "quarter": "2026-Q3", "breach": victimBreach},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole, victimGrant, "victim grant reason", "victim-report-data", "victim-report-page", "victim-maturity-note", victimBreach, "victim-breach-title", "victim-breach-description", "victim-region-1", "victim-legal-hold"},
 	}
 
 	attackers := map[string]auth.Principal{

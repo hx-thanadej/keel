@@ -3,6 +3,7 @@ package controls_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,6 +59,30 @@ func TestRegistryListsEveryAnnexAControlAndTrustServicesCriterion(t *testing.T) 
 	}
 	if len(annexA) != 93 || len(tsc) != 38 {
 		t.Fatalf("expected lists: %d Annex A, %d TSC", len(annexA), len(tsc))
+	}
+}
+
+func TestPDPAControlsCiteSectionsAndMapToPolicyOrGap(t *testing.T) {
+	r, err := controls.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	covered := map[string][]string{}
+	for _, c := range r.Controls {
+		if c.Framework == "PDPA" {
+			got = append(got, c.ID)
+			covered[c.ID] = c.CoveredBy
+		}
+	}
+	want := []string{"s.19", "s.23", "s.26", "s.28", "s.30", "s.33", "s.37(1)", "s.37(3)", "s.37(4)", "s.39", "s.40", "s.41"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("PDPA controls %v, want %v", got, want)
+	}
+	for id, policy := range map[string]string{"s.28": "keel-pdpa-residency@1", "s.37(3)": "keel-pdpa-retention@1", "s.37(4)": "keel-pdpa-breach@1"} {
+		if !slices.Contains(covered[id], policy) {
+			t.Errorf("PDPA %s is not evidenced by %s: %v", id, policy, covered[id])
+		}
 	}
 }
 
