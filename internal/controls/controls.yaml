@@ -12,6 +12,7 @@ frameworks:
   - {id: OWASP-CICD, name: "OWASP Top 10 CI/CD Security Risks"}
   - {id: ISO27001, name: "ISO/IEC 27001:2022 Annex A"}
   - {id: SOC2, name: "AICPA Trust Services Criteria (2017, revised points of focus 2022)"}
+  - {id: PDPA, name: "Thailand Personal Data Protection Act B.E. 2562 (2019)"}
 policies:
   - {name: keel-authz@1, point: api, description: "Every API call decided by OPA; default deny; Tenant isolation"}
   - {name: keel-access@1, point: cloud, description: "Just-in-time Access Grants: role eligibility per Team and Environment, time-boxed; write or production grants need approval by a Team Lead (plus a second approver for production write) who is not the requester; read-only non-production grants are self-served"}
@@ -26,6 +27,9 @@ policies:
   - {name: keel-findings@1, point: platform, description: "Owner, severity and SLA on every Finding; Exceptions time-boxed and approved by someone other than the requester"}
   - {name: keel-vex@1, point: platform, description: "VEX statements with justification applied at gates"}
   - {name: keel-activity@1, point: platform, description: "Signed, chained, archived Activity Log"}
+  - {name: keel-pdpa-residency@1, point: platform, description: "Daily check that each Tenant's Cloud Account regions and the platform's archive and bill buckets sit in the Tenant's data region set; each one outside is a Finding"}
+  - {name: keel-pdpa-retention@1, point: platform, description: "Daily retention run per data class; a dry run unless a platform admin enables deletion; nothing deleted under legal hold or while a breach is open; one Activity per run"}
+  - {name: keel-pdpa-breach@1, point: platform, description: "Declared personal data breaches run a 72-hour clock with Findings at 48h and at the deadline, ended by the recorded PDPC notification"}
 controls:
   # NIST SSDF 1.2 (SP 800-218r1)
   - {framework: SSDF, id: "PO.1.1", title: "Identify and document security requirements for software development", covered_by: [], gap_reason: "Security requirements are written by each Team; no Policy checks them"}
@@ -195,3 +199,19 @@ controls:
   - {framework: SOC2, id: "A1.3", title: "Testing recovery plans", covered_by: [], gap_reason: "Business continuity is outside Keel"}
   - {framework: SOC2, id: "C1.1", title: "Identifying and protecting confidential information", covered_by: [], gap_reason: "PDPA residency and retention Controls are #190"}
   - {framework: SOC2, id: "C1.2", title: "Disposing of confidential information", covered_by: [], gap_reason: "PDPA retention and deletion Controls are #190"}
+
+  # Thailand PDPA B.E. 2562. Sections by number; titles are Keel's own
+  # summaries. Obligations that sit with each Tenant's own applications, or
+  # with the organisation, are gaps.
+  - {framework: PDPA, id: "s.19", title: "Consent before collecting, using or disclosing personal data", covered_by: [], gap_reason: "Consent is collected by each Tenant's applications; Keel holds no consent records"}
+  - {framework: PDPA, id: "s.23", title: "Tell data subjects what is collected and why", covered_by: [], gap_reason: "Privacy notices are each Tenant's to publish"}
+  - {framework: PDPA, id: "s.26", title: "Sensitive personal data", covered_by: [], gap_reason: "No data classification in Keel to find sensitive data"}
+  - {framework: PDPA, id: "s.28", title: "Transfers of personal data outside Thailand", covered_by: [keel-pdpa-residency@1]}
+  - {framework: PDPA, id: "s.30", title: "Data subject access requests", covered_by: [], gap_reason: "Data subject requests are served by each Tenant's applications; Keel holds no index of data subjects"}
+  - {framework: PDPA, id: "s.33", title: "Data subject erasure requests", covered_by: [], gap_reason: "Data subject requests are served by each Tenant's applications; Keel holds no index of data subjects"}
+  - {framework: PDPA, id: "s.37(1)", title: "Appropriate security measures, reviewed as needed", covered_by: [keel-authz@1, keel-access@1, keel-activity@1]}
+  - {framework: PDPA, id: "s.37(3)", title: "Erase personal data once the retention period ends", covered_by: [keel-pdpa-retention@1]}
+  - {framework: PDPA, id: "s.37(4)", title: "Notify the PDPC of a personal data breach within 72 hours", covered_by: [keel-pdpa-breach@1]}
+  - {framework: PDPA, id: "s.39", title: "Records of processing activities", covered_by: [], gap_reason: "Organisational: each controller keeps its record of processing outside Keel"}
+  - {framework: PDPA, id: "s.40", title: "Processor security and breach reporting to the controller", covered_by: [keel-pdpa-breach@1, keel-authz@1]}
+  - {framework: PDPA, id: "s.41", title: "Data protection officer", covered_by: [], gap_reason: "Organisational: outside Keel"}

@@ -1,8 +1,8 @@
 // Package evidence exports a Tenant's compliance evidence for a period
 // (#151): Controls coverage, provenance verifications and SBOMs per Release,
-// Finding SLA statistics, Exceptions, Access Grants and the Activity digest
-// chain head, in one bundle whose manifest is signed with Keel's key so an
-// auditor can check it offline. It also runs the EU CRA reporting clock for
+// Finding SLA statistics, Exceptions, Access Grants, the Activity digest
+// chain head and the PDPA section (#190), in one bundle whose manifest is
+// signed with Keel's key so an auditor can check it offline. It also runs the EU CRA reporting clock for
 // actively exploited vulnerabilities in deployed software.
 package evidence
 
@@ -22,6 +22,7 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/controls"
+	"github.com/hx-thanadej/keel/internal/pdpa"
 	"github.com/hx-thanadej/keel/internal/store"
 )
 
@@ -51,6 +52,7 @@ const Format = "keel-evidence@1"
 type Exporter struct {
 	Store    *store.Store
 	Controls controls.Service
+	PDPA     pdpa.Service
 	Key      ed25519.PrivateKey
 	Now      func() time.Time
 }
@@ -107,6 +109,11 @@ func (e Exporter) Export(ctx context.Context, tenant string, from, to time.Time,
 			FROM access_grants g JOIN access_roles r ON r.id = g.role_id WHERE g.created_at >= $1 AND g.created_at < $2`, from, to); err != nil {
 			return err
 		}
+		ev, err := e.PDPA.Evidence(ctx, tx, e.Controls.Registry, from, to)
+		if err != nil {
+			return fmt.Errorf("pdpa: %w", err)
+		}
+		sections["pdpa"] = ev
 		return q("activity_chain", `SELECT coalesce((SELECT jsonb_build_object('seq_to', seq_to, 'sealed_at', sealed_at, 'key_id', key_id, 'signature', encode(signature, 'base64'))
 			FROM activity_digests ORDER BY sealed_at DESC LIMIT 1), '{"note": "no sealed digest yet"}')`)
 	})

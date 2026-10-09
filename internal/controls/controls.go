@@ -1,9 +1,9 @@
 // Package controls is Keel's Controls registry (#116, ADR-0009): Controls
-// from SSDF, SLSA, CRA, the OWASP CI/CD Top 10, ISO/IEC 27001:2022 Annex A
-// and the SOC 2 Trust Services Criteria (#188, #189), the Keel Policies that
-// evidence them, and at which Enforcement Point. Coverage per Tenant says how
-// many Services each Policy actually evaluated; M6 Scorecards and evidence
-// exports build on it.
+// from SSDF, SLSA, CRA, the OWASP CI/CD Top 10, ISO/IEC 27001:2022 Annex A,
+// the SOC 2 Trust Services Criteria (#188, #189) and Thailand's PDPA (#190),
+// the Keel Policies that evidence them, and at which Enforcement Point.
+// Coverage per Tenant says how many Services each Policy actually evaluated;
+// M6 Scorecards and evidence exports build on it.
 package controls
 
 import (
@@ -114,6 +114,11 @@ var coverage = map[string]string{
 	"keel-findings@1":    `SELECT count(*) FROM services WHERE archived_at IS NULL`,
 	"keel-vex@1":         `SELECT count(DISTINCT service_id) FROM vex_statements`,
 	"keel-activity@1":    `SELECT count(*) FROM services WHERE archived_at IS NULL`,
+	// The PDPA checks run per Tenant, so they reach every Service once they
+	// have run.
+	"keel-pdpa-residency@1": `SELECT count(*) FROM services WHERE archived_at IS NULL AND EXISTS (SELECT 1 FROM activities WHERE type = 'keel.pdpa.residency.checked')`,
+	"keel-pdpa-retention@1": `SELECT count(*) FROM services WHERE archived_at IS NULL AND EXISTS (SELECT 1 FROM activities WHERE type IN ('keel.pdpa.retention.dry_run', 'keel.pdpa.retention.deleted', 'keel.pdpa.retention.held'))`,
+	"keel-pdpa-breach@1":    `SELECT count(*) FROM services WHERE archived_at IS NULL`,
 }
 
 // PolicyCoverage is one Policy's reach in a Tenant.
