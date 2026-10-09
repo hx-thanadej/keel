@@ -5,19 +5,20 @@ to real money. Each needs someone with access to the payer / management account.
 
 ## Tencent Cloud (payer UIN 200045645249) — ticket #29
 
-**Run the wizard:** `scripts/wizards/tencent-payer-billing.sh`, with `tccli`
-signed in as the payer (`TCCLI_PROFILE=<name>` to pick a profile). It walks
-steps 1–5 below, verifies each with `tccli` where it can, probes the
+**Use the wizard.** Run `scripts/wizards/tencent-payer-billing.sh` with
+`tccli` signed in as the payer (`TCCLI_PROFILE=<name>` picks a profile). It
+walks steps 1 to 5 below, verifies each with `tccli` where it can, probes the
 `*ForOrganization` question for #9, and keeps its answers in `.keel/`
-(git-ignored), so a re-run resumes. It never asks for an access key.
+(git-ignored), so a re-run resumes. It never asks for an access key. The manual
+steps below are the reference for what it does.
 
 Keel signs its Tencent calls with one keyless base identity
 (`tencent.Credentials()`: TKE pod identity, else the CVM role). The wizard asks
 for that base role's ARN and creates a separate billing role in the payer,
-`KEEL_TENCENT_BILL_ROLE`, whose trust policy allows `sts:AssumeRole` from that
+`KEEL_TENCENT_BILL_ROLE`. Its trust policy allows `sts:AssumeRole` from that
 ARN alone. It needs no OIDC provider in the payer, and keel-api's
 ServiceAccount or CVM role stays as it is. Keel's base role needs
-`sts:AssumeRole` on the billing role; the wizard writes that policy to
+`sts:AssumeRole` on the billing role. The wizard writes that policy to
 `.keel/base-assume.json` for the account that owns the base role. Budget
 mirroring still runs as the base identity, so its budget permissions go on the
 base role (`.keel/base-budgets.json`), never on the billing role.
@@ -27,53 +28,58 @@ against a stubbed `tccli` in a temp `HOME`, fresh and resumed, and checks the
 config it prints. Run it with `/bin/bash` and a current bash after changing
 the wizard.
 
-1. **Bill delivery.** In the payer account: Billing Center → Bill Overview →
-   Bill Storage → deliver **Standard bill (FOCUS)** and **Cost Allocation Bill
-   (FOCUS)** to a private COS bucket in the payer account (`keel-bills-<appid>`).
-   Tick the 18-month historical sync.
-2. **Read-only role for Keel.** A CAM role trusted only by Keel's identity
-   (OIDC provider `TKE_PROVIDER_ID` with `oidc:aud`/`oidc:sub` for pod
-   identity, or `cvm.qcloud.com`) with:
-   - `QcloudFinanceBillReadOnlyAccess` (covers `finance:DescribeBill*`, which
-     includes `DescribeBillSummaryByPayMode`), plus `cos:GetBucket`,
-     `cos:HeadBucket`, `cos:GetObject`, `cos:HeadObject` on the bill bucket;
-   - for budget mirroring (#39): `CreateBudget`, `ModifyBudget`, `DeleteBudget`,
-     `DescribeBudget` (CAM namespace unverified; take it from the visual editor).
-3. **Configure Keel.** `KEEL_TENCENT_BILL_PREFIX` must hold only Standard bill
-   (FOCUS) files: Keel parses every bill file under it as FOCUS.
+1. **Bill delivery.** In the payer account, open Billing Center, Bill
+   Overview, Bill Storage. Deliver only the **Standard bill (FOCUS)** to a
+   private COS bucket in the payer account (`keel-bills-<appid>`), under its
+   own prefix. Do not deliver the Cost Allocation Bill (FOCUS) or any other
+   bill type to that prefix. Tick the 18-month historical sync. Tencent's daily
+   FOCUS file is month-to-date, so step 4 sets `cumulative`.
+2. **Read-only billing role.** Create a CAM role in the payer account and name
+   it in `KEEL_TENCENT_BILL_ROLE`. Its trust policy allows `sts:AssumeRole`
+   from Keel's base role ARN and nothing else. Attach these permissions.
+   - The `QcloudFinanceBillReadOnlyAccess` preset. It covers
+     `finance:DescribeBill*`, which includes `DescribeBillSummaryByPayMode`.
+   - COS read on the bill bucket. That is `cos:GetBucket`, `cos:HeadBucket`,
+     `cos:GetObject` and `cos:HeadObject`. The wizard puts these in a policy
+     named `KeelBillBucketRead`.
+
+   Budget mirroring (#39) needs `CreateBudget`, `ModifyBudget`, `DeleteBudget`
+   and `DescribeBudget`. Those stay on the base identity and never go on the
+   billing role. The CAM namespace is unverified, so take it from the visual
+   editor.
+3. **Configure Keel.**
    ```
    KEEL_TENCENT_BILL_BUCKET=keel-bills-<appid>
    KEEL_TENCENT_BILL_PREFIX=<folder of the Standard bill (FOCUS) files>
    KEEL_TENCENT_PAYER_UIN=200045645249
    KEEL_TENCENT_BILL_ROLE=<role name>    # recommended: payer role for bill sync
    KEEL_TENCENT_REGION=ap-bangkok
-   KEEL_TENCENT_BILL_MODE=per-day        # see step 4
+   KEEL_TENCENT_BILL_MODE=cumulative     # daily FOCUS files are month-to-date; see step 4
    KEEL_TENCENT_BUDGETS=1                # optional: mirror Budgets
    ```
 
-   `KEEL_TENCENT_BILL_ROLE` names a CAM role in the payer UIN
-   (`KEEL_TENCENT_PAYER_UIN`). Give it `QcloudBillingReadOnlyAccess` (or
-   `billing:DescribeBillSummaryByPayMode`) and `cos:GetObject`/`cos:GetBucket`
-   on the bill bucket. The role must trust Keel's base identity, and the base
-   identity needs `sts:AssumeRole` on it. Keel assumes it with STS AssumeRole,
-   renews it before expiry, and uses it only for bill sync and invoice
-   reconciliation. Budget mirroring (#39) still runs as the base identity, so
-   `billing:DescribeBudget` and the `billing:*Budget` write permissions from
-   step 2 stay on the base identity, not on the payer role. Unset, bill sync
-   uses the base identity and Keel logs a warning at startup.
+   `KEEL_TENCENT_BILL_ROLE` is the role name from step 2, not an ARN. Keel
+   builds the ARN from `KEEL_TENCENT_PAYER_UIN`. Keel's base identity assumes
+   the role with STS AssumeRole, renews it before expiry, and uses it only for
+   bill sync and invoice reconciliation. Unset, bill sync uses the base
+   identity and Keel logs a warning at startup.
 
-   Subscribe only **Standard bill (FOCUS)** to the prefix. Keel skips the
-   *Cost Allocation Bill (FOCUS)* and other bill types it finds there, records
-   a `keel.cost.bill_file_skipped` Activity per file, and never ingests them.
+   Keel parses every bill file under the prefix as FOCUS. It skips Cost
+   Allocation Bill files by name and any file that is not FOCUS, and records a
+   `keel.cost.bill_file_skipped` Activity per file. In `per-day` mode it also
+   fails the run on overlapping per-day files (#201), so a wrong prefix or
+   mode does not double count silently.
 
-4. **Confirm the file mode on the first delivery.** Open two consecutive daily
-   files. If day 2's file contains only day 2's lines → `per-day` (default).
-   If it also contains day 1 → `cumulative`. A wrong mode double-counts or
-   drops days; `GET /v1/tenants/{home}/cost-loads` shows the reconciliation
-   against the invoice total, which will say `mismatch` if the mode is wrong.
-5. **Check.** Within an hour: `GET …/cost-loads` lists loads with
-   `reconcile_status: ok`; the Budgets tab shows spend for Projects whose
-   Cloud Accounts are registered (`POST …/discoveries/tencent` then register
+4. **Confirm the file mode on the first delivery.** Tencent documents the
+   daily FOCUS file as month-to-date, so use `cumulative` for daily delivery.
+   Open two consecutive daily files to confirm. If day 2's file also contains
+   day 1, keep `cumulative`. If it holds only day 2's lines, set `per-day`
+   instead. A wrong mode double-counts or drops days.
+   `GET /v1/tenants/{home}/cost-loads` shows the reconciliation against the
+   invoice total, which says `mismatch` if the mode is wrong.
+5. **Check.** Within an hour, `GET …/cost-loads` lists loads with
+   `reconcile_status: ok`. The Budgets tab shows spend for Projects whose
+   Cloud Accounts are registered (`POST …/discoveries/tencent`, then register
    the suggested accounts).
 
 Until then, a FOCUS export downloaded from the console can be uploaded:
