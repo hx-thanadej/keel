@@ -65,6 +65,10 @@ func (s SLA) Run(ctx context.Context) (Result, error) {
 				return err
 			}
 			res.Dated += int(tag.RowsAffected())
+			// A due date moved past the clock is no longer late; one still past keeps its flag and alert.
+			if _, err := tx.Exec(ctx, `UPDATE findings SET overdue_at = NULL WHERE status = 'open' AND overdue_at IS NOT NULL AND due_at >= $1`, now); err != nil {
+				return err
+			}
 			rows, err := tx.Query(ctx, `UPDATE findings SET overdue_at = $1 WHERE status = 'open' AND due_at < $1 AND overdue_at IS NULL
 				RETURNING id::text, severity, title, coalesce(owner_team_id::text, ''), due_at::date::text`, now)
 			if err != nil {

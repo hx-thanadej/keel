@@ -15,9 +15,9 @@ CREATE FUNCTION finding_excepted(f findings, as_of timestamptz) RETURNS boolean 
 $$;
 -- +goose StatementEnd
 
--- overdue_at is the clock time the SLA run flagged the Finding. A due date
--- moved past that time may no longer be late, so the flag clears and the next
--- SLA run re-flags it against its clock if it still is.
+-- The trigger only dates a Finding. overdue_at is the SLA run's to set and
+-- clear against its clock; the database cannot tell whether a moved due date
+-- has passed.
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION finding_due() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
@@ -26,9 +26,6 @@ BEGIN
     SELECT (finding_sla ->> NEW.severity)::integer INTO days FROM tenants WHERE id = NEW.tenant_id;
     days := coalesce(days, CASE NEW.severity WHEN 'critical' THEN 7 WHEN 'high' THEN 30 WHEN 'medium' THEN 90 ELSE 180 END);
     NEW.due_at := NEW.first_seen_at + make_interval(days => days);
-    IF NEW.due_at > NEW.overdue_at THEN
-        NEW.overdue_at := NULL;
-    END IF;
     RETURN NEW;
 END $$;
 -- +goose StatementEnd

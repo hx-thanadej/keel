@@ -68,20 +68,6 @@ func TestDueDatesOverdueAndUnowned(t *testing.T) {
 	if res, _ := sla.Run(ctx); res.Overdue != 0 {
 		t.Fatalf("re-flagged %+v", res)
 	}
-	// Downgrading severity moves the due date and clears overdue, unless the
-	// new due date had passed when the Finding was flagged.
-	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE findings SET severity = 'low' WHERE id = ANY ($1)`, []string{crit, stale})
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, o := due(crit); o != nil {
-		t.Fatal("overdue kept after the due date moved out")
-	}
-	if d, o := due(stale); o == nil {
-		t.Fatalf("overdue cleared though the new due date %v had passed on the service clock", d)
-	}
 	var title string
 	if err := s.InTenant(ctx, home, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT title FROM findings WHERE kind = 'unowned_findings' AND status = 'open'`).Scan(&title)
@@ -105,4 +91,75 @@ func TestDueDatesOverdueAndUnowned(t *testing.T) {
 		t.Fatalf("still open %d %v", open, err)
 	}
 	storetest.ClockedFindings(t, s, "unowned_findings")
+}
+
+// Only the SLA run knows the clock, so it alone sets and clears overdue_at
+// (#176): a severity change leaves the flag for the next run to judge.
+func TestOverdueFlagFollowsTheSLARun(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	clock := storetest.Clock()
+	tat, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	var late, moved string
+	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE tenants SET finding_sla = '{"critical": 3, "high": 14, "medium": 60, "low": 120}' WHERE id = $1`, tat); err != nil {
+			return err
+		}
+		ins := `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at) VALUES ($1, 'vulnerability', $2, 'critical', $2, $3) RETURNING id`
+		if err := tx.QueryRow(ctx, ins, tat, "late", clock().AddDate(0, 0, -20)).Scan(&late); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, ins, tat, "moved", clock().AddDate(0, 0, -5)).Scan(&moved)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flag := func(id string) *time.Time {
+		t.Helper()
+		var o *time.Time
+		if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT overdue_at FROM findings WHERE id = $1`, id).Scan(&o)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	run := func(sla findings.SLA, overdue int) {
+		t.Helper()
+		if res, err := sla.Run(ctx); err != nil || res.Overdue != overdue {
+			t.Fatalf("%+v %v, want %d overdue", res, err, overdue)
+		}
+	}
+	sla := findings.SLA{Store: s, Now: clock}
+	// A run 16 days ago flags late (due 17 days ago); today's run flags moved (due 2 days ago).
+	run(findings.SLA{Store: s, Now: func() time.Time { return clock().AddDate(0, 0, -16) }}, 1)
+	run(sla, 1)
+	flagged := flag(late)
+	if flagged == nil || flag(moved) == nil {
+		t.Fatal("not flagged")
+	}
+	// late's new due date (6 days ago) is after its flag but still past; moved's is 115 days ahead.
+	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE findings SET severity = 'high' WHERE id = $1`, late); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE findings SET severity = 'low' WHERE id = $1`, moved)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run(sla, 0)
+	run(sla, 0)
+	if o := flag(late); o == nil || !o.Equal(*flagged) {
+		t.Fatalf("late flag %v, want the original %v", o, flagged)
+	}
+	if o := flag(moved); o != nil {
+		t.Fatalf("moved still flagged at %v though due in the future", o)
+	}
+	var alerts int
+	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM activities WHERE type = 'keel.finding.overdue' AND subject = $1`, "finding/"+late).Scan(&alerts)
+	}); err != nil || alerts != 1 {
+		t.Fatalf("%d keel.finding.overdue alerts for late, want 1 (%v)", alerts, err)
+	}
+	storetest.ClockedFindings(t, s, "vulnerability")
 }
