@@ -34,7 +34,9 @@ role the client grants, keylessly as
 
 Keel does not vend accounts there. It does not apply Guardrails, Landing
 Zones or CI identities. It makes no mutating API call. Remediation stays
-manual or arrives as a pull request the client merges.
+manual or arrives as a pull request the client merges. Keel opens that pull
+request in the Tenant's Git repositories through its existing repository
+access. It never writes to the client's cloud.
 
 This amends ADR-0002. Account vending applies to platform-owned accounts only.
 A client-owned account is registered, not created.
