@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -19,6 +20,14 @@ type Manager struct {
 	Store    *store.Store
 	Provider string
 	IAM      func(account string) (IAM, error)
+	Now      func() time.Time // defaults to time.Now
+}
+
+func (m Manager) now() time.Time {
+	if m.Now != nil {
+		return m.Now()
+	}
+	return time.Now()
 }
 
 func isProd(env string) bool { return env == "prod" || env == "production" || env == "prd" }
@@ -100,7 +109,7 @@ func (m Manager) Check(ctx context.Context) (CheckResult, error) {
 				return res, fmt.Errorf("%s: %w", a.external, err)
 			}
 			res.Missing += len(out.Missing)
-			if err := m.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error { return findings(ctx, tx, tenant, a, out.Missing) }); err != nil {
+			if err := m.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error { return findings(ctx, tx, tenant, a, out.Missing, m.now()) }); err != nil {
 				return res, err
 			}
 		}
@@ -108,17 +117,19 @@ func (m Manager) Check(ctx context.Context) (CheckResult, error) {
 	return res, nil
 }
 
-func findings(ctx context.Context, tx pgx.Tx, tenant string, a account, missing []string) error {
+// findings raises a Finding per role missing the boundary and resolves the
+// rest, at the given time.
+func findings(ctx context.Context, tx pgx.Tx, tenant string, a account, missing []string, at time.Time) error {
 	prefix := "boundary:" + a.external + ":"
 	open := map[string]bool{}
 	for _, role := range missing {
 		fp := prefix + role
 		open[fp] = true
 		detail, _ := json.Marshal(map[string]any{"account": a.external, "role": role, "boundary": Version})
-		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id)
-			VALUES ($1, 'permission_boundary', $2, 'high', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5))
+		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
+			VALUES ($1, 'permission_boundary', $2, 'high', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5), $7)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now()`,
-			tenant, fp, fmt.Sprintf("Role %s in %s has no Permission Boundary (created outside Keel)", role, a.external), detail, a.project, a.envID); err != nil {
+			tenant, fp, fmt.Sprintf("Role %s in %s has no Permission Boundary (created outside Keel)", role, a.external), detail, a.project, a.envID, at); err != nil {
 			return err
 		}
 	}
@@ -132,8 +143,8 @@ func findings(ctx context.Context, tx pgx.Tx, tenant string, a account, missing 
 	}
 	for _, fp := range fps {
 		if !open[fp] {
-			if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'role now within the boundary or removed'
-				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'role now within the boundary or removed'
+				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, at); err != nil {
 				return err
 			}
 		}

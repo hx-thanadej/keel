@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
@@ -51,8 +52,16 @@ type Service struct {
 	Store         *store.Store
 	WebhookSecret []byte
 	Alerts        Alerts
-	Keys          map[string]Keys // by provider
+	Keys          map[string]Keys  // by provider
+	Now           func() time.Time // defaults to time.Now
 	river         *river.Client[pgx.Tx]
+}
+
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 var (
@@ -248,10 +257,10 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 		if owner.project != "" {
 			project, env = &owner.project, &owner.env
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id)
-			VALUES ($1, 'leaked_key', $2, 'critical', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5))
+		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
+			VALUES ($1, 'leaked_key', $2, 'critical', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5), $7)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(), detail = excluded.detail`,
-			owner.tenant, "leaked_key:"+provider+":"+mask(keyID), title, raw, project, env); err != nil {
+			owner.tenant, "leaked_key:"+provider+":"+mask(keyID), title, raw, project, env, s.now()); err != nil {
 			return err
 		}
 		outcome := activity.Success

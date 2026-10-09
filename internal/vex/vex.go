@@ -47,6 +47,14 @@ type Statement struct {
 // Service manages statements.
 type Service struct {
 	Store *store.Store
+	Now   func() time.Time // defaults to time.Now
+}
+
+func (s Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 const cols = `id::text, vulnerability, service_id::text, release_id::text, status, justification, impact_statement, action_statement, author, created_at`
@@ -89,8 +97,8 @@ func (s Service) Record(ctx context.Context, tenant string, in Statement, by act
 			} else if in.ImpactStatement != nil {
 				why += ": " + *in.ImpactStatement
 			}
-			tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $3
-				WHERE status = 'open' AND kind = 'vulnerability' AND fingerprint = 'vuln:' || $1 || ':' || $2`, in.Vulnerability, in.ServiceID, why)
+			tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $4, resolution = $3
+				WHERE status = 'open' AND kind = 'vulnerability' AND fingerprint = 'vuln:' || $1 || ':' || $2`, in.Vulnerability, in.ServiceID, why, s.now())
 			if err != nil {
 				return err
 			}

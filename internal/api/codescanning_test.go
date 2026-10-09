@@ -22,7 +22,9 @@ func TestSwitchingCodeScanningSourceResolvesTheOtherSide(t *testing.T) {
 	s := storetest.New(t)
 	az, _ := authz.New()
 	tat, _ := s.CreateTenant(t.Context(), "tat", "TAT", false)
-	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: catalog.New(s, az), Authz: az}))
+	cat := catalog.New(s, az)
+	cat.Now = storetest.Clock()
+	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: cat, Authz: az}))
 	t.Cleanup(srv.Close)
 	var team, svc string
 	if err := s.InTenant(t.Context(), tat, func(tx pgx.Tx) error {
@@ -40,7 +42,7 @@ func TestSwitchingCodeScanningSourceResolvesTheOtherSide(t *testing.T) {
 	sarif := `{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeQL"}},"results":[
 		{"ruleId":"go/sql-injection","level":"error","message":{"text":"bad query"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"db.go"},"region":{"startLine":7}}}]},
 		{"ruleId":"CVE-2026-1111","level":"error","message":{"text":"openssl"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"go.sum"},"region":{"startLine":1}}}]}]}]}`
-	if _, err := (scans.Service{Store: s}).Ingest(t.Context(), tat, svc, scans.Upload{Scope: "full", SARIF: []byte(sarif)}, activity.Actor{Type: activity.ActorPipeline, UID: "pipeline:x"}); err != nil {
+	if _, err := (scans.Service{Store: s, Now: cat.Now}).Ingest(t.Context(), tat, svc, scans.Upload{Scope: "full", SARIF: []byte(sarif)}, activity.Actor{Type: activity.ActorPipeline, UID: "pipeline:x"}); err != nil {
 		t.Fatal(err)
 	}
 	status := func() map[string]string {
@@ -91,8 +93,8 @@ func TestSwitchingCodeScanningSourceResolvesTheOtherSide(t *testing.T) {
 
 	// A Finding the GitHub sync raised.
 	if err := s.InTenant(t.Context(), tat, func(tx pgx.Tx) error {
-		_, err := tx.Exec(t.Context(), `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, service_id)
-			VALUES ($1, 'sast', 'scan:github:4242:5', 'high', 'sqli', '{"tools": ["github-code-scanning"]}', $2)`, tat, svc)
+		_, err := tx.Exec(t.Context(), `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, service_id, first_seen_at)
+			VALUES ($1, 'sast', 'scan:github:4242:5', 'high', 'sqli', '{"tools": ["github-code-scanning"]}', $2, $3)`, tat, svc, cat.Now())
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -102,4 +104,5 @@ func TestSwitchingCodeScanningSourceResolvesTheOtherSide(t *testing.T) {
 	if got := status(); got["github"] != "resolved code scanning source changed to keel" || got["CVE-2026-1111"] != "open" {
 		t.Fatalf("%v", got)
 	}
+	storetest.ClockedFindings(t, s, "sast")
 }

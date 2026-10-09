@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -41,6 +42,14 @@ type Reconciler struct {
 	API       API
 	Policy    Policy
 	Remediate bool
+	Now       func() time.Time // defaults to time.Now
+}
+
+func (r Reconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // orgRulesetPlans can use organisation rulesets on private repositories.
@@ -317,6 +326,7 @@ func (r Reconciler) record(ctx context.Context, rep Report) error {
 		return err
 	}
 	prefix := "github:" + rep.Owner + ":"
+	now := r.now()
 	for _, tenant := range all {
 		items := byTenant[tenant]
 		err := r.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
@@ -327,16 +337,16 @@ func (r Reconciler) record(ctx context.Context, rep Report) error {
 				title := fmt.Sprintf("GitHub %s: %s", orDefault(it.Repo, rep.Owner), it.Problem)
 				if it.Fixed {
 					// Restored now: record the drift and close it in one go.
-					if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, status, resolved_at, resolution)
-						VALUES ($1, 'github_governance', $2, $3, $4, $5, 'resolved', now(), 'restored by Keel')`, tenant, fp, it.Severity, title, detail); err != nil {
+					if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, status, first_seen_at, resolved_at, resolution)
+						VALUES ($1, 'github_governance', $2, $3, $4, $5, 'resolved', $6, $6, 'restored by Keel')`, tenant, fp, it.Severity, title, detail, now); err != nil {
 						return err
 					}
 					continue
 				}
 				open[fp] = true
-				if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail)
-					VALUES ($1, 'github_governance', $2, $3, $4, $5)
-					ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(), detail = excluded.detail`, tenant, fp, it.Severity, title, detail); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
+					VALUES ($1, 'github_governance', $2, $3, $4, $5, $6)
+					ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(), detail = excluded.detail`, tenant, fp, it.Severity, title, detail, now); err != nil {
 					return err
 				}
 			}
@@ -350,7 +360,7 @@ func (r Reconciler) record(ctx context.Context, rep Report) error {
 			}
 			for _, fp := range fps {
 				if !open[fp] {
-					if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'matches policy' WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp); err != nil {
+					if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'matches policy' WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, now); err != nil {
 						return err
 					}
 				}

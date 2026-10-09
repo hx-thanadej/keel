@@ -6,6 +6,7 @@ package findings
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -18,6 +19,14 @@ var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:findings"}
 // SLA runs the daily due-date checks.
 type SLA struct {
 	Store *store.Store
+	Now   func() time.Time // defaults to time.Now
+}
+
+func (s SLA) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // Result counts what a run found.
@@ -30,6 +39,7 @@ type Result struct {
 // Run checks every Tenant.
 func (s SLA) Run(ctx context.Context) (Result, error) {
 	var res Result
+	now := s.now()
 	var home *string
 	if err := s.Store.AppPool().QueryRow(ctx, `SELECT home_tenant_id()::text`).Scan(&home); err != nil {
 		return res, err
@@ -55,8 +65,8 @@ func (s SLA) Run(ctx context.Context) (Result, error) {
 				return err
 			}
 			res.Dated += int(tag.RowsAffected())
-			rows, err := tx.Query(ctx, `UPDATE findings SET overdue_at = now() WHERE status = 'open' AND due_at < now() AND overdue_at IS NULL
-				RETURNING id::text, severity, title, coalesce(owner_team_id::text, ''), due_at::date::text`)
+			rows, err := tx.Query(ctx, `UPDATE findings SET overdue_at = $1 WHERE status = 'open' AND due_at < $1 AND overdue_at IS NULL
+				RETURNING id::text, severity, title, coalesce(owner_team_id::text, ''), due_at::date::text`, now)
 			if err != nil {
 				return err
 			}
@@ -99,16 +109,16 @@ func (s SLA) Run(ctx context.Context) (Result, error) {
 		for tenant, c := range unowned {
 			fp := "unowned_findings:" + tenant
 			if c.n == 0 {
-				if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'every Finding has an owner'
-					WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp); err != nil {
+				if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'every Finding has an owner'
+					WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, now); err != nil {
 					return err
 				}
 				continue
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail)
-				VALUES ($1, 'unowned_findings', $2, 'medium', $3, jsonb_build_object('tenant', $4::text, 'count', $5::int))
+			if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
+				VALUES ($1, 'unowned_findings', $2, 'medium', $3, jsonb_build_object('tenant', $4::text, 'count', $5::int), $6)
 				ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(), detail = excluded.detail`,
-				*home, fp, fmt.Sprintf("%d Findings in Tenant %s have no owning Team", c.n, c.slug), c.slug, c.n); err != nil {
+				*home, fp, fmt.Sprintf("%d Findings in Tenant %s have no owning Team", c.n, c.slug), c.slug, c.n, now); err != nil {
 				return err
 			}
 		}

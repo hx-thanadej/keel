@@ -235,8 +235,8 @@ func (s Service) Submit(ctx context.Context, tenant, quarter string, answers map
 			tenant, quarter, q.Version, ansJSON, indJSON, by.UID, a.SubmittedAt); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'assessment submitted'
-			WHERE kind = 'maturity_assessment_due' AND status = 'open' AND fingerprint = $1`, "maturity:"+quarter); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'assessment submitted'
+			WHERE kind = 'maturity_assessment_due' AND status = 'open' AND fingerprint = $1`, "maturity:"+quarter, a.SubmittedAt); err != nil {
 			return err
 		}
 		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/maturity", Type: "keel.maturity.assessed",
@@ -294,12 +294,12 @@ func (s Service) Remind(ctx context.Context) (int, error) {
 	opened := 0
 	for _, tenant := range tenants {
 		err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-			tag, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail)
-				SELECT $1, 'maturity_assessment_due', $2, 'low', $3, $4
+			tag, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
+				SELECT $1, 'maturity_assessment_due', $2, 'low', $3, $4, $6
 				WHERE NOT EXISTS (SELECT 1 FROM maturity_assessments WHERE quarter = $5)
 				ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO NOTHING`,
 				tenant, "maturity:"+quarter, "Platform maturity self-assessment for "+quarter+" not done",
-				fmt.Sprintf(`{"quarter": %q, "due": %q}`, quarter, start.AddDate(0, 3, 0).Format(time.RFC3339)), quarter)
+				fmt.Sprintf(`{"quarter": %q, "due": %q}`, quarter, start.AddDate(0, 3, 0).Format(time.RFC3339)), quarter, now)
 			if err == nil {
 				opened += int(tag.RowsAffected())
 			}

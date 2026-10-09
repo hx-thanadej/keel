@@ -53,7 +53,7 @@ func must(t *testing.T, err error) {
 	}
 }
 
-var start = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+var start = storetest.Epoch
 
 // load writes `days` days of spend: 2 CVM instances at 50 USD/day, plus
 // NAT gateway at 10/day; spike adds NAT egress on given days.
@@ -104,7 +104,7 @@ func findings(t *testing.T, w world) []map[string]any {
 
 func TestSpikeRaisesFindingWithTopResources(t *testing.T) {
 	w := setup(t)
-	load(t, w, 41, map[int]string{40: "300"}) // day 40 = 2026-09-10: NAT 10 → 310
+	load(t, w, 41, map[int]string{40: "300"}) // day 40 = 2031-02-10: NAT 10 → 310
 	r := anomaly.Runner{Store: w.s, Now: func() time.Time { return start.AddDate(0, 0, 41).Add(3 * time.Hour) }}
 	raised, err := r.Run(context.Background())
 	must(t, err)
@@ -118,7 +118,7 @@ func TestSpikeRaisesFindingWithTopResources(t *testing.T) {
 	f := fs[0]
 	d := f["detail"].(map[string]any)
 	if f["status"] != "open" || f["severity"] != "critical" || f["team"] != w.team || f["env"] != w.prod ||
-		d["service"] != "NAT Gateway" || d["day"] != "2026-09-10" || d["actual"] != "310.00" || d["expected"] != "10.00" {
+		d["service"] != "NAT Gateway" || d["day"] != "2031-02-10" || d["actual"] != "310.00" || d["expected"] != "10.00" {
 		t.Fatalf("finding %+v", f)
 	}
 	top := d["top_resources"].([]any)
@@ -161,6 +161,7 @@ func TestAutoResolveAfterThreeNormalDays(t *testing.T) {
 	if res.Resolved != 1 || findings(t, w)[0]["status"] != "resolved" {
 		t.Fatalf("not auto-resolved %+v %v", res, findings(t, w))
 	}
+	storetest.ClockedFindings(t, w.s, "cost_anomaly")
 }
 
 func TestSteadySpendRaisesNothing(t *testing.T) {

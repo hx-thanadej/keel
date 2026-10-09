@@ -248,7 +248,7 @@ func (s *Service) facts(ctx context.Context, tx pgx.Tx, releaseID, env string) (
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return f, err
 	}
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE project_id = $1 AND status = 'open' AND severity = 'critical' AND NOT finding_excepted(findings)`, f.projectID).Scan(&f.criticalOpen); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE project_id = $1 AND status = 'open' AND severity = 'critical' AND NOT finding_excepted(findings, $2)`, f.projectID, s.Now()).Scan(&f.criticalOpen); err != nil {
 		return f, err
 	}
 	err = tx.QueryRow(ctx, `SELECT release_verified($1)`, releaseID).Scan(&f.vsaPassed)

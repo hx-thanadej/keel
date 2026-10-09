@@ -66,6 +66,14 @@ func Fingerprint(provider, resourceID, action string) string {
 // Service stores Recommendations. Authorisation is the API's job.
 type Service struct {
 	Store *store.Store
+	Now   func() time.Time // defaults to time.Now
+}
+
+func (s Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // materialSavingsChange re-raises dismissed advice when savings move this much.
@@ -150,6 +158,7 @@ func (s Service) Upsert(ctx context.Context, tenant string, r Recommendation) (R
 	}
 	var out Recommendation
 	changed := false
+	now := s.now()
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		live, err := scan(tx.QueryRow(ctx, `SELECT `+cols+` FROM recommendations WHERE fingerprint = $1 AND state IN ('open', 'accepted')`, r.Fingerprint))
 		hasLive := err == nil
@@ -176,17 +185,17 @@ func (s Service) Upsert(ctx context.Context, tenant string, r Recommendation) (R
 			if _, err := tx.Exec(ctx, `UPDATE recommendations SET state = 'superseded', updated_at = now() WHERE id = $1`, live.ID); err != nil {
 				return err
 			}
-			if err := resolveFinding(ctx, tx, live.FindingID, "superseded by newer advice"); err != nil {
+			if err := resolveFinding(ctx, tx, live.FindingID, "superseded by newer advice", now); err != nil {
 				return err
 			}
 		}
 		title := fmt.Sprintf("%s %s: save about %s %s/month", actionVerb(r.Action), r.ResourceID, r.MonthlySavings, r.Currency)
 		var findingID string
-		if err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id)
-			VALUES ($1, 'rightsizing', $2, $3, $4, $5, $6, $7, (SELECT team_id FROM projects WHERE id = $6)) RETURNING id::text`,
+		if err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
+			VALUES ($1, 'rightsizing', $2, $3, $4, $5, $6, $7, (SELECT team_id FROM projects WHERE id = $6), $8) RETURNING id::text`,
 			tenant, "rightsizing:"+r.Fingerprint, severity(r.MonthlySavings, r.Currency), title,
 			mustJSON(map[string]any{"current": r.Current, "recommended": r.Recommended, "evidence": r.Evidence, "monthly_savings": r.MonthlySavings, "currency": r.Currency, "source": r.Source}),
-			r.ProjectID, r.EnvironmentID).Scan(&findingID); err != nil {
+			r.ProjectID, r.EnvironmentID, now).Scan(&findingID); err != nil {
 			return err
 		}
 		out, err = scan(tx.QueryRow(ctx, `INSERT INTO recommendations (tenant_id, fingerprint, source, provider, account_id, region, resource_id, resource_type, project_id, environment_id,
@@ -233,7 +242,7 @@ func (s Service) decide(ctx context.Context, tenant, id, from, to, reason string
 			return err
 		}
 		if to == "dismissed" {
-			if err := resolveFinding(ctx, tx, out.FindingID, "dismissed: "+reason); err != nil {
+			if err := resolveFinding(ctx, tx, out.FindingID, "dismissed: "+reason, s.now()); err != nil {
 				return err
 			}
 		}
@@ -320,11 +329,11 @@ func (s Service) List(ctx context.Context, tenant string, f Filter) ([]Recommend
 	return out, err
 }
 
-func resolveFinding(ctx context.Context, tx pgx.Tx, id, why string) error {
+func resolveFinding(ctx context.Context, tx pgx.Tx, id, why string, at time.Time) error {
 	if id == "" {
 		return nil
 	}
-	_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1 AND status = 'open'`, id, why)
+	_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $3, resolution = $2 WHERE id = $1 AND status = 'open'`, id, why, at)
 	return err
 }
 
@@ -333,20 +342,6 @@ func record(ctx context.Context, tx pgx.Tx, tenant, id, typ, op string, kind act
 		Operation: op, Kind: kind, Actor: by, Resources: []activity.Resource{{Type: "recommendation", UID: id}}, Outcome: activity.Success, StatusDetail: detail,
 		Why: activity.Why{Reason: detail}})
 	return err
-}
-
-type appliedAtKey struct{}
-
-// WithAppliedAt makes MarkApplied record t instead of now (backfills, tests).
-func WithAppliedAt(ctx context.Context, t time.Time) context.Context {
-	return context.WithValue(ctx, appliedAtKey{}, t)
-}
-
-func appliedAt(ctx context.Context) *time.Time {
-	if t, ok := ctx.Value(appliedAtKey{}).(time.Time); ok {
-		return &t
-	}
-	return nil
 }
 
 func observed(t time.Time) *time.Time {
@@ -359,17 +354,18 @@ func observed(t time.Time) *time.Time {
 // MarkApplied records that a recommendation was carried out (a merged pull
 // request, or Keel's own cleanup), resolving its Finding.
 func (s Service) MarkApplied(ctx context.Context, tenant, id, note, prURL string, by activity.Actor) error {
+	now := s.now()
 	return s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var finding string
-		err := tx.QueryRow(ctx, `UPDATE recommendations SET state = 'applied', decided_by = $2, decision_reason = $3, pr_url = coalesce(nullif($4, ''), pr_url), updated_at = now(), applied_at = coalesce($5, now())
-			WHERE id = $1 AND state IN ('open', 'accepted') RETURNING coalesce(finding_id::text, '')`, id, by.UID, note, prURL, appliedAt(ctx)).Scan(&finding)
+		err := tx.QueryRow(ctx, `UPDATE recommendations SET state = 'applied', decided_by = $2, decision_reason = $3, pr_url = coalesce(nullif($4, ''), pr_url), updated_at = now(), applied_at = $5
+			WHERE id = $1 AND state IN ('open', 'accepted') RETURNING coalesce(finding_id::text, '')`, id, by.UID, note, prURL, now).Scan(&finding)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrState
 		}
 		if err != nil {
 			return err
 		}
-		if err := resolveFinding(ctx, tx, finding, "applied: "+note); err != nil {
+		if err := resolveFinding(ctx, tx, finding, "applied: "+note, now); err != nil {
 			return err
 		}
 		return record(ctx, tx, tenant, id, "keel.recommendation.applied", "ApplyRecommendation", activity.Update, by, note)

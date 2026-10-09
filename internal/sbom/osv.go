@@ -135,6 +135,14 @@ type Matcher struct {
 	}
 	Tenants func(ctx context.Context) ([]string, error)
 	OSV     OSV
+	Now     func() time.Time // defaults to time.Now
+}
+
+func (m Matcher) now() time.Time {
+	if m.Now != nil {
+		return m.Now()
+	}
+	return time.Now()
 }
 
 // MatchResult counts what a run found.
@@ -227,6 +235,7 @@ func (m Matcher) Run(ctx context.Context) (MatchResult, error) {
 				h.purls[d.purl], h.envs[d.env] = true, true
 			}
 		}
+		now := m.now()
 		err = m.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 			current := map[string][]string{}
 			for fp, h := range hits {
@@ -241,13 +250,13 @@ func (m Matcher) Run(ctx context.Context) (MatchResult, error) {
 				detail, _ := json.Marshal(map[string]any{"tools": []string{"osv"}, "osv_id": h.v.ID, "aliases": h.v.Aliases, "components": keys(h.purls), "environments": keys(h.envs), "service": h.d.slug})
 				title := fmt.Sprintf("%s in %s: %s", preferredID(h.v), h.d.slug, h.v.Summary)
 				var inserted bool
-				if err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, owner_team_id, service_id)
-					VALUES ($1, 'vulnerability', $2, $3, $4, $5, $6, $7, $8)
+				if err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, owner_team_id, service_id, first_seen_at)
+					VALUES ($1, 'vulnerability', $2, $3, $4, $5, $6, $7, $8, $9)
 					ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(),
 					    detail = findings.detail || jsonb_build_object(
 					        'tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'tools', '[]') || (excluded.detail->'tools')) AS t),
 					        'components', excluded.detail->'components', 'environments', excluded.detail->'environments', 'osv_id', excluded.detail->'osv_id')
-					RETURNING (xmax = 0)`, tenant, fp, h.v.Severity, title, detail, h.d.project, h.d.team, h.d.service).Scan(&inserted); err != nil {
+					RETURNING (xmax = 0)`, tenant, fp, h.v.Severity, title, detail, h.d.project, h.d.team, h.d.service, now).Scan(&inserted); err != nil {
 					return err
 				}
 				if inserted {
@@ -255,7 +264,7 @@ func (m Matcher) Run(ctx context.Context) (MatchResult, error) {
 				}
 			}
 			for svc := range services {
-				n, err := scans.ResolveAbsent(ctx, tx, svc, "osv", current[svc])
+				n, err := scans.ResolveAbsent(ctx, tx, svc, "osv", current[svc], now)
 				if err != nil {
 					return err
 				}

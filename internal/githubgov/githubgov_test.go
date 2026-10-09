@@ -216,8 +216,9 @@ func TestTeamPlanOrgIsReconciled(t *testing.T) {
 	srv := f.server(t)
 	api := githubgov.GitHub{Client: ghapi.Client{BaseURL: srv.URL}, Login: "acme", Org: true}
 	ctx := context.Background()
+	clock := storetest.Clock()
 
-	rep, err := githubgov.Reconciler{Store: w.s, API: api, Policy: policy}.Run(ctx)
+	rep, err := githubgov.Reconciler{Store: w.s, API: api, Policy: policy, Now: clock}.Run(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +236,7 @@ func TestTeamPlanOrgIsReconciled(t *testing.T) {
 	}
 
 	// Remediation restores everything Keel can, and the next run is clean except what a person must fix.
-	rep, err = githubgov.Reconciler{Store: w.s, API: api, Policy: policy, Remediate: true}.Run(ctx)
+	rep, err = githubgov.Reconciler{Store: w.s, API: api, Policy: policy, Remediate: true, Now: clock}.Run(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,12 +265,13 @@ func TestTeamPlanOrgIsReconciled(t *testing.T) {
 			f.rulesets[id] = rs
 		}
 	}
-	if _, err := (githubgov.Reconciler{Store: w.s, API: api, Policy: policy}).Run(ctx); err != nil {
+	if _, err := (githubgov.Reconciler{Store: w.s, API: api, Policy: policy, Now: clock}).Run(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if findings(t, w, w.home)["github:acme::ruleset:keel-prod-tier"] != "high" {
 		t.Fatalf("weakened ruleset not reported: %v", findings(t, w, w.home))
 	}
+	storetest.ClockedFindings(t, w.s, "github_governance")
 }
 
 func TestFreePlanFallsBackAndReportsWhatItCannotEnforce(t *testing.T) {

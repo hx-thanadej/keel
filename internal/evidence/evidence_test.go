@@ -13,6 +13,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/controls"
 	"github.com/hx-thanadej/keel/internal/evidence"
+	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
@@ -100,7 +101,7 @@ func (k kev) Exploited(context.Context) (map[string]bool, error) { return k, nil
 func TestCRAClockStartsOnceForExploitedDeployedVulnerabilities(t *testing.T) {
 	s, tenant, _ := world(t)
 	ctx := context.Background()
-	now := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+	now := storetest.Epoch.Add(9 * time.Hour)
 	c := evidence.CRA{Store: s, KEV: kev{"CVE-2021-44228": true}, Now: func() time.Time { return now }}
 	if n, err := c.Run(ctx); err != nil || n != 1 {
 		t.Fatal(n, err)
@@ -117,7 +118,50 @@ func TestCRAClockStartsOnceForExploitedDeployedVulnerabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = json.Unmarshal(raw, &detail)
-	if detail["early_warning_by"] != "2026-10-08T09:00:00Z" || detail["final_report_by"] != "2026-10-21T09:00:00Z" {
+	if detail["early_warning_by"] != "2031-01-02T09:00:00Z" || detail["final_report_by"] != "2031-01-15T09:00:00Z" {
 		t.Fatalf("deadlines %v", detail)
+	}
+	storetest.ClockedFindings(t, s, "cra_report")
+}
+
+// The findings section counts by the writers' clock: a bundle for a period on
+// that clock holds the Findings raised and resolved in it.
+func TestEvidenceCountsFindingsOnTheWritersClock(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	home, _ := s.CreateTenant(ctx, "harmonyx", "HarmonyX", true)
+	sla := findings.SLA{Store: s, Now: storetest.Clock()}
+	var orphan string
+	if err := s.InTenant(ctx, home, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at) VALUES ($1, 'vulnerability', 'v', 'critical', 'CVE', $2) RETURNING id`, home, sla.Now()).Scan(&orphan)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sla.Run(ctx); err != nil { // raises the unowned Finding
+		t.Fatal(err)
+	}
+	if err := s.InTenant(ctx, home, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'patched' WHERE id = $1`, orphan, sla.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sla.Run(ctx); err != nil { // resolves it
+		t.Fatal(err)
+	}
+	reg, _ := controls.Load()
+	_, key, _ := ed25519.GenerateKey(nil)
+	e := evidence.Exporter{Store: s, Controls: controls.Service{Store: s, Registry: reg}, Key: key, Now: sla.Now}
+	b, err := e.Export(ctx, home, storetest.Epoch.Add(-time.Hour), sla.Now().Add(time.Hour), activity.Actor{Type: activity.ActorHuman, UID: "user:auditor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Raised   int `json:"raised_in_period"`
+		Resolved int `json:"resolved_in_period"`
+		Within   int `json:"resolved_within_sla"`
+	}
+	if err := json.Unmarshal(b.Sections["findings"], &got); err != nil || got.Raised != 2 || got.Resolved != 2 || got.Within != 2 {
+		t.Fatalf("findings section %s %v", b.Sections["findings"], err)
 	}
 }

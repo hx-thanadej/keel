@@ -167,7 +167,7 @@ func TestSyncFollowsKeyRotationAndNewRepositories(t *testing.T) {
 	keys := jwks1
 	var fail error
 	m := ciidentity.Manager{Store: w.s, Provider: "tencent", IAM: func(string) (ciidentity.IAM, error) { return iam, nil },
-		JWKS: func(context.Context) (string, error) { return keys, fail }}
+		JWKS: func(context.Context) (string, error) { return keys, fail }, Now: storetest.Clock()}
 	if res, err := m.Sync(ctx); err != nil || res.Changed != 1 || res.Failed != 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
@@ -198,4 +198,5 @@ func TestSyncFollowsKeyRotationAndNewRepositories(t *testing.T) {
 	if sev, _ := openFinding(t, w); sev != "" {
 		t.Fatal("finding not resolved after a clean sync")
 	}
+	storetest.ClockedFindings(t, w.s, "ci_identity")
 }

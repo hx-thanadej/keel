@@ -8,6 +8,7 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/access"
 	"github.com/hx-thanadej/keel/internal/flow/flowtest"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 type users []string
@@ -34,7 +35,7 @@ func TestStandingAccessReport(t *testing.T) {
 	s := access.Standing{Store: w.s, Directory: dir, Users: func(string) (access.Users, error) { return camUsers, nil },
 		BreakGlass: func(context.Context, string, string) (map[string]bool, error) {
 			return map[string]bool{"breakglass-1": true}, nil
-		}}
+		}, Now: storetest.Clock()}
 	res, err := s.Run(ctx)
 	if err != nil || res.Accounts != 1 || res.Standing != 2 || res.Excused != 2 {
 		t.Fatalf("%+v %v", res, err)
@@ -55,4 +56,5 @@ func TestStandingAccessReport(t *testing.T) {
 	if res, _ := s.Run(ctx); res.Standing != 0 {
 		t.Fatalf("after cleanup %+v", res)
 	}
+	storetest.ClockedFindings(t, w.s, "standing_access")
 }

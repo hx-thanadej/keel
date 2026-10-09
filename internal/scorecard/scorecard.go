@@ -18,8 +18,8 @@ import (
 // Version names the check set.
 const Version = "keel-scorecard@1"
 
-// Check is one rule: a boolean SQL expression over a Service ($1) plus the
-// explanation shown when it fails.
+// Check is one rule: a boolean SQL expression over a Service (@service) at
+// the Service clock's time (@at), plus the explanation shown when it fails.
 type Check struct {
 	Name, Control, Why, SQL string
 }
@@ -27,23 +27,23 @@ type Check struct {
 // Checks is keel-scorecard@1.
 var Checks = []Check{
 	{"owner", "PO.2.1", "no owning Team",
-		`SELECT EXISTS (SELECT 1 FROM services s JOIN teams t ON t.id = s.team_id WHERE s.id = $1)`},
+		`SELECT EXISTS (SELECT 1 FROM services s JOIN teams t ON t.id = s.team_id WHERE s.id = @service)`},
 	{"repository", "PS.1.1", "no source repository registered (catalog-info.yaml or a Service Template)",
-		`SELECT EXISTS (SELECT 1 FROM services WHERE id = $1 AND repository <> '' AND repository_id IS NOT NULL)`},
+		`SELECT EXISTS (SELECT 1 FROM services WHERE id = @service AND repository <> '' AND repository_id IS NOT NULL)`},
 	{"golden_path", "PO.3.2", "not created from a Service Template",
-		`SELECT EXISTS (SELECT 1 FROM services WHERE id = $1 AND template <> '')`},
+		`SELECT EXISTS (SELECT 1 FROM services WHERE id = @service AND template <> '')`},
 	{"scanned", "PW.7.2", "no full scanner upload in the last 30 days",
-		`SELECT EXISTS (SELECT 1 FROM scan_runs WHERE service_id = $1 AND scope = 'full' AND created_at > now() - interval '30 days')`},
+		`SELECT EXISTS (SELECT 1 FROM scan_runs WHERE service_id = @service AND scope = 'full' AND created_at > now() - interval '30 days')`},
 	{"provenance", "SLSA-BUILD-L3", "latest Release has no passing provenance verification",
-		`SELECT coalesce((SELECT release_verified(id) FROM releases WHERE service_id = $1 ORDER BY created_at DESC LIMIT 1), false)`},
+		`SELECT coalesce((SELECT release_verified(id) FROM releases WHERE service_id = @service ORDER BY created_at DESC LIMIT 1), false)`},
 	{"sbom", "PS.3.2", "latest Release has no SBOM",
-		`SELECT EXISTS (SELECT 1 FROM release_sboms b WHERE b.release_id = (SELECT id FROM releases WHERE service_id = $1 ORDER BY created_at DESC LIMIT 1))`},
+		`SELECT EXISTS (SELECT 1 FROM release_sboms b WHERE b.release_id = (SELECT id FROM releases WHERE service_id = @service ORDER BY created_at DESC LIMIT 1))`},
 	{"findings_sla", "RV.2.2", "has overdue Findings",
-		`SELECT NOT EXISTS (SELECT 1 FROM findings WHERE service_id = $1 AND status = 'open' AND due_at < now())`},
+		`SELECT NOT EXISTS (SELECT 1 FROM findings WHERE service_id = @service AND status = 'open' AND due_at < @at)`},
 	{"critical_findings", "RV.2.2", "has open critical Findings without an Exception",
-		`SELECT NOT EXISTS (SELECT 1 FROM findings f WHERE f.service_id = $1 AND f.status = 'open' AND f.severity = 'critical' AND NOT finding_excepted(f))`},
+		`SELECT NOT EXISTS (SELECT 1 FROM findings f WHERE f.service_id = @service AND f.status = 'open' AND f.severity = 'critical' AND NOT finding_excepted(f, @at))`},
 	{"deployed_recently", "DORA", "not deployed in the last 30 days",
-		`SELECT EXISTS (SELECT 1 FROM promotions p JOIN releases r ON r.id = p.release_id WHERE r.service_id = $1 AND p.state = 'deployed' AND p.deployed_at > now() - interval '30 days')`},
+		`SELECT EXISTS (SELECT 1 FROM promotions p JOIN releases r ON r.id = p.release_id WHERE r.service_id = @service AND p.state = 'deployed' AND p.deployed_at > now() - interval '30 days')`},
 }
 
 // Result is one check's outcome.
@@ -83,12 +83,20 @@ type Report struct {
 // Service computes and snapshots scorecards.
 type Service struct {
 	Store *store.Store
-	Now   func() time.Time
+	Now   func() time.Time // defaults to time.Now
+}
+
+func (s Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // Compute scores every active Service in a Tenant.
 func (s Service) Compute(ctx context.Context, tenant string) (Report, error) {
 	rep := Report{Version: Version, Cards: []Card{}, Teams: []TeamScore{}}
+	at := s.now()
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT s.id::text, s.slug, s.team_id::text, t.name,
 				(SELECT score FROM scorecard_snapshots x WHERE x.service_id = s.id AND x.day <= current_date - 30 ORDER BY day DESC LIMIT 1)
@@ -115,7 +123,7 @@ func (s Service) Compute(ctx context.Context, tenant string) (Report, error) {
 			passed := 0
 			for _, ch := range Checks {
 				var ok bool
-				if err := tx.QueryRow(ctx, ch.SQL, x.id).Scan(&ok); err != nil {
+				if err := tx.QueryRow(ctx, ch.SQL, pgx.NamedArgs{"service": x.id, "at": at}).Scan(&ok); err != nil {
 					return fmt.Errorf("check %s: %w", ch.Name, err)
 				}
 				r := Result{Name: ch.Name, Control: ch.Control, Pass: ok}
@@ -160,11 +168,7 @@ func (s Service) Snapshot(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	now := time.Now
-	if s.Now != nil {
-		now = s.Now
-	}
-	day := now().UTC().Format("2006-01-02")
+	day := s.now().UTC().Format("2006-01-02")
 	n := 0
 	for _, tenant := range tenants {
 		rep, err := s.Compute(ctx, tenant)

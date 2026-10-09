@@ -55,6 +55,14 @@ const GitHubCodeScanningTool = "github-code-scanning"
 // Service ingests scans.
 type Service struct {
 	Store *store.Store
+	Now   func() time.Time // defaults to time.Now
+}
+
+func (s Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // Ingest records a SARIF upload for a Service as Findings owned by its Team.
@@ -70,6 +78,7 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		return Run{}, fmt.Errorf("%w: SARIF has no runs", ErrInvalid)
 	}
 	run := Run{ServiceID: service, Tool: strings.Join(tools, ","), Scope: u.Scope, CommitSHA: u.CommitSHA, Ref: u.Ref, Results: len(results)}
+	now := s.now()
 	err = s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var project, team, slug, source string
 		err := tx.QueryRow(ctx, `SELECT project_id::text, team_id::text, slug, code_scanning_source FROM services WHERE id = $1 AND archived_at IS NULL FOR SHARE`, service).Scan(&project, &team, &slug, &source)
@@ -105,8 +114,8 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 			var inserted bool
 			// One Finding per fingerprint: a second tool reporting the same
 			// vulnerability adds itself to detail.tools instead of a duplicate.
-			err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, owner_team_id, service_id)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, owner_team_id, service_id, first_seen_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 				ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET
 				    last_seen_at = now(),
 				    detail = findings.detail || jsonb_build_object(
@@ -114,7 +123,7 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 				        'locations', excluded.detail->'locations', 'commit', excluded.detail->'commit', 'message', excluded.detail->'message'),
 				    severity = CASE WHEN array_position(ARRAY['critical','high','medium','low'], excluded.severity) < array_position(ARRAY['critical','high','medium','low'], findings.severity)
 				                    THEN excluded.severity ELSE findings.severity END
-				RETURNING (xmax = 0)`, tenant, r.Kind, r.Fingerprint, r.Severity, title, detail, project, team, service).Scan(&inserted)
+				RETURNING (xmax = 0)`, tenant, r.Kind, r.Fingerprint, r.Severity, title, detail, project, team, service, now).Scan(&inserted)
 			if err != nil {
 				return err
 			}
@@ -124,7 +133,7 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 		}
 		if u.Scope == "full" {
 			for _, tool := range tools {
-				n, err := resolveAbsent(ctx, tx, service, tool, current, leaveCodeScanning)
+				n, err := resolveAbsent(ctx, tx, service, tool, current, leaveCodeScanning, now)
 				if err != nil {
 					return err
 				}
@@ -148,14 +157,14 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 
 // ResolveAbsent is resolveAbsent for other sources of vulnerability
 // Findings (OSV re-matching) that report under their own tool name.
-func ResolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string) (int, error) {
-	return resolveAbsent(ctx, tx, service, tool, current, false)
+func ResolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string, at time.Time) (int, error) {
+	return resolveAbsent(ctx, tx, service, tool, current, false, at)
 }
 
 // resolveAbsent: a full scan by tool that no longer reports a Finding removes
 // the tool from it; with no tool left reporting, the Finding is resolved.
-// leaveCodeScanning keeps it off code scanning Findings.
-func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string, leaveCodeScanning bool) (int, error) {
+// leaveCodeScanning keeps it off code scanning Findings. at is the resolution time.
+func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current []string, leaveCodeScanning bool, at time.Time) (int, error) {
 	if current == nil {
 		current = []string{} // a nil slice is SQL NULL, and "x = ANY(NULL)" is never false
 	}
@@ -164,8 +173,8 @@ func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current
 		  AND (NOT $4 OR kind NOT IN ('sast', 'code_scan'))`, service, tool, current, leaveCodeScanning); err != nil {
 		return 0, err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'no longer reported by a full scan'
-		WHERE service_id = $1 AND status = 'open' AND detail ? 'tools' AND jsonb_array_length(detail->'tools') = 0`, service)
+	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'no longer reported by a full scan'
+		WHERE service_id = $1 AND status = 'open' AND detail ? 'tools' AND jsonb_array_length(detail->'tools') = 0`, service, at)
 	return int(tag.RowsAffected()), err
 }
 
@@ -174,12 +183,12 @@ func resolveAbsent(ctx context.Context, tx pgx.Tx, service, tool string, current
 // Service switched to it. Secret, IaC, workflow and vulnerability Findings
 // stay open.
 // CI's are the "scan:" Findings of SARIF tools; GitHub's carry
-// GitHubCodeScanningTool.
-func ResolveOtherCodeScanning(ctx context.Context, tx pgx.Tx, service, source string) (int, error) {
+// GitHubCodeScanningTool. at is the resolution time.
+func ResolveOtherCodeScanning(ctx context.Context, tx pgx.Tx, service, source string, at time.Time) (int, error) {
 	fromGitHub := source == SourceKeel // the Findings to resolve
-	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'code scanning source changed to ' || $2::text
+	tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $5, resolution = 'code scanning source changed to ' || $2::text
 		WHERE service_id = $1 AND status = 'open' AND fingerprint LIKE 'scan:%'
-		  AND kind IN ('sast', 'code_scan') AND coalesce(detail->'tools' ? $3, false) = $4`, service, source, GitHubCodeScanningTool, fromGitHub)
+		  AND kind IN ('sast', 'code_scan') AND coalesce(detail->'tools' ? $3, false) = $4`, service, source, GitHubCodeScanningTool, fromGitHub, at)
 	return int(tag.RowsAffected()), err
 }
 

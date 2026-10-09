@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -23,6 +24,14 @@ type Manager struct {
 	Config   Config
 	IAM      func(account string) (IAM, error)
 	JWKS     func(context.Context) (string, error)
+	Now      func() time.Time // defaults to time.Now
+}
+
+func (m Manager) now() time.Time {
+	if m.Now != nil {
+		return m.Now()
+	}
+	return time.Now()
 }
 
 // bindings lists the repositories of the Environment's Project.
@@ -156,7 +165,7 @@ func (m Manager) Sync(ctx context.Context) (SyncResult, error) {
 			if err != nil {
 				res.Failed++
 			}
-			if ferr := m.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error { return finding(ctx, tx, tenant, a, err) }); ferr != nil {
+			if ferr := m.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error { return finding(ctx, tx, tenant, a, err, m.now()) }); ferr != nil {
 				return res, ferr
 			}
 		}
@@ -164,12 +173,12 @@ func (m Manager) Sync(ctx context.Context) (SyncResult, error) {
 	return res, nil
 }
 
-// finding raises (or resolves) the account's CI identity Finding.
-func finding(ctx context.Context, tx pgx.Tx, tenant string, a identified, err error) error {
+// finding raises (or resolves) the account's CI identity Finding at the given time.
+func finding(ctx context.Context, tx pgx.Tx, tenant string, a identified, err error, at time.Time) error {
 	fp := "ci_identity:" + a.external
 	if err == nil {
-		_, e := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'CI identity in sync'
-			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp)
+		_, e := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'CI identity in sync'
+			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, at)
 		return e
 	}
 	severity, title := "high", fmt.Sprintf("CI identity on %s could not be kept in sync: deployments may fail", a.external)
@@ -177,9 +186,9 @@ func finding(ctx context.Context, tx pgx.Tx, tenant string, a identified, err er
 		severity, title = "medium", fmt.Sprintf("More than %d repositories deploy to %s; only the first %d can assume the deploy role", MaxSubjects, a.external, MaxSubjects)
 	}
 	detail, _ := json.Marshal(map[string]any{"account": a.external, "error": err.Error()})
-	_, e := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id)
-		SELECT $1, 'ci_identity', $2, $3, $4, $5, e.project_id, e.id, p.team_id FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = $6
+	_, e := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
+		SELECT $1, 'ci_identity', $2, $3, $4, $5, e.project_id, e.id, p.team_id, $7 FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = $6
 		ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(), detail = excluded.detail, severity = excluded.severity`,
-		tenant, fp, severity, title, detail, a.env)
+		tenant, fp, severity, title, detail, a.env, at)
 	return e
 }

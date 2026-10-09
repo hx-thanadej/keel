@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -25,6 +26,14 @@ type Standing struct {
 	Users     func(account string) (Users, error)
 	// BreakGlass names provider users that are break-glass identities (#135).
 	BreakGlass func(ctx context.Context, tenant, account string) (map[string]bool, error)
+	Now        func() time.Time // defaults to time.Now
+}
+
+func (s Standing) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // StandingResult is the KPI: humans with standing production access.
@@ -138,7 +147,7 @@ func (s Standing) Run(ctx context.Context) (StandingResult, error) {
 				}
 			}
 			res.Standing += len(found)
-			if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error { return standingFindings(ctx, tx, tenant, a, found) }); err != nil {
+			if err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error { return standingFindings(ctx, tx, tenant, a, found, s.now()) }); err != nil {
 				return res, err
 			}
 		}
@@ -155,17 +164,19 @@ func orDefault(s, d string) string {
 	return s
 }
 
-func standingFindings(ctx context.Context, tx pgx.Tx, tenant string, a prodAccount, items []standingItem) error {
+// standingFindings raises a Finding per item and resolves the account's
+// others, at the given time.
+func standingFindings(ctx context.Context, tx pgx.Tx, tenant string, a prodAccount, items []standingItem, at time.Time) error {
 	prefix := "standing_access:" + a.external + ":"
 	open := map[string]bool{}
 	for _, it := range items {
 		fp := prefix + it.key
 		open[fp] = true
 		detail, _ := json.Marshal(map[string]any{"account": a.external, "access": it.what})
-		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id)
-			VALUES ($1, 'standing_access', $2, 'critical', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5))
+		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
+			VALUES ($1, 'standing_access', $2, 'critical', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5), $7)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now()`,
-			tenant, fp, "Standing production access in "+a.external+": "+it.what, detail, a.project, a.env); err != nil {
+			tenant, fp, "Standing production access in "+a.external+": "+it.what, detail, a.project, a.env, at); err != nil {
 			return err
 		}
 	}
@@ -179,8 +190,8 @@ func standingFindings(ctx context.Context, tx pgx.Tx, tenant string, a prodAccou
 	}
 	for _, fp := range fps {
 		if !open[fp] {
-			if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'access removed'
-				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'access removed'
+				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, at); err != nil {
 				return err
 			}
 		}

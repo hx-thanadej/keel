@@ -17,14 +17,16 @@ func TestFindingsInbox(t *testing.T) {
 	s := storetest.New(t)
 	az, _ := authz.New()
 	tat, _ := s.CreateTenant(t.Context(), "tat", "TAT", false)
-	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: catalog.New(s, az), Authz: az}))
+	cat := catalog.New(s, az)
+	cat.Now = storetest.Clock()
+	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: cat, Authz: az}))
 	t.Cleanup(srv.Close)
 	var low, high string
 	if err := s.InTenant(t.Context(), tat, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(t.Context(), `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title) VALUES ($1, 'cost_anomaly', 'a', 'low', 'Low one') RETURNING id::text`, tat).Scan(&low); err != nil {
+		if err := tx.QueryRow(t.Context(), `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at) VALUES ($1, 'cost_anomaly', 'a', 'low', 'Low one', $2) RETURNING id::text`, tat, cat.Now()).Scan(&low); err != nil {
 			return err
 		}
-		return tx.QueryRow(t.Context(), `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title) VALUES ($1, 'cost_anomaly', 'b', 'high', 'High one') RETURNING id::text`, tat).Scan(&high)
+		return tx.QueryRow(t.Context(), `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at) VALUES ($1, 'cost_anomaly', 'b', 'high', 'High one', $2) RETURNING id::text`, tat, cat.Now()).Scan(&high)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +53,7 @@ func TestFindingsInbox(t *testing.T) {
 	if r := items(t, body); len(r) != 1 || r[0]["resolution"] != "NAT egress was a one-off data migration" {
 		t.Fatalf("resolved %v", r)
 	}
+	storetest.ClockedFindings(t, s, "cost_anomaly")
 	st, body = viewer.do("GET", "/v1/tenants/"+tat+"/findings?status=bogus", nil)
 	mustStatus(t, st, 400, body)
 	_ = low

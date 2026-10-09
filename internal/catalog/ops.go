@@ -209,7 +209,7 @@ func (s *Service) SetCodeScanningSource(ctx context.Context, p auth.Principal, t
 			Scan(&sv.ID, &sv.ProjectID, &sv.TeamID, &sv.Slug, &sv.Name, &sv.Repository, &sv.Template, &sv.TemplateVersion, &sv.CodeScanningSource); err != nil {
 			return err
 		}
-		resolved, err := scans.ResolveOtherCodeScanning(ctx, tx, id, source)
+		resolved, err := scans.ResolveOtherCodeScanning(ctx, tx, id, source, s.Now())
 		if err != nil {
 			return err
 		}

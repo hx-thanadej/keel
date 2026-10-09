@@ -71,7 +71,7 @@ func TestScansDedupeAcrossToolsAndResolveOnFullScans(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ing := scans.Service{Store: s}
+	ing := scans.Service{Store: s, Now: storetest.Clock()}
 	cve := "vuln:CVE-2026-1111:" + svc
 
 	// Trivy: the CVE in two lockfile places, plus a misconfiguration.
@@ -109,6 +109,7 @@ func TestScansDedupeAcrossToolsAndResolveOnFullScans(t *testing.T) {
 	if f := open(t, s, tenant); len(f) != 0 {
 		t.Fatalf("still open %v", f)
 	}
+	storetest.ClockedFindings(t, s, "vulnerability")
 	if _, err := ing.Ingest(ctx, tenant, svc, scans.Upload{Scope: "full", SARIF: []byte(`{"version":"1.0"}`)}, ci); err == nil {
 		t.Fatal("bad SARIF accepted")
 	}

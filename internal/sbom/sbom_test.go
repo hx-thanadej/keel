@@ -109,7 +109,7 @@ func TestSubmitWhereAndOSVMatching(t *testing.T) {
 	osv := fakeOSV(t, map[string][]string{log4j: {"GHSA-jfh8-c2jp-5v3q"}},
 		map[string]map[string]any{"GHSA-jfh8-c2jp-5v3q": {"id": "GHSA-jfh8-c2jp-5v3q", "summary": "Log4Shell", "aliases": []string{"CVE-2021-44228"}, "database_specific": map[string]string{"severity": "CRITICAL"}}})
 	tenants := func(context.Context) ([]string, error) { return []string{tenant}, nil }
-	m := sbom.Matcher{Store: s, Tenants: tenants, OSV: sbom.OSVClient{BaseURL: osv.URL}}
+	m := sbom.Matcher{Store: s, Tenants: tenants, OSV: sbom.OSVClient{BaseURL: osv.URL}, Now: storetest.Clock()}
 	res, err := m.Run(ctx)
 	if err != nil || res.Components != 2 || res.Raised != 1 {
 		t.Fatalf("%+v %v", res, err)
@@ -125,4 +125,5 @@ func TestSubmitWhereAndOSVMatching(t *testing.T) {
 	if res, err := m.Run(ctx); err != nil || res.Resolved != 1 {
 		t.Fatalf("%+v %v", res, err)
 	}
+	storetest.ClockedFindings(t, s, "vulnerability")
 }

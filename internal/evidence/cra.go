@@ -133,12 +133,12 @@ func (c CRA) Run(ctx context.Context) (int, error) {
 				detail, _ := json.Marshal(map[string]any{"cve": h.cve, "service": h.slug, "aware_at": aware,
 					"early_warning_by": aware.Add(EarlyWarning), "notification_by": aware.Add(Notification), "final_report_by": aware.Add(FinalReport),
 					"regulation": "EU 2024/2847 Art. 14", "source": "CISA KEV"})
-				tag, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, service_id, owner_team_id)
-					SELECT $1, 'cra_report', $2, 'critical', $3, $4, $5, $6, $7
+				tag, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, service_id, owner_team_id, first_seen_at)
+					SELECT $1, 'cra_report', $2, 'critical', $3, $4, $5, $6, $7, $8
 					WHERE NOT EXISTS (SELECT 1 FROM findings WHERE fingerprint = $2)`,
 					tenant, "cra:"+h.cve+":"+h.service,
 					fmt.Sprintf("CRA: %s is actively exploited and runs in %s — early warning to the CSIRT/ENISA by %s", h.cve, h.slug, aware.Add(EarlyWarning).Format("2 Jan 15:04 MST")),
-					detail, h.project, h.service, h.team)
+					detail, h.project, h.service, h.team, aware)
 				if err != nil {
 					return err
 				}

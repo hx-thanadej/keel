@@ -37,12 +37,13 @@ func TestVEXSuppressesAndExports(t *testing.T) {
 		t.Fatal(err)
 	}
 	sarif := []byte(`{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"grype","rules":[{"id":"CVE-2026-2222","properties":{"security-severity":"9.1"}}]}},"results":[{"ruleId":"CVE-2026-2222","message":{"text":"x"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"go.sum"}}}]}]}]}`)
-	ing := scans.Service{Store: s}
+	clock := storetest.Clock()
+	ing := scans.Service{Store: s, Now: clock}
 	ci := activity.Actor{Type: activity.ActorPipeline, UID: "pipeline:x"}
 	if run, err := ing.Ingest(ctx, tenant, svc, scans.Upload{Scope: "full", SARIF: sarif}, ci); err != nil || run.Raised != 1 {
 		t.Fatalf("%+v %v", run, err)
 	}
-	v := vex.Service{Store: s}
+	v := vex.Service{Store: s, Now: clock}
 	dev := activity.Actor{Type: activity.ActorHuman, UID: "user:dev"}
 	if _, err := v.Record(ctx, tenant, vex.Statement{Vulnerability: "CVE-2026-2222", ServiceID: svc, Status: "not_affected"}, dev); !errors.Is(err, vex.ErrInvalid) {
 		t.Fatalf("not_affected without justification: %v", err)
@@ -65,6 +66,7 @@ func TestVEXSuppressesAndExports(t *testing.T) {
 	if open() != 0 {
 		t.Fatal("Finding not resolved by VEX")
 	}
+	storetest.ClockedFindings(t, s, "vulnerability")
 	// The next scan does not raise it again.
 	if run, _ := ing.Ingest(ctx, tenant, svc, scans.Upload{Scope: "full", SARIF: sarif}, ci); run.Raised != 0 || open() != 0 {
 		t.Fatalf("re-raised after VEX: %+v", run)

@@ -17,6 +17,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/ghalerts"
 	"github.com/hx-thanadej/keel/internal/ghapi"
 	"github.com/hx-thanadej/keel/internal/scans"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 // gitHub serves acme/crm-api's code scanning alerts.
@@ -117,7 +118,7 @@ var ci = activity.Actor{Type: activity.ActorPipeline, UID: "pipeline:x"}
 
 func (e env) upload(t *testing.T, scope, sarif string) {
 	t.Helper()
-	if _, err := (scans.Service{Store: e.s}).Ingest(context.Background(), e.tenant, e.svc, scans.Upload{Scope: scope, CommitSHA: "ci", SARIF: []byte(sarif)}, ci); err != nil {
+	if _, err := e.scans().Ingest(context.Background(), e.tenant, e.svc, scans.Upload{Scope: scope, CommitSHA: "ci", SARIF: []byte(sarif)}, ci); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -160,7 +161,7 @@ func (e env) except(t *testing.T, id string) {
 	ctx := context.Background()
 	if err := e.s.InTenant(ctx, e.tenant, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO exceptions (tenant_id, finding_ids, reason, state, requested_by, expires_at)
-			VALUES ($1, ARRAY[$2::uuid], 'accepted until the ORM migration', 'approved', 'a', now() + interval '30 days')`, e.tenant, id)
+			VALUES ($1, ARRAY[$2::uuid], 'accepted until the ORM migration', 'approved', 'a', $3)`, e.tenant, id, e.now().AddDate(0, 0, 30))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -271,6 +272,7 @@ func TestGitHubSourceOneFindingPerAlert(t *testing.T) {
 	if got := e.byPrefix(t, "scan:github:4242:6"); len(got) != 2 || got[0].Status != "resolved" || got[1].Status != "open" {
 		t.Fatalf("%+v", got)
 	}
+	storetest.ClockedFindings(t, e.s, "sast")
 }
 
 // An open Finding whose alert is in no list resolves only when the closed
