@@ -290,3 +290,44 @@ func TestCriticalFindingsAndBudgetBreachBlock(t *testing.T) {
 		t.Fatalf("with exception: %+v %v", d, err)
 	}
 }
+
+// The gate asks whether an Exception covers a critical Finding at the service
+// clock's time, the time the expiry worker uses (#176).
+func TestCriticalFindingGateAsksAtTheServiceClock(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	clock := storetest.Clock()
+	s, err := promotion.New(promotion.Service{Store: w.s, Now: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := s.CreateRelease(ctx, w.tenant, w.service, "4.0.0", []promotion.Image{{Name: image, Digest: digest}}, "", eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	except := func(expires time.Time) {
+		t.Helper()
+		if err := w.s.InTenant(ctx, w.tenant, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO exceptions (tenant_id, fingerprint, reason, state, requested_by, decided_by, expires_at)
+				VALUES ($1, 'cve', 'patched next sprint', 'approved', 'user:eng', 'user:sec', $2)`, w.tenant, expires)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.s.InTenant(ctx, w.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, project_id, first_seen_at) VALUES ($1, 'vulnerability', 'cve', 'critical', 'CVE in base image', $2, $3)`, w.tenant, w.project, clock())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Expired on the service clock, years ahead of wall time.
+	except(clock().Add(-time.Hour))
+	if d, err := s.Preview(ctx, w.tenant, rel.ID, w.dev); err != nil || d.Allow || len(d.Reasons) != 1 || !strings.HasPrefix(d.Reasons[0], "1 open critical Findings") {
+		t.Fatalf("Exception expired on the service clock still covers the Finding: %+v %v", d, err)
+	}
+	except(clock().Add(time.Hour))
+	if d, err := s.Preview(ctx, w.tenant, rel.ID, w.dev); err != nil || !d.Allow {
+		t.Fatalf("live Exception: %+v %v", d, err)
+	}
+}

@@ -123,4 +123,10 @@ func TestAssessmentLifecycle(t *testing.T) {
 	if open != 0 {
 		t.Fatal("reminder not resolved by the submission")
 	}
+	var first, resolved time.Time
+	if err := s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT first_seen_at, resolved_at FROM findings WHERE kind = 'maturity_assessment_due'`).Scan(&first, &resolved)
+	}); err != nil || !first.Equal(now) || !resolved.Equal(now) {
+		t.Fatalf("reminder raised %v and resolved %v, want both at the service clock's %v (%v)", first, resolved, now, err)
+	}
 }

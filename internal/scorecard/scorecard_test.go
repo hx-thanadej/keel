@@ -92,3 +92,59 @@ func TestScorecards(t *testing.T) {
 		}
 	}
 }
+
+// The Findings checks judge due dates and Exception expiry at the service
+// clock's time (#176). Each Service's Finding is late and its Exception
+// expired on the service clock, but neither on the database's clock.
+func TestFindingChecksUseTheServiceClock(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	clock := storetest.Clock()
+	tenant, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	if err := s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		var team, project string
+		if err := tx.QueryRow(ctx, `INSERT INTO teams (tenant_id, slug, name) VALUES ($1, 'crm', 'CRM') RETURNING id`, tenant).Scan(&team); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO projects (tenant_id, team_id, slug, name) VALUES ($1, $2, 'tat-crm', 'TAT CRM') RETURNING id`, tenant, team).Scan(&project); err != nil {
+			return err
+		}
+		for _, x := range []struct {
+			slug          string
+			seen, expires time.Time
+		}{
+			{"late", clock().AddDate(0, 0, -30), clock().Add(-time.Hour)},
+			{"current", clock(), clock().Add(time.Hour)},
+		} {
+			var svc string
+			if err := tx.QueryRow(ctx, `INSERT INTO services (tenant_id, project_id, team_id, slug, name) VALUES ($1, $2, $3, $4, $4) RETURNING id`, tenant, project, team, x.slug).Scan(&svc); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, service_id, first_seen_at) VALUES ($1, 'vulnerability', $2, 'critical', 'CVE', $3, $4)`, tenant, "v:"+x.slug, svc, x.seen); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO exceptions (tenant_id, fingerprint, reason, state, requested_by, decided_by, expires_at) VALUES ($1, $2, 'patched next sprint', 'approved', 'user:eng', 'user:sec', $3)`, tenant, "v:"+x.slug, x.expires); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := scorecard.Service{Store: s, Now: clock}.Compute(ctx, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pass := map[string]bool{}
+	for _, c := range rep.Cards {
+		for _, r := range c.Results {
+			pass[c.Service+"/"+r.Name] = r.Pass
+		}
+	}
+	want := map[string]bool{"late/findings_sla": false, "late/critical_findings": false, "current/findings_sla": true, "current/critical_findings": true}
+	for k, v := range want {
+		if pass[k] != v {
+			t.Errorf("%s pass = %v, want %v", k, pass[k], v)
+		}
+	}
+}

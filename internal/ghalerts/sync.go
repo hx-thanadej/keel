@@ -43,7 +43,14 @@ var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:ghalerts"}
 type Syncer struct {
 	Store  *store.Store
 	Source Source
-	Now    func() time.Time
+	Now    func() time.Time // defaults to time.Now
+}
+
+func (s Syncer) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // ServiceStatus is what one sync learned about one Service. A status other
@@ -151,6 +158,7 @@ func status(err error) string {
 
 func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo string, res *Result) (ServiceStatus, error) {
 	st := ServiceStatus{Tenant: tenant, Service: v.slug, Repository: repo}
+	now := s.now()
 	repoKey := repo
 	if v.repoID != nil {
 		repoKey = fmt.Sprint(*v.repoID) // immutable, survives renames
@@ -186,7 +194,7 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 		}
 		if st.CodeScanning == StatusOK {
 			for _, a := range code.open {
-				created, err := raise(ctx, tx, tenant, v, codeItem(a, *v.repoID))
+				created, err := raise(ctx, tx, tenant, v, codeItem(a, *v.repoID), now)
 				if err != nil {
 					return err
 				}
@@ -195,8 +203,8 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 				}
 			}
 			for fp, resolution := range code.closed {
-				tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $3
-					WHERE service_id = $1 AND fingerprint = $2 AND status = 'open'`, v.id, fp, resolution)
+				tag, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $4, resolution = $3
+					WHERE service_id = $1 AND fingerprint = $2 AND status = 'open'`, v.id, fp, resolution, now)
 				if err != nil {
 					return err
 				}
@@ -219,7 +227,7 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 			current := []string{}
 			for _, it := range g.items {
 				current = append(current, it.fingerprint)
-				created, err := raise(ctx, tx, tenant, v, it)
+				created, err := raise(ctx, tx, tenant, v, it, now)
 				if err != nil {
 					return err
 				}
@@ -227,7 +235,7 @@ func (s Syncer) syncService(ctx context.Context, tenant string, v svcRow, repo s
 					raised++
 				}
 			}
-			n, err := scans.ResolveAbsent(ctx, tx, v.id, g.tool, current)
+			n, err := scans.ResolveAbsent(ctx, tx, v.id, g.tool, current, now)
 			if err != nil {
 				return err
 			}
@@ -357,20 +365,21 @@ func reason(err error) string {
 	return r
 }
 
-// raise upserts it unless a VEX statement says the Service is not affected.
-func raise(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (bool, error) {
+// raise upserts it, first seen at, unless a VEX statement says the Service is
+// not affected.
+func raise(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item, at time.Time) (bool, error) {
 	if it.vuln != "" {
 		var suppressed bool
 		if err := tx.QueryRow(ctx, `SELECT vex_suppressed($1, $2)`, it.vuln, v.id).Scan(&suppressed); err != nil || suppressed {
 			return false, err
 		}
 	}
-	return upsert(ctx, tx, tenant, v, it)
+	return upsert(ctx, tx, tenant, v, it, at)
 }
 
 // upsert raises the Finding or adds the alert's tool to an existing one, so
 // a CVE Trivy also reports stays one Finding.
-func upsert(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (bool, error) {
+func upsert(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item, at time.Time) (bool, error) {
 	it.detail["tools"] = []string{it.tool}
 	it.detail["service"] = v.slug
 	detail, err := json.Marshal(it.detail)
@@ -383,14 +392,14 @@ func upsert(ctx context.Context, tx pgx.Tx, tenant string, v svcRow, it item) (b
 	}
 	title := fmt.Sprintf("%s in %s: %s", it.rule, v.slug, it.title)
 	var inserted bool
-	err = tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, owner_team_id, service_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	err = tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, owner_team_id, service_id, first_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $11)
 		ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET
 		    last_seen_at = now(),
 		    detail = findings.detail || $10::jsonb || jsonb_build_object(
 		        'tools', (SELECT jsonb_agg(DISTINCT t) FROM jsonb_array_elements(coalesce(findings.detail->'tools', '[]') || (excluded.detail->'tools')) AS t)),
 		    severity = CASE WHEN array_position(ARRAY['critical','high','medium','low'], excluded.severity) < array_position(ARRAY['critical','high','medium','low'], findings.severity)
 		                    THEN excluded.severity ELSE findings.severity END
-		RETURNING (xmax = 0)`, tenant, it.kind, it.fingerprint, it.severity, title, detail, v.project, v.team, v.id, refresh).Scan(&inserted)
+		RETURNING (xmax = 0)`, tenant, it.kind, it.fingerprint, it.severity, title, detail, v.project, v.team, v.id, refresh, at).Scan(&inserted)
 	return inserted, err
 }

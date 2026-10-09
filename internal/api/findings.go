@@ -68,9 +68,9 @@ func mountFindings(mux Mux, a auth.Authenticator, c *catalog.Service, az catalog
 		err := c.Store().InTenant(r.Context(), tenant, func(tx pgx.Tx) error {
 			rows, err := tx.Query(r.Context(), `SELECT `+findingCols+` FROM findings
 				WHERE ($1 = 'all' OR status = $1) AND ($2 = '' OR kind = $2) AND ($3 = '' OR owner_team_id::text = $3)
-				  AND (NOT $4 OR (status = 'open' AND due_at < now()))
-				ORDER BY (status = 'open' AND due_at < now()) DESC, array_position(ARRAY['critical','high','medium','low'], severity), due_at NULLS LAST, last_seen_at DESC LIMIT 200`,
-				status, q.Get("kind"), owner, overdue)
+				  AND (NOT $4 OR (status = 'open' AND due_at < $5))
+				ORDER BY (status = 'open' AND due_at < $5) DESC, array_position(ARRAY['critical','high','medium','low'], severity), due_at NULLS LAST, last_seen_at DESC LIMIT 200`,
+				status, q.Get("kind"), owner, overdue, c.Now())
 			if err != nil {
 				return err
 			}
@@ -97,8 +97,8 @@ func mountFindings(mux Mux, a auth.Authenticator, c *catalog.Service, az catalog
 		}
 		var f Finding
 		err := c.Store().InTenant(r.Context(), tenant, func(tx pgx.Tx) error {
-			err := tx.QueryRow(r.Context(), `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $2
-				WHERE id = $1 AND status = 'open' RETURNING `+findingCols, id, in.Resolution).
+			err := tx.QueryRow(r.Context(), `UPDATE findings SET status = 'resolved', resolved_at = $3, resolution = $2
+				WHERE id = $1 AND status = 'open' RETURNING `+findingCols, id, in.Resolution, c.Now()).
 				Scan(&f.ID, &f.Kind, &f.Severity, &f.Status, &f.Title, &f.Detail, &f.ProjectID, &f.EnvironmentID, &f.OwnerTeamID, &f.FirstSeenAt, &f.LastSeenAt, &f.ResolvedAt, &f.Resolution, &f.DueAt, &f.OverdueAt)
 			if err != nil {
 				return err

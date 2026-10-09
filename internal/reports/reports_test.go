@@ -14,6 +14,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/budget"
 	"github.com/hx-thanadej/keel/internal/dora"
 	"github.com/hx-thanadej/keel/internal/exceptions"
+	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/flow/flowtest"
 	"github.com/hx-thanadej/keel/internal/reports"
 	"github.com/hx-thanadej/keel/internal/rightsize"
@@ -299,5 +300,35 @@ func TestReportCountsExceptionsOnTheExceptionsClock(t *testing.T) {
 	must(t, err)
 	if r.Exceptions.Granted != 1 || r.Exceptions.Active != 1 {
 		t.Fatalf("exception approved in %s: %+v", month.Format("2006-01"), r.Exceptions)
+	}
+}
+
+// Findings count in the month their writers' clock says they were raised and
+// resolved in, not the month of the database's now().
+func TestReportCountsFindingsOnTheWritersClock(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	home, err := s.CreateTenant(ctx, "harmonyx", "HarmonyX", true)
+	must(t, err)
+	sla := findings.SLA{Store: s, Now: storetest.Clock()}
+	var orphan string
+	must(t, s.InTenant(ctx, home, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at) VALUES ($1, 'vulnerability', 'v', 'critical', 'CVE', $2) RETURNING id`, home, sla.Now()).Scan(&orphan)
+	}))
+	_, err = sla.Run(ctx) // raises the unowned Finding
+	must(t, err)
+	must(t, s.InTenant(ctx, home, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'patched' WHERE id = $1`, orphan, sla.Now())
+		return err
+	}))
+	_, err = sla.Run(ctx) // resolves it
+	must(t, err)
+
+	month := time.Date(storetest.Epoch.Year(), storetest.Epoch.Month(), 1, 0, 0, 0, 0, time.UTC)
+	next := month.AddDate(0, 1, 0)
+	r, err := service(s, &next).Generate(ctx, home, month, reports.SystemActor())
+	must(t, err)
+	if r.Findings.Raised != 2 || r.Findings.Resolved != 2 || r.Findings.WithinSLA != 2 || r.Findings.Overdue != 0 {
+		t.Fatalf("findings raised and resolved in %s: %+v", month.Format("2006-01"), r.Findings)
 	}
 }

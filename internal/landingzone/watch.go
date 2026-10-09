@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -48,6 +49,14 @@ type Watcher struct {
 	Baseline Baseline
 	// Remediate re-applies the baseline when it drifted or is outdated.
 	Remediate bool
+	Now       func() time.Time // defaults to time.Now
+}
+
+func (w Watcher) now() time.Time {
+	if w.Now != nil {
+		return w.Now()
+	}
+	return time.Now()
 }
 
 // WatchResult counts what a run found.
@@ -123,6 +132,7 @@ func (w Watcher) Run(ctx context.Context) (WatchResult, error) {
 }
 
 func (w Watcher) record(ctx context.Context, tx pgx.Tx, tenant string, a baselined, drift []Drift, remediated bool) error {
+	now := w.now()
 	prefix := "landing_zone:" + a.external + ":"
 	open := map[string]bool{}
 	for _, d := range drift {
@@ -130,10 +140,10 @@ func (w Watcher) record(ctx context.Context, tx pgx.Tx, tenant string, a baselin
 		open[fp] = true
 		title := fmt.Sprintf("Cloud Account %s drifted from %s: %s %s", a.external, w.Baseline.Version, d.Policy, strings.ReplaceAll(d.Problem, "_", " "))
 		detail, _ := json.Marshal(map[string]any{"account": a.external, "policy": d.Policy, "problem": d.Problem, "baseline": w.Baseline.Version, "remediated": remediated})
-		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id)
-			VALUES ($1, 'landing_zone_drift', $2, 'high', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5))
+		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
+			VALUES ($1, 'landing_zone_drift', $2, 'high', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5), $7)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(), detail = excluded.detail`,
-			tenant, fp, title, detail, a.project, a.env); err != nil {
+			tenant, fp, title, detail, a.project, a.env, now); err != nil {
 			return err
 		}
 	}
@@ -156,7 +166,7 @@ func (w Watcher) record(ctx context.Context, tx pgx.Tx, tenant string, a baselin
 		default:
 			continue
 		}
-		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, why); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $3, resolution = $2 WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, why, now); err != nil {
 			return err
 		}
 	}

@@ -87,7 +87,7 @@ func TestUpsertCreatesRecommendationAndFinding(t *testing.T) {
 
 func TestChangedTargetSupersedes(t *testing.T) {
 	w := setup(t)
-	svc := rightsize.Service{Store: w.s}
+	svc := rightsize.Service{Store: w.s, Now: storetest.Clock()}
 	ctx := context.Background()
 	r1, _, err := svc.Upsert(ctx, w.tat, rec(w, "500m", "1200.00"))
 	must(t, err)
@@ -105,11 +105,12 @@ func TestChangedTargetSupersedes(t *testing.T) {
 	if len(all) != 2 {
 		t.Fatalf("history lost: %d", len(all))
 	}
+	storetest.ClockedFindings(t, w.s, "rightsizing")
 }
 
 func TestDismissSticksUnlessEvidenceChangesMaterially(t *testing.T) {
 	w := setup(t)
-	svc := rightsize.Service{Store: w.s}
+	svc := rightsize.Service{Store: w.s, Now: storetest.Clock()}
 	ctx := context.Background()
 	r, _, err := svc.Upsert(ctx, w.tat, rec(w, "500m", "1200.00"))
 	must(t, err)
@@ -125,6 +126,7 @@ func TestDismissSticksUnlessEvidenceChangesMaterially(t *testing.T) {
 	if fstatus != "resolved" {
 		t.Errorf("finding after dismiss = %s", fstatus)
 	}
+	storetest.ClockedFindings(t, w.s, "rightsizing")
 	// Same advice next run: stays dismissed.
 	_, changed, err := svc.Upsert(ctx, w.tat, rec(w, "500m", "1250.00"))
 	must(t, err)

@@ -124,15 +124,15 @@ func (r *Runner) tenant(ctx context.Context, tx pgx.Tx, tenant string, asOf, now
 		var id string
 		var inserted bool
 		err = tx.QueryRow(ctx, `
-			INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id)
-			VALUES ($1, 'cost_anomaly', $2, $3, $4, $5, $6, $7, (SELECT team_id FROM projects WHERE id = $6))
+			INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
+			VALUES ($1, 'cost_anomaly', $2, $3, $4, $5, $6, $7, (SELECT team_id FROM projects WHERE id = $6), $9)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open'
 			DO UPDATE SET last_seen_at = now(),
 			    detail = findings.detail || jsonb_build_object('latest', excluded.detail),
 			    severity = CASE WHEN array_position(ARRAY['low','medium','high','critical'], excluded.severity) > array_position(ARRAY['low','medium','high','critical'], findings.severity) THEN excluded.severity ELSE findings.severity END
 			WHERE findings.detail->>'day' <> $8 AND coalesce(findings.detail->'latest'->>'day', '') <> $8
 			RETURNING id::text, (xmax = 0)`,
-			tenant, "cost_anomaly:"+g.project+":"+g.env+":"+g.service, v.Severity, title, detail, g.project, env, asOf.Format("2006-01-02")).Scan(&id, &inserted)
+			tenant, "cost_anomaly:"+g.project+":"+g.env+":"+g.service, v.Severity, title, detail, g.project, env, asOf.Format("2006-01-02"), now).Scan(&id, &inserted)
 		if err == pgx.ErrNoRows {
 			continue // already recorded for this day
 		}
@@ -182,7 +182,7 @@ func (r *Runner) tenant(ctx context.Context, tx pgx.Tx, tenant string, asOf, now
 		if !normal {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'auto: spend back within baseline for 3 days' WHERE id = $1`, o.id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'auto: spend back within baseline for 3 days' WHERE id = $1`, o.id, now); err != nil {
 			return err
 		}
 		res.Resolved++

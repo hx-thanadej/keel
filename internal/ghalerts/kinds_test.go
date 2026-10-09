@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/scans"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 // Results of the scanners CI keeps running under a github source.
@@ -29,7 +30,7 @@ func (e env) unexceptedOpen(t *testing.T) int {
 	ctx := context.Background()
 	var n int
 	if err := e.s.InTenant(ctx, e.tenant, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE status = 'open' AND NOT finding_excepted(findings)`).Scan(&n)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE status = 'open' AND NOT finding_excepted(findings, $1)`, e.now()).Scan(&n)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func (e env) switchTo(t *testing.T, source string, hold time.Duration) int {
 		}
 		time.Sleep(hold)
 		var err error
-		n, err = scans.ResolveOtherCodeScanning(ctx, tx, e.svc, source)
+		n, err = scans.ResolveOtherCodeScanning(ctx, tx, e.svc, source, e.now())
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -107,6 +108,7 @@ func TestSwitchToGitHubLeavesSecretIaCAndWorkflowFindings(t *testing.T) {
 	if e.openCount(t, "scan:codeql:") != 0 {
 		t.Fatal("CodeQL Finding stayed open")
 	}
+	storetest.ClockedFindings(t, e.s, "sast")
 
 	e.upload(t, "full", sarifOf("Gitleaks", leak))
 	if e.openCount(t, "scan:gitleaks:") != 1 {
@@ -127,12 +129,12 @@ func TestSwitchToGitHubLeavesSecretIaCAndWorkflowFindings(t *testing.T) {
 func TestDiffUploadUnderGitHubRaisesNoCodeScanningFindings(t *testing.T) {
 	e := setup(t, "acme/crm-api")
 	e.switchTo(t, scans.SourceGitHub, 0)
-	run, err := (scans.Service{Store: e.s}).Ingest(context.Background(), e.tenant, e.svc,
+	run, err := e.scans().Ingest(context.Background(), e.tenant, e.svc,
 		scans.Upload{Scope: "diff", CommitSHA: "ci", SARIF: []byte(sarifOf("CodeQL", sqli, xss))}, ci)
 	if err != nil || run.Raised != 0 {
 		t.Fatalf("raised %d, %v", run.Raised, err)
 	}
-	run, err = (scans.Service{Store: e.s}).Ingest(context.Background(), e.tenant, e.svc,
+	run, err = e.scans().Ingest(context.Background(), e.tenant, e.svc,
 		scans.Upload{Scope: "diff", CommitSHA: "ci", SARIF: []byte(sarifOf("Gitleaks", leak))}, ci)
 	if err != nil || run.Raised != 1 {
 		t.Fatalf("secret raised %d, %v", run.Raised, err)

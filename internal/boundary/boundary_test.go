@@ -90,7 +90,7 @@ func TestCheckReportsRolesOutsideTheBoundary(t *testing.T) {
 	_, _ = boundary.Apply(ctx, iam, true, true)
 	// Someone creates a role in the console, bypassing Keel.
 	iam.roles = append(iam.roles, boundary.Role{ID: "r9", Name: "admin-from-console"})
-	m := boundary.Manager{Store: s, Provider: "tencent", IAM: func(string) (boundary.IAM, error) { return iam, nil }}
+	m := boundary.Manager{Store: s, Provider: "tencent", IAM: func(string) (boundary.IAM, error) { return iam, nil }, Now: storetest.Clock()}
 	res, err := m.Check(ctx)
 	if err != nil || res.Missing != 1 || iam.boundaries["r9"] != 0 {
 		t.Fatalf("%+v %v (must report, not stamp)", res, err)
@@ -109,4 +109,5 @@ func TestCheckReportsRolesOutsideTheBoundary(t *testing.T) {
 	if _, err := m.Check(ctx); err != nil || count() != 0 {
 		t.Fatalf("not resolved after removal: %v", err)
 	}
+	storetest.ClockedFindings(t, s, "permission_boundary")
 }

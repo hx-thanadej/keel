@@ -159,16 +159,17 @@ func (s Service) Drill(ctx context.Context, id, notes string, by activity.Actor)
 	if err != nil {
 		return err
 	}
+	now := s.now()
 	return s.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE breakglass_identities SET last_drill_at = $2 WHERE id = $1 AND retired_at IS NULL`, id, s.now())
+		tag, err := tx.Exec(ctx, `UPDATE breakglass_identities SET last_drill_at = $2 WHERE id = $1 AND retired_at IS NULL`, id, now)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound
 		}
-		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = 'drill completed'
-			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, "breakglass_drill:"+id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'drill completed'
+			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, "breakglass_drill:"+id, now); err != nil {
 			return err
 		}
 		return record(ctx, tx, home, "keel.breakglass.drilled", "DrillBreakGlass", "breakglass/"+id, by, activity.Success, notes)
@@ -194,7 +195,7 @@ func (s Service) PostMortem(ctx context.Context, useID, url string, by activity.
 			return err
 		}
 		if finding != nil {
-			if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = now(), resolution = $2 WHERE id = $1 AND status = 'open'`, *finding, "post-mortem: "+url); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $3, resolution = $2 WHERE id = $1 AND status = 'open'`, *finding, "post-mortem: "+url, s.now()); err != nil {
 				return err
 			}
 		}
@@ -247,10 +248,10 @@ func (s Service) Watch(ctx context.Context, lookback time.Duration) (WatchResult
 		if now.Sub(last) > DrillEvery {
 			res.DrillsOverdue++
 			if err := s.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail)
-					VALUES ($1, 'breakglass', $2, 'medium', $3, jsonb_build_object('identity', $4::text, 'account', $5::text))
+				_, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
+					VALUES ($1, 'breakglass', $2, 'medium', $3, jsonb_build_object('identity', $4::text, 'account', $5::text), $6)
 					ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now()`,
-					home, "breakglass_drill:"+id.ID, fmt.Sprintf("Break-glass drill overdue for %s in %s (last %s)", id.Name, id.Account, last.Format("2 Jan 2006")), id.Name, id.Account)
+					home, "breakglass_drill:"+id.ID, fmt.Sprintf("Break-glass drill overdue for %s in %s (last %s)", id.Name, id.Account, last.Format("2 Jan 2006")), id.Name, id.Account, now)
 				return err
 			}); err != nil {
 				return res, err
@@ -275,11 +276,11 @@ func (s Service) use(ctx context.Context, home string, id Identity, e Event) (in
 		}
 		n = 1
 		var finding string
-		if err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail)
-			VALUES ($1, 'breakglass', $2, 'critical', $3, jsonb_build_object('identity', $4::text, 'account', $5::text, 'event', $6::text, 'source_ip', $7::text, 'use', $8::text))
+		if err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
+			VALUES ($1, 'breakglass', $2, 'critical', $3, jsonb_build_object('identity', $4::text, 'account', $5::text, 'event', $6::text, 'source_ip', $7::text, 'use', $8::text), $9)
 			RETURNING id::text`, home, "breakglass_use:"+useID,
 			fmt.Sprintf("Break-glass %s used in %s: %s at %s — post-mortem required", id.Name, id.Account, e.Name, e.At.UTC().Format(time.RFC3339)),
-			id.Name, id.Account, e.Name, e.SourceIP, useID).Scan(&finding); err != nil {
+			id.Name, id.Account, e.Name, e.SourceIP, useID, s.now()).Scan(&finding); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE breakglass_uses SET finding_id = $2 WHERE id = $1`, useID, finding); err != nil {

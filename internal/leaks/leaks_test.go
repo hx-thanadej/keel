@@ -77,7 +77,7 @@ func TestLeakedKeyIsDisabledAndReported(t *testing.T) {
 	leaked := "AKID" + strings.Repeat("a", 32)
 	unknown := "AKID" + strings.Repeat("b", 32)
 	k := &keys{owner: map[string]leaks.Key{leaked: {Provider: "tencent", KeyID: leaked, Account: "100002", OwnerUin: "3001", Owner: "deploy-bot"}}}
-	svc := &leaks.Service{Store: s, WebhookSecret: []byte("whsec"), Alerts: alerts{7: "SecretId=" + leaked + "\nSecretKey=xyz", 8: unknown}, Keys: map[string]leaks.Keys{"tencent": k}}
+	svc := &leaks.Service{Store: s, WebhookSecret: []byte("whsec"), Alerts: alerts{7: "SecretId=" + leaked + "\nSecretKey=xyz", 8: unknown}, Keys: map[string]leaks.Keys{"tencent": k}, Now: storetest.Clock()}
 	c, _ := flowtest.Client(t, s, svc.Register)
 	svc.SetClient(c)
 
@@ -125,4 +125,5 @@ func TestLeakedKeyIsDisabledAndReported(t *testing.T) {
 	if title, _ := finding(home); !strings.Contains(title, "Leaked tencent access key AKIDbbbb") {
 		t.Fatalf("home finding %q", title)
 	}
+	storetest.ClockedFindings(t, s, "leaked_key")
 }

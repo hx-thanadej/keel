@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -44,6 +45,7 @@ func (f *fake) SecretScanning(context.Context, string) ([]ghalerts.SecretAlert, 
 
 type env struct {
 	s      *store.Store
+	now    func() time.Time
 	tenant string
 	svc    string
 	team   string
@@ -54,7 +56,7 @@ func setup(t *testing.T, repo string) env {
 	ctx := context.Background()
 	s := storetest.New(t)
 	tenant, _ := s.CreateTenant(ctx, "tat", "TAT", false)
-	e := env{s: s, tenant: tenant}
+	e := env{s: s, now: storetest.Clock(), tenant: tenant}
 	if err := s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var project string
 		if err := tx.QueryRow(ctx, `INSERT INTO teams (tenant_id, slug, name) VALUES ($1, 'crm', 'CRM') RETURNING id`, tenant).Scan(&e.team); err != nil {
@@ -117,15 +119,17 @@ func (e env) tools(t *testing.T, fp string) []string {
 }
 
 func (e env) syncer(src ghalerts.Source) ghalerts.Syncer {
-	return ghalerts.Syncer{Store: e.s, Source: src}
+	return ghalerts.Syncer{Store: e.s, Source: src, Now: e.now}
 }
+
+func (e env) scans() scans.Service { return scans.Service{Store: e.s, Now: e.now} }
 
 func TestDependabotCVEMergesWithTrivyFinding(t *testing.T) {
 	ctx := context.Background()
 	e := setup(t, "acme/crm-api")
 	sarif := `{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Trivy"}},"results":[{"ruleId":"CVE-2026-1111","level":"error","message":{"text":"openssl"},
 		"locations":[{"physicalLocation":{"artifactLocation":{"uri":"go.sum"},"region":{"startLine":1}}}]}]}]}`
-	if _, err := (scans.Service{Store: e.s}).Ingest(ctx, e.tenant, e.svc, scans.Upload{Scope: "full", SARIF: []byte(sarif)}, activity.Actor{Type: activity.ActorPipeline, UID: "pipeline:x"}); err != nil {
+	if _, err := e.scans().Ingest(ctx, e.tenant, e.svc, scans.Upload{Scope: "full", SARIF: []byte(sarif)}, activity.Actor{Type: activity.ActorPipeline, UID: "pipeline:x"}); err != nil {
 		t.Fatal(err)
 	}
 	cve := "vuln:CVE-2026-1111:" + e.svc
@@ -161,6 +165,7 @@ func TestDependabotCVEMergesWithTrivyFinding(t *testing.T) {
 	if f := e.findings(t); f[ghsa].status != "resolved" || f[cve].status != "open" {
 		t.Fatalf("%v", f)
 	}
+	storetest.ClockedFindings(t, e.s, "vulnerability")
 }
 
 func TestSecretAlertIsCriticalAndCarriesNoSecret(t *testing.T) {

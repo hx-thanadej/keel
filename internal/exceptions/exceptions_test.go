@@ -36,7 +36,7 @@ func TestExceptionLifecycleWithDurableExpiry(t *testing.T) {
 	excepted := func() bool {
 		var b bool
 		if err := s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT finding_excepted(f) FROM findings f WHERE id = $1`, finding).Scan(&b)
+			return tx.QueryRow(ctx, `SELECT finding_excepted(f, $2) FROM findings f WHERE id = $1`, finding, svc.Now()).Scan(&b)
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -152,5 +152,37 @@ func TestRejectStampsDecisionOnServiceClock(t *testing.T) {
 	after := svc.Now()
 	if rejected.DecidedAt == nil || rejected.DecidedAt.Before(before) || rejected.DecidedAt.After(after) {
 		t.Fatalf("rejected between %v and %v on the service clock, recorded decided_at %v", before, after, rejected.DecidedAt)
+	}
+}
+
+// The gate asks at the caller's clock time: an Exception that expired on the
+// service clock no longer covers its Finding, whatever the database's now().
+func TestExceptedAtTheCallersTime(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	tenant, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	expires := storetest.Epoch.Add(-time.Hour)
+	var excepted []bool
+	if err := s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		var finding string
+		if err := tx.QueryRow(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title) VALUES ($1, 'vulnerability', 'vuln:CVE-2026-2:crm-api', 'critical', 'CVE-2026-2') RETURNING id`, tenant).Scan(&finding); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO exceptions (tenant_id, finding_ids, reason, state, requested_by, expires_at) VALUES ($1, ARRAY[$2::uuid], 'patched in the next release', 'approved', 'a', $3)`, tenant, finding, expires); err != nil {
+			return err
+		}
+		for _, at := range []time.Time{expires.Add(-time.Minute), expires.Add(time.Minute)} {
+			var b bool
+			if err := tx.QueryRow(ctx, `SELECT finding_excepted(f, $2) FROM findings f WHERE id = $1`, finding, at).Scan(&b); err != nil {
+				return err
+			}
+			excepted = append(excepted, b)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !excepted[0] || excepted[1] {
+		t.Fatalf("excepted a minute before and after expiry: %v, want [true false]", excepted)
 	}
 }

@@ -77,4 +77,5 @@ func TestBreakGlassUseNeedsPostMortemAndDrillsComeDue(t *testing.T) {
 	}); err != nil || open != 0 {
 		t.Fatalf("open %d %v", open, err)
 	}
+	storetest.ClockedFindings(t, s, "breakglass")
 }

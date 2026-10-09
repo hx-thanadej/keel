@@ -9,35 +9,45 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/rightsize"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
-// A VM costing 4 USD/day until it is resized on Sep 15, then 1 USD/day.
+// day is n days into the month the savings tests run in, on the far-off
+// service clock, so an applied_at written from the database's now() falls
+// outside every savings window.
+func day(n int) time.Time { return storetest.Epoch.AddDate(0, 0, n) }
+
+func at(t time.Time) func() time.Time { return func() time.Time { return t } }
+
+// A VM costing 4 USD/day until it is resized on day 14, then 1 USD/day.
 func savingsWorld(t *testing.T) (world, string) {
 	w := k8sWorld(t)
 	ctx := context.Background()
 	var lines []cost.Line
-	for d := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC); d.Before(time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)); d = d.AddDate(0, 0, 1) {
+	for d := day(0); d.Before(day(28)); d = d.AddDate(0, 0, 1) {
 		amt := "4.00"
-		if !d.Before(time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)) {
+		if !d.Before(day(14)) {
 			amt = "1.00"
 		}
-		lines = append(lines, cost.Line{SubAccountID: "prod-uin", BillingPeriodStart: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), ChargePeriodStart: d, ChargePeriodEnd: d.AddDate(0, 0, 1),
+		lines = append(lines, cost.Line{SubAccountID: "prod-uin", BillingPeriodStart: day(0), ChargePeriodStart: d, ChargePeriodEnd: d.AddDate(0, 0, 1),
 			ChargeCategory: "Usage", BilledCost: amt, BillingCurrency: "USD", ServiceName: "Cloud Virtual Machine", ResourceID: "ins-big", Tags: map[string]string{}, Vendor: map[string]string{}})
 	}
-	_, err := (&cost.Ingester{Store: w.s}).Load(ctx, cost.Load{Provider: "tencent", BillingAccountID: "payer-sav", BillingPeriod: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Lines: lines})
+	_, err := (&cost.Ingester{Store: w.s}).Load(ctx, cost.Load{Provider: "tencent", BillingAccountID: "payer-sav", BillingPeriod: day(0), Lines: lines})
 	must(t, err)
-	svc := rightsize.Service{Store: w.s}
+	svc := rightsize.Service{Store: w.s, Now: at(day(0))}
 	vm, _, err := svc.Upsert(ctx, w.tat, rightsize.Recommendation{Source: "engine:vm", Provider: "tencent", ResourceID: "ins-big", ResourceType: "vm", ProjectID: &w.project, EnvironmentID: &w.prod,
 		Action: "resize", Recommended: map[string]any{"instance_type": "S5.MEDIUM4"}, MonthlySavings: "3150.00", Currency: "THB", Confidence: 0.9})
 	must(t, err)
-	must(t, svc.MarkApplied(rightsize.WithAppliedAt(ctx, time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)), w.tat, vm.ID, "resized", "", by))
+	svc.Now = at(day(14))
+	must(t, svc.MarkApplied(ctx, w.tat, vm.ID, "resized", "", by))
+	storetest.ClockedFindings(t, w.s, "rightsizing")
 	return w, vm.ID
 }
 
 func TestSavingsMeasuredForResourcesWithTheirOwnCost(t *testing.T) {
 	w, id := savingsWorld(t)
 	ctx := context.Background()
-	tr := rightsize.Tracker{Service: rightsize.Service{Store: w.s}, Now: func() time.Time { return time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC) }}
+	tr := rightsize.Tracker{Service: rightsize.Service{Store: w.s}, Now: at(day(28))}
 	res, err := tr.Run(ctx)
 	must(t, err)
 	if res.Updated != 1 {
@@ -62,7 +72,7 @@ func TestSavingsMeasuredForResourcesWithTheirOwnCost(t *testing.T) {
 
 func TestSavingsWaitForAWeekOfData(t *testing.T) {
 	w, _ := savingsWorld(t)
-	tr := rightsize.Tracker{Service: rightsize.Service{Store: w.s}, Now: func() time.Time { return time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC) }}
+	tr := rightsize.Tracker{Service: rightsize.Service{Store: w.s}, Now: at(day(18))}
 	res, err := tr.Run(context.Background())
 	must(t, err)
 	if res.Updated != 0 || res.Waiting != 1 {
@@ -73,17 +83,17 @@ func TestSavingsWaitForAWeekOfData(t *testing.T) {
 func TestEstimatedForKubernetesAndRegressionFlagged(t *testing.T) {
 	w := k8sWorld(t)
 	ctx := context.Background()
-	svc := rightsize.Service{Store: w.s}
+	svc := rightsize.Service{Store: w.s, Now: at(day(9))}
 	k, _, err := svc.Upsert(ctx, w.tat, rightsize.Recommendation{Source: "engine:k8s", Provider: "k8s", ResourceID: "tke/ns/api/app", ResourceType: "k8s_workload", ProjectID: &w.project, EnvironmentID: &w.prod,
 		Action: "resize_requests", Recommended: map[string]any{"cpu": "410m"}, MonthlySavings: "21516.00", Currency: "THB", Confidence: 0.9})
 	must(t, err)
-	must(t, svc.MarkApplied(rightsize.WithAppliedAt(ctx, time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)), w.tat, k.ID, "merged", "https://github.com/hx/x/pull/1", by))
+	must(t, svc.MarkApplied(ctx, w.tat, k.ID, "merged", "https://github.com/hx/x/pull/1", by))
 	// A week later the engine says the workload is now under-provisioned.
 	_, _, err = svc.Upsert(ctx, w.tat, rightsize.Recommendation{Source: "engine:k8s", Provider: "k8s", ResourceID: "tke/ns/api/app", ResourceType: "k8s_workload", ProjectID: &w.project, EnvironmentID: &w.prod,
 		Action: "resize_requests", Recommended: map[string]any{"cpu": "600m"}, MonthlySavings: "-3000.00", Currency: "THB", Confidence: 0.9,
-		Risk: map[string]any{"under_provisioned": true}, ObservedAt: time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC)})
+		Risk: map[string]any{"under_provisioned": true}, ObservedAt: day(16)})
 	must(t, err)
-	tr := rightsize.Tracker{Service: svc, Now: func() time.Time { return time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC) }}
+	tr := rightsize.Tracker{Service: svc, Now: at(day(23))}
 	_, err = tr.Run(ctx)
 	must(t, err)
 	var realised, method, regression string

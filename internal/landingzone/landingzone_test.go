@@ -170,7 +170,7 @@ func TestDriftRaisesFindingsAndFixResolvesThem(t *testing.T) {
 	delete(org.attached["100001"], org.ids["keel_protect_audit"])
 	org.policies["keel_identities_via_keel"] = `{"version":"2.0","statement":[]}`
 
-	wt := landingzone.Watcher{Store: w.s, Provider: "tencent", Org: org, Baseline: base}
+	wt := landingzone.Watcher{Store: w.s, Provider: "tencent", Org: org, Baseline: base, Now: storetest.Clock()}
 	res, err := wt.Run(ctx)
 	if err != nil || res.Accounts != 1 || res.Drifted != 1 || res.Remediated != 0 {
 		t.Fatalf("%+v %v", res, err)
@@ -190,6 +190,7 @@ func TestDriftRaisesFindingsAndFixResolvesThem(t *testing.T) {
 	if _, err := wt.Run(ctx); err != nil || len(openFindings(t, w)) != 0 {
 		t.Fatalf("still open %v %v", openFindings(t, w), err)
 	}
+	storetest.ClockedFindings(t, w.s, "landing_zone_drift")
 }
 
 func TestRemediateRestoresAndRecords(t *testing.T) {

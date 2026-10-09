@@ -106,6 +106,42 @@ func Clock() func() time.Time {
 	return func() time.Time { return Epoch.Add(time.Since(start)) }
 }
 
+// ClockedFindings fails t unless Findings of kind exist and every timestamp a
+// writer sets on them (first_seen_at, resolved_at, overdue_at) is within a
+// year before Epoch or later, so it came from the service clock (perhaps
+// backdated by the test) and not the database's now().
+func ClockedFindings(t *testing.T, s *store.Store, kind string) {
+	t.Helper()
+	rows, err := Superuser(t, s).Query(context.Background(), `SELECT fingerprint, status, first_seen_at, resolved_at, overdue_at FROM findings WHERE kind = $1`, kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type finding struct {
+		fingerprint, status string
+		first               time.Time
+		resolved, overdue   *time.Time
+	}
+	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (finding, error) {
+		var f finding
+		err := r.Scan(&f.fingerprint, &f.status, &f.first, &f.resolved, &f.overdue)
+		return f, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) == 0 {
+		t.Fatalf("no %s Findings to check", kind)
+	}
+	floor := Epoch.AddDate(-1, 0, 0)
+	for _, f := range list {
+		for col, at := range map[string]*time.Time{"first_seen_at": &f.first, "resolved_at": f.resolved, "overdue_at": f.overdue} {
+			if at != nil && at.Before(floor) {
+				t.Errorf("%s Finding %s (%s): %s %s is before the service clock", kind, f.fingerprint, f.status, col, at.UTC().Format(time.RFC3339))
+			}
+		}
+	}
+}
+
 var superURLs sync.Map // *store.Store → superuser URL of its database
 
 // Superuser connects to s's database as the admin (superuser) role, to

@@ -37,10 +37,13 @@ type Authorizer interface {
 type Service struct {
 	store *store.Store
 	az    Authorizer
+	// Now is the clock for the Findings the Catalog and the Findings inbox
+	// resolve. New sets it to time.Now.
+	Now func() time.Time
 }
 
 // New returns a Catalog service.
-func New(s *store.Store, az Authorizer) *Service { return &Service{store: s, az: az} }
+func New(s *store.Store, az Authorizer) *Service { return &Service{store: s, az: az, Now: time.Now} }
 
 // Store exposes the underlying store for read-side packages.
 func (s *Service) Store() *store.Store { return s.store }
