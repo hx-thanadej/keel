@@ -278,19 +278,40 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 
 	mux.Handle("POST /v1/tenants/{tenant}/cloud-accounts", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
-			EnvironmentID *string `json:"environment_id"`
-			Provider      string  `json:"provider"`
-			ExternalID    string  `json:"external_id"`
+			EnvironmentID *string               `json:"environment_id"`
+			Provider      string                `json:"provider"`
+			ExternalID    string                `json:"external_id"`
+			Ownership     catalog.Ownership     `json:"ownership"`
+			ReadOnlyRole  *catalog.ReadOnlyRole `json:"read_only_role"`
 			Name, Why     string
 		}
 		if err := decode(r, &in); err != nil {
 			return err
 		}
-		out, err := c.CreateCloudAccount(r.Context(), p, r.PathValue("tenant"), in.EnvironmentID, in.Provider, in.ExternalID, in.Name, in.Why)
+		if in.Ownership == "" {
+			in.Ownership = catalog.OwnershipPlatform
+		}
+		out, err := c.CreateCloudAccount(r.Context(), p, r.PathValue("tenant"), in.EnvironmentID, in.Provider, in.ExternalID, in.Name, in.Ownership, in.ReadOnlyRole, in.Why)
 		if err != nil {
 			return err
 		}
 		writeJSON(w, http.StatusCreated, out)
+		return nil
+	}))
+	mux.Handle("PATCH /v1/tenants/{tenant}/cloud-accounts/{account}", authed(a, []string{"tenant", "account"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Ownership    catalog.Ownership     `json:"ownership"`
+			ReadOnlyRole *catalog.ReadOnlyRole `json:"read_only_role"`
+			Why          string                `json:"why"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		out, err := c.SetCloudAccountOwnership(r.Context(), p, r.PathValue("tenant"), r.PathValue("account"), in.Ownership, in.ReadOnlyRole, in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, out)
 		return nil
 	}))
 	mux.Handle("GET /v1/tenants/{tenant}/cloud-accounts", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
