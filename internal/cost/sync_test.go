@@ -280,3 +280,38 @@ func TestBillSyncSkipsZipWithoutCSV(t *testing.T) {
 		t.Fatalf("second run re-reported the zip: %+v, activities %d", rep, skipActivities(t, w, pack))
 	}
 }
+
+func TestBillSyncPerDayOverlapFailsClosed(t *testing.T) {
+	w := setup(t)
+	day1 := "bills/200045645249-20260901-by_used_time-FOCUS-Bill Details.zip"
+	mtd := "bills/200045645249-20260902-by_used_time-FOCUS-Bill Details.zip"
+	objs := &memObjects{objs: map[string][]byte{day1: zipped(t, "bill.csv", splitByDay(t, "01"))}}
+	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: w.s}, Objects: objs, Provider: "tencent", BillingAccountID: "200045645249",
+		Prefix: "bills/", Mode: cost.PerDayFiles, Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) }}
+	_, err := bs.Run(context.Background())
+	must(t, err)
+	if got := billedTotal(t, w); got != "36.40" {
+		t.Fatalf("after day 1 billed = %s", got)
+	}
+
+	objs.objs[mtd] = zipped(t, "bill.csv", splitByDay(t, "01", "02")) // month-to-date: repeats day 1
+	objs.objs["bills/2026-08-01.csv"] = []byte(strings.ReplaceAll(string(splitByDay(t, "01")), "2026-09-", "2026-08-"))
+	rep, err := bs.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), day1) || !strings.Contains(err.Error(), mtd) ||
+		!strings.Contains(err.Error(), "files overlap; check KEEL_TENCENT_BILL_MODE or the bill types delivered to the prefix") {
+		t.Fatalf("err = %v, want an overlap failure naming both files", err)
+	}
+	if got := sum(t, w, w.tat, "billing_period = '2026-09-01'"); got != "36.40" {
+		t.Fatalf("September billed = %s, want the day 1 load kept current (36.40), not 79.20", got)
+	}
+	if len(rep.Loads) != 1 || !rep.Loads[0].Period.Equal(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("loads %+v, want only August loaded", rep.Loads)
+	}
+	var n int
+	must(t, w.s.InTenant(context.Background(), w.home, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `SELECT count(*) FROM activities WHERE type = 'keel.cost.bill_files_overlap' AND subject = 'cost_period/tencent/200045645249/2026-09' AND status_id = 2 AND event::text LIKE '%files overlap%'`).Scan(&n)
+	}))
+	if n != 1 {
+		t.Fatalf("overlap activities = %d, want 1", n)
+	}
+}
