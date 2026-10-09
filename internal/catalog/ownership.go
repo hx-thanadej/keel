@@ -36,6 +36,9 @@ type ReadOnlyRole struct {
 	ServiceAccount           string `json:"service_account,omitempty"`
 }
 
+// maxRoleValueLen caps each read_only_role value, as migration 00047 does.
+const maxRoleValueLen = 1024
+
 var (
 	roleARNRE = map[string]*regexp.Regexp{
 		"tencent": regexp.MustCompile(`^qcs::cam::uin/\d{1,20}:roleName/[\w+=,.@-]{1,128}$`),
@@ -67,6 +70,9 @@ func checkOwnership(provider string, o Ownership, r *ReadOnlyRole) error {
 		got := map[string]string{"role_arn": r.RoleARN, "tenant_id": r.TenantID, "client_id": r.ClientID,
 			"workload_identity_provider": r.WorkloadIdentityProvider, "service_account": r.ServiceAccount}
 		for _, k := range set {
+			if len(got[k]) > maxRoleValueLen {
+				return false
+			}
 			delete(got, k)
 		}
 		for _, v := range got {
