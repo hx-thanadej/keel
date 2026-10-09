@@ -33,3 +33,6 @@ also matches how the existing Tencent estate is already laid out.
   shared cost is the one place where tags/labels still carry allocation.
 - More accounts means more fixed overhead (NAT gateways, baseline services per
   account). Landing Zone design must keep per-account baseline cost small.
+- Amended by [ADR-0018](./0018-client-owned-organisations-read-only.md).
+  Vending applies to platform-owned Cloud Accounts only. Client-owned
+  accounts are registered and read-only.
