@@ -5,18 +5,45 @@ to real money. Each needs someone with access to the payer / management account.
 
 ## Tencent Cloud (payer UIN 200045645249) — ticket #29
 
-1. **Bill delivery.** In the payer account: Billing Center → Bill Storage →
-   deliver **Standard bill (FOCUS)** daily to a COS bucket in the payer account
-   (e.g. `keel-bills-<appid>`, prefix `focus/`). Ask for the 18-month backfill.
-2. **Read-only role for Keel.** Create a CAM role Keel can assume (TKE pod
-   identity or the CVM role of Keel's node) with:
-   - `QcloudBillingReadOnlyAccess` (or `billing:DescribeBillSummaryByPayMode`,
-     `billing:DescribeBudget`), plus `cos:GetObject`/`cos:GetBucket` on the bill bucket;
-   - for budget mirroring (#39): `billing:CreateBudget`, `ModifyBudget`, `DeleteBudget`.
-3. **Configure Keel.**
+**Run the wizard:** `scripts/wizards/tencent-payer-billing.sh`, with `tccli`
+signed in as the payer (`TCCLI_PROFILE=<name>` to pick a profile). It walks
+steps 1–5 below, verifies each with `tccli` where it can, probes the
+`*ForOrganization` question for #9, and keeps its answers in `.keel/`
+(git-ignored), so a re-run resumes. It never asks for an access key.
+
+Keel signs its Tencent calls with one keyless base identity
+(`tencent.Credentials()`: TKE pod identity, else the CVM role). The wizard asks
+for that base role's ARN and creates a separate billing role in the payer,
+`KEEL_TENCENT_BILL_ROLE`, whose trust policy allows `sts:AssumeRole` from that
+ARN alone. It needs no OIDC provider in the payer, and keel-api's
+ServiceAccount or CVM role stays as it is. Keel's base role needs
+`sts:AssumeRole` on the billing role; the wizard writes that policy to
+`.keel/base-assume.json` for the account that owns the base role. Budget
+mirroring still runs as the base identity, so its budget permissions go on the
+base role (`.keel/base-budgets.json`), never on the billing role.
+
+`bash scripts/wizards/test-tencent-payer-billing.sh` dry-runs the wizard
+against a stubbed `tccli` in a temp `HOME`, fresh and resumed, and checks the
+config it prints. Run it with `/bin/bash` and a current bash after changing
+the wizard.
+
+1. **Bill delivery.** In the payer account: Billing Center → Bill Overview →
+   Bill Storage → deliver **Standard bill (FOCUS)** and **Cost Allocation Bill
+   (FOCUS)** to a private COS bucket in the payer account (`keel-bills-<appid>`).
+   Tick the 18-month historical sync.
+2. **Read-only role for Keel.** A CAM role trusted only by Keel's identity
+   (OIDC provider `TKE_PROVIDER_ID` with `oidc:aud`/`oidc:sub` for pod
+   identity, or `cvm.qcloud.com`) with:
+   - `QcloudFinanceBillReadOnlyAccess` (covers `finance:DescribeBill*`, which
+     includes `DescribeBillSummaryByPayMode`), plus `cos:GetBucket`,
+     `cos:HeadBucket`, `cos:GetObject`, `cos:HeadObject` on the bill bucket;
+   - for budget mirroring (#39): `CreateBudget`, `ModifyBudget`, `DeleteBudget`,
+     `DescribeBudget` (CAM namespace unverified; take it from the visual editor).
+3. **Configure Keel.** `KEEL_TENCENT_BILL_PREFIX` must hold only Standard bill
+   (FOCUS) files: Keel parses every bill file under it as FOCUS.
    ```
    KEEL_TENCENT_BILL_BUCKET=keel-bills-<appid>
-   KEEL_TENCENT_BILL_PREFIX=focus/
+   KEEL_TENCENT_BILL_PREFIX=<folder of the Standard bill (FOCUS) files>
    KEEL_TENCENT_PAYER_UIN=200045645249
    KEEL_TENCENT_BILL_ROLE=<role name>    # recommended: payer role for bill sync
    KEEL_TENCENT_REGION=ap-bangkok
