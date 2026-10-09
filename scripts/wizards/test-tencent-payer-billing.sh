@@ -110,7 +110,7 @@ fresh_answers=$(printf '%s\n' \
   y "" \
   y "" y "" "" \
   100001 "" "" "" "" n "" \
-  y bills/focus/ n y "" \
+  y bills/focus/ n n "" \
   "" n y "")
 resume_answers=$(printf '%s\n' "" n n n n n n n "" n y "")
 
