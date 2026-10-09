@@ -125,10 +125,11 @@ ask_secret() {
   printf -v "$key" '%s' "$input"
 }
 
-# write_env KEY VALUE upserts KEY=VALUE into ENV_FILE (creates it; replaces
-# any existing line). Idempotent.
+# write_env KEY VALUE sets $KEY and upserts KEY=VALUE into ENV_FILE (creates
+# it; replaces any existing line). Idempotent.
 write_env() {
   local key="$1" value="$2" tmp
+  printf -v "$key" '%s' "$value"
   touch "$ENV_FILE"
   tmp=$(mktemp)
   grep -vE "^${key}=" "$ENV_FILE" > "$tmp" || true
@@ -193,12 +194,15 @@ finish() {
 # (TCCLI_PROFILE=<name> picks a tccli profile). The wizard never asks for an
 # access key. It keeps its answers in .keel/ (git-ignored), so a re-run resumes
 # where it stopped and offers to skip stages already done.
+#
+# scripts/wizards/test-tencent-payer-billing.sh runs it end to end against a
+# stubbed tccli.
 
 cd "$(git rev-parse --show-toplevel)"
 mkdir -p .keel
 ENV_FILE=.keel/payer-billing.env
 ANSWERS=.keel/payer-answers.env
-TOTAL_STAGES=9
+TOTAL_STAGES=8
 
 load_file() {
   local line k
@@ -241,10 +245,26 @@ TC_ARGS=()
 [[ -n "${TCCLI_PROFILE:-}" ]] && TC_ARGS=(--profile "$TCCLI_PROFILE")
 tc() { tccli "$@" ${TC_ARGS[@]+"${TC_ARGS[@]}"}; }
 # tcq FILTER ARGS... prints one JMESPath-filtered value without JSON quotes.
-tcq() { local f="$1"; shift; tc "$@" --filter "$f" 2>/dev/null | tr -d '"[:space:]'; }
+# On failure it shows tccli's error and returns tccli's status.
+tcq() {
+  local f="$1" out err st=0
+  shift
+  err=$(mktemp)
+  out=$(tc "$@" --filter "$f" 2>"$err") || st=$?
+  if (( st )); then
+    warn "tccli $1 $2 failed:" >&2
+    sed 's/^/      /' "$err" >&2
+  fi
+  rm -f "$err"
+  (( st == 0 )) || return "$st"
+  printf '%s' "$out" | tr -d '"[:space:]'
+}
 
 show_cmd() { printf '  %s$ %s%s\n' "$DIM" "$*" "$RESET"; }
 fail() { printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET"; exit 1; }
+
+ROLE_ARN_RE='^qcs::cam::uin/([0-9]+):roleName/([A-Za-z0-9_+=,.@-]+)$'
+ROLE_NAME_RE='^[A-Za-z0-9_+=,.@-]{1,128}$'
 
 prev_month() {
   local y m
@@ -271,6 +291,22 @@ print("ok: " + (" ".join(parts) or "no list fields"), end="")
 PY
 }
 
+# trusted_principals ROLE prints the qcs principals the role's trust policy
+# lets call sts:AssumeRole, one per line.
+trusted_principals() {
+  tc cam GetRole --RoleName "$1" --region "$KEEL_TENCENT_REGION" --filter RoleInfo.PolicyDocument \
+    | python3 -c '
+import json, sys
+doc = json.loads(json.loads(sys.stdin.read()))
+for s in doc.get("statement", []):
+    acts = s.get("action", [])
+    acts = [acts] if isinstance(acts, str) else acts
+    if s.get("effect") == "allow" and "name/sts:AssumeRole" in acts:
+        qcs = s.get("principal", {}).get("qcs", [])
+        print("\n".join([qcs] if isinstance(qcs, str) else qcs))
+'
+}
+
 banner "Tencent payer billing for Keel (#29, #9)"
 
 # ── 1 ─────────────────────────────────────────────────────────────────────
@@ -280,7 +316,7 @@ if ! already preflight; then
   say "organisation's bills. tccli must already be signed in there; this wizard"
   say "never asks for or stores an access key."
   command -v tccli >/dev/null || fail "tccli is missing: brew install tccli (or pip install tccli)"
-  command -v python3 >/dev/null || warn "python3 is missing: probe summaries will point at raw files"
+  command -v python3 >/dev/null || fail "python3 is missing: the wizard reads tccli's JSON with it"
   ask_or KEEL_TENCENT_PAYER_UIN "Payer UIN:" "${KEEL_TENCENT_PAYER_UIN:-200045645249}"
   ask_or KEEL_TENCENT_REGION "Region for the bill bucket and billing API:" "${KEEL_TENCENT_REGION:-ap-bangkok}"
   show_cmd "tccli sts GetCallerIdentity"
@@ -299,108 +335,44 @@ if ! already preflight; then
 fi
 
 # ── 2 ─────────────────────────────────────────────────────────────────────
-stage "Find the identity Keel presents"
+stage "Keel's base identity and the billing role"
 if ! already identity; then
-  say "Keel signs every Tencent call with tencent.Credentials(): TKE pod identity"
-  say "(sts:AssumeRoleWithWebIdentity using TKE_PROVIDER_ID and TKE_ROLE_ARN that"
-  say "the TKE webhook injects), else the CVM instance role. No keys."
-  warn "Bill sync has no role setting of its own. It reads COS and the billing API"
-  warn "as that one role, so the role must live in the payer UIN, and every other"
-  warn "Tencent call Keel makes (org discovery, TCR, vending) also uses it."
+  say "Keel signs its Tencent calls with one keyless base identity, tencent.Credentials():"
+  say "TKE pod identity (the role in keel-api's ServiceAccount annotation), else the CVM role."
+  say "Bill sync assumes a separate payer role, KEEL_TENCENT_BILL_ROLE, from that base"
+  say "identity with STS AssumeRole, so only bill sync ever holds payer billing access."
   ask_or KEEL_IDENTITY_KIND "How does Keel run: tke (pod identity) or cvm (instance role)?" "${KEEL_IDENTITY_KIND:-tke}"
+  det_role=""
   if [[ "$KEEL_IDENTITY_KIND" == tke ]]; then
     ask_or KEEL_K8S_NAMESPACE "Keel's namespace:" "${KEEL_K8S_NAMESPACE:-keel}"
     ask_or KEEL_K8S_SA "keel-api's ServiceAccount:" "${KEEL_K8S_SA:-keel-api}"
-    det_provider="" det_role="" det_iss="" det_sub=""
-    if command -v kubectl >/dev/null && confirm "Read the identity from the cluster with kubectl (read-only)?"; then
-      ns=$KEEL_K8S_NAMESPACE sa=$KEEL_K8S_SA
-      det_role=$(kubectl -n "$ns" get sa "$sa" -o jsonpath='{.metadata.annotations.tke\.cloud\.tencent\.com/role-arn}' 2>/dev/null || true)
-      det_provider=$(kubectl -n "$ns" get pods -o jsonpath="{range .items[?(@.spec.serviceAccountName==\"$sa\")]}{range .spec.containers[*].env[?(@.name==\"TKE_PROVIDER_ID\")]}{.value}{\"\\n\"}{end}{end}" 2>/dev/null | head -n1 || true)
-      # Mint a 10-minute token and print only its claims; the token itself is never shown.
-      claims=$(kubectl -n "$ns" create token "$sa" --audience "${OIDC_AUDIENCE:-sts.cloud.tencent.com}" --duration 10m 2>/dev/null \
-        | python3 -c 'import base64,json,sys; p=sys.stdin.read().split(".")[1]; c=json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4))); print(c["iss"]); print(c["sub"])' 2>/dev/null || true)
-      det_iss=$(sed -n 1p <<<"$claims"); det_sub=$(sed -n 2p <<<"$claims")
+    if command -v kubectl >/dev/null && confirm "Read the ServiceAccount's role-arn annotation with kubectl get (read-only)?"; then
+      det_role=$(kubectl -n "$KEEL_K8S_NAMESPACE" get sa "$KEEL_K8S_SA" -o jsonpath='{.metadata.annotations.tke\.cloud\.tencent\.com/role-arn}' 2>/dev/null || true)
       note "role-arn annotation: ${det_role:-none}"
-      note "TKE_PROVIDER_ID:     ${det_provider:-not found (no running keel-api pod?)}"
-      note "token iss / sub:     ${det_iss:-?} / ${det_sub:-?}"
-    else
-      say "Without kubectl: TKE console → cluster → Basic info → ServiceAccountIssuerDiscovery"
-      say "shows the issuer and the CAM OIDC provider; the provider name is TKE_PROVIDER_ID."
     fi
-    ask_or TKE_PROVIDER_ID "CAM OIDC provider name (TKE_PROVIDER_ID):" "${det_provider:-${TKE_PROVIDER_ID:-}}"
-    ask_or OIDC_ISSUER "Service-account issuer URL:" "${det_iss:-${OIDC_ISSUER:-}}"
-    ask_or OIDC_AUDIENCE "Audience (oidc:aud, the provider's client ID):" "${OIDC_AUDIENCE:-sts.cloud.tencent.com}"
-    ask_or OIDC_SUB "Subject (oidc:sub):" "${det_sub:-${OIDC_SUB:-system:serviceaccount:$KEEL_K8S_NAMESPACE:$KEEL_K8S_SA}}"
-    ask_or KEEL_CURRENT_ROLE_ARN "Role ARN keel-api uses today (blank if none):" "${det_role:-${KEEL_CURRENT_ROLE_ARN:-}}" optional
+  else
+    say "CVM console → Keel's instance → Instance settings shows the bound role; its ARN is"
+    say "qcs::cam::uin/<the CVM's UIN>:roleName/<role name>."
   fi
-  ask_or KEEL_IDENTITY_UIN "UIN of the account that owns Keel's cluster or CVM:" "${KEEL_IDENTITY_UIN:-$KEEL_TENCENT_PAYER_UIN}"
-  if [[ "$KEEL_IDENTITY_KIND" == cvm && "$KEEL_IDENTITY_UIN" != "$KEEL_TENCENT_PAYER_UIN" ]]; then
-    warn "A CVM role lives in the CVM's own account, so Keel on a CVM outside the payer"
-    warn "cannot read payer bills keylessly. Run Keel on TKE with pod identity instead."
-    exit 1
-  fi
-  role_default=KeelBillingReadOnly
-  if [[ "${KEEL_CURRENT_ROLE_ARN:-}" == "qcs::cam::uin/$KEEL_TENCENT_PAYER_UIN:roleName/"* ]]; then
-    role_default=${KEEL_CURRENT_ROLE_ARN##*/}
-    note "Keel already uses a payer role, so the billing permissions go on it."
-  elif [[ -n "${KEEL_CURRENT_ROLE_ARN:-}" ]]; then
-    warn "Keel uses $KEEL_CURRENT_ROLE_ARN today. Pointing it at a payer role replaces"
-    warn "that role for all of Keel's Tencent calls; give the payer role what it needs."
-  fi
-  ask_or KEEL_BILLING_ROLE "Payer role name Keel will assume:" "${KEEL_BILLING_ROLE:-$role_default}"
+  ask_or KEEL_BASE_ROLE_ARN "Keel's base role ARN:" "${det_role:-${KEEL_BASE_ROLE_ARN:-}}"
+  [[ "$KEEL_BASE_ROLE_ARN" =~ $ROLE_ARN_RE ]] ||
+    fail "'$KEEL_BASE_ROLE_ARN' is not a role ARN like qcs::cam::uin/<uin>:roleName/<name>; re-run this stage"
+  ask_or KEEL_TENCENT_BILL_ROLE "Name of the payer role bill sync will assume:" "${KEEL_TENCENT_BILL_ROLE:-KeelBillReader}"
+  [[ "$KEEL_TENCENT_BILL_ROLE" =~ $ROLE_NAME_RE ]] ||
+    fail "'$KEEL_TENCENT_BILL_ROLE' is not a CAM role name (letters, digits, _+=,.@-); re-run this stage"
+  [[ "$KEEL_BASE_ROLE_ARN" != "qcs::cam::uin/$KEEL_TENCENT_PAYER_UIN:roleName/$KEEL_TENCENT_BILL_ROLE" ]] ||
+    fail "the billing role must not be Keel's base role; pick another name and re-run this stage"
   mark_done identity
   pause
 fi
+KEEL_BILL_ROLE_ARN="qcs::cam::uin/$KEEL_TENCENT_PAYER_UIN:roleName/$KEEL_TENCENT_BILL_ROLE"
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
-stage "OIDC provider in the payer account"
-if [[ "$KEEL_IDENTITY_KIND" != tke ]]; then
-  note "Keel uses a CVM role; no OIDC provider is needed."
-  pause
-elif ! already oidc; then
-  say "A role trusts an OIDC provider in its own account, and the TKE SDK sends the"
-  say "provider by name, so the payer needs a provider called '$TKE_PROVIDER_ID'."
-  show_cmd "tccli cam DescribeOIDCConfig --Name $TKE_PROVIDER_ID"
-  url=$(tcq IdentityUrl cam DescribeOIDCConfig --Name "$TKE_PROVIDER_ID" --region "$KEEL_TENCENT_REGION" || true)
-  if [[ -n "$url" && "$url" != null ]]; then
-    say "${GREEN}✓${RESET} provider exists with issuer $url"
-    [[ "$url" == "$OIDC_ISSUER" ]] || warn "issuer differs from the token's ($OIDC_ISSUER); fix it in CAM → Identity providers"
-  elif [[ "$KEEL_IDENTITY_UIN" == "$KEEL_TENCENT_PAYER_UIN" ]]; then
-    warn "No provider. Enable it on the cluster: TKE console → cluster → Basic info →"
-    warn "ServiceAccountIssuerDiscovery → tick 'Create CAM OIDC provider' and 'Create WEBHOOK component'."
-    open_url "https://console.tencentcloud.com/tke2/cluster"
-    pause "Press Enter once it shows as created, then re-run this stage."
-    exit 0
-  else
-    say "Keel's cluster is in $KEEL_IDENTITY_UIN, so copy its issuer into the payer."
-    say "The wizard reads the cluster's signing keys (public JWKS) with kubectl."
-    warn "UNVERIFIED: cross-account TKE pod identity (role in another UIN than the cluster)."
-    warn "CAM stores a static copy of the keys; after the cluster rotates its"
-    warn "service-account keys, re-run this stage (UpdateOIDCConfig)."
-    if confirm "Create OIDC provider '$TKE_PROVIDER_ID' in the payer now?"; then
-      jwks=$(kubectl get --raw /openid/v1/jwks | base64 | tr -d '\n')
-      tc cam CreateOIDCConfig --Name "$TKE_PROVIDER_ID" --IdentityUrl "$OIDC_ISSUER" \
-        --IdentityKey "$jwks" --ClientId "[\"$OIDC_AUDIENCE\"]" \
-        --Description "Keel TKE cluster in $KEEL_IDENTITY_UIN" --region "$KEEL_TENCENT_REGION" >/dev/null
-      say "${GREEN}✓${RESET} created"
-    else
-      say "CAM console → Identity providers → Role SSO → Create → OIDC, with the values above."
-      open_url "https://console.tencentcloud.com/cam/idp"
-      pause "Press Enter once it is created, then re-run."
-      exit 0
-    fi
-  fi
-  mark_done oidc
-  pause
-fi
-
-# ── 4 ─────────────────────────────────────────────────────────────────────
 stage "COS bucket for the bills"
 if ! already bucket; then
   say "Bill Storage writes into a private COS bucket in the payer account."
   ask_or BUCKET_SHORT "Bucket name without the APPID suffix:" "${BUCKET_SHORT:-keel-bills}"
-  KEEL_TENCENT_BILL_BUCKET="$BUCKET_SHORT-$TENCENT_APPID"
-  write_env KEEL_TENCENT_BILL_BUCKET "$KEEL_TENCENT_BILL_BUCKET"
+  write_env KEEL_TENCENT_BILL_BUCKET "$BUCKET_SHORT-$TENCENT_APPID"
   endpoint="https://$KEEL_TENCENT_BILL_BUCKET.cos.$KEEL_TENCENT_REGION.myqcloud.com/"
   code=$(curl -s -o /dev/null -w '%{http_code}' "$endpoint" || true)
   if [[ "$code" != 403 ]]; then
@@ -419,7 +391,7 @@ if ! already bucket; then
   pause
 fi
 
-# ── 5 ─────────────────────────────────────────────────────────────────────
+# ── 4 ─────────────────────────────────────────────────────────────────────
 stage "Bill Storage delivery to COS"
 if ! already delivery; then
   open_url "https://console.tencentcloud.com/expense/bill/overview"
@@ -435,26 +407,17 @@ if ! already delivery; then
     write_env BILL_STORAGE_ENABLED_ON "$(date +%F)"
     mark_done delivery
   else
-    SKIPPED+=("Bill Storage delivery (stage 5)")
+    SKIPPED+=("Bill Storage delivery (stage 4)")
   fi
   pause
 fi
 
-# ── 6 ─────────────────────────────────────────────────────────────────────
-stage "Read-only CAM role for Keel"
+# ── 5 ─────────────────────────────────────────────────────────────────────
+stage "Read-only billing role in the payer"
 if ! already role; then
-  role_arn="qcs::cam::uin/$KEEL_TENCENT_PAYER_UIN:roleName/$KEEL_BILLING_ROLE"
-  if [[ "$KEEL_IDENTITY_KIND" == tke ]]; then
-    cat > .keel/trust.json <<EOF
-{"version":"2.0","statement":[{"action":"name/sts:AssumeRoleWithWebIdentity","effect":"allow",
- "principal":{"federated":["qcs::cam::uin/$KEEL_TENCENT_PAYER_UIN:oidc-provider/$TKE_PROVIDER_ID"]},
- "condition":{"string_equal":{"oidc:aud":["$OIDC_AUDIENCE"],"oidc:sub":["$OIDC_SUB"]}}}]}
+  cat > .keel/trust.json <<EOF
+{"version":"2.0","statement":[{"action":"name/sts:AssumeRole","effect":"allow","principal":{"qcs":["$KEEL_BASE_ROLE_ARN"]}}]}
 EOF
-  else
-    cat > .keel/trust.json <<EOF
-{"version":"2.0","statement":[{"action":"name/sts:AssumeRole","effect":"allow","principal":{"service":["cvm.qcloud.com"]}}]}
-EOF
-  fi
   cat > .keel/cos-read.json <<EOF
 {"version":"2.0","statement":[
  {"effect":"allow","action":["name/cos:GetBucket","name/cos:HeadBucket"],
@@ -462,52 +425,72 @@ EOF
  {"effect":"allow","action":["name/cos:GetObject","name/cos:HeadObject"],
   "resource":["qcs::cos:$KEEL_TENCENT_REGION:uid/$TENCENT_APPID:$KEEL_TENCENT_BILL_BUCKET/*"]}]}
 EOF
-  say "Role $KEEL_BILLING_ROLE gets:"
-  step "trust: .keel/trust.json (only Keel's identity may assume it)"
+  say "Role $KEEL_TENCENT_BILL_ROLE gets:"
+  step "trust: .keel/trust.json (only Keel's base role $KEEL_BASE_ROLE_ARN may assume it)"
   step "KeelBillBucketRead: .keel/cos-read.json (list + read the bill bucket, nothing else)"
   step "QcloudFinanceBillReadOnlyAccess: preset; covers DescribeBill* incl. DescribeBillSummaryByPayMode,"
   note "  which Keel calls for invoice reconciliation. The narrower custom action is"
   note "  name/finance:DescribeBillSummaryByPayMode (UNVERIFIED: docs show only finance:DescribeBill*)."
   if confirm "Create or update the role and policies with tccli now?"; then
     r=(--region "$KEEL_TENCENT_REGION")
-    if [[ -n "$(tcq RoleInfo.RoleId cam GetRole --RoleName "$KEEL_BILLING_ROLE" "${r[@]}" || true)" ]]; then
+    if [[ -n "$(tcq RoleInfo.RoleId cam GetRole --RoleName "$KEEL_TENCENT_BILL_ROLE" "${r[@]}" 2>/dev/null || true)" ]]; then
       note "role exists"
       if confirm "Replace its trust policy with .keel/trust.json?"; then
-        tc cam UpdateAssumeRolePolicy --RoleName "$KEEL_BILLING_ROLE" --PolicyDocument "$(cat .keel/trust.json)" "${r[@]}" >/dev/null
+        tc cam UpdateAssumeRolePolicy --RoleName "$KEEL_TENCENT_BILL_ROLE" --PolicyDocument "$(cat .keel/trust.json)" "${r[@]}" >/dev/null
       fi
     else
-      tc cam CreateRole --RoleName "$KEEL_BILLING_ROLE" --PolicyDocument "$(cat .keel/trust.json)" \
+      tc cam CreateRole --RoleName "$KEEL_TENCENT_BILL_ROLE" --PolicyDocument "$(cat .keel/trust.json)" \
         --Description "Keel: read payer bills (#29)" --SessionDuration 3600 "${r[@]}" >/dev/null
     fi
-    pid=$(tcq "List[?PolicyName=='KeelBillBucketRead'].PolicyId|[0]" cam ListPolicies --Scope Local --Keyword KeelBillBucketRead "${r[@]}" || true)
+    pid=$(tcq "List[?PolicyName=='KeelBillBucketRead'].PolicyId|[0]" cam ListPolicies --Scope Local --Keyword KeelBillBucketRead "${r[@]}")
     if [[ -z "$pid" || "$pid" == null ]]; then
       pid=$(tcq PolicyId cam CreatePolicy --PolicyName KeelBillBucketRead --PolicyDocument "$(cat .keel/cos-read.json)" \
         --Description "Keel: list and read $KEEL_TENCENT_BILL_BUCKET" "${r[@]}")
     else
       tc cam UpdatePolicy --PolicyId "$pid" --PolicyDocument "$(cat .keel/cos-read.json)" "${r[@]}" >/dev/null
     fi
-    attached=$(tc cam ListAttachedRolePolicies --RoleName "$KEEL_BILLING_ROLE" --Page 1 --Rp 200 "${r[@]}" --filter "List[].PolicyName")
-    grep -q '"KeelBillBucketRead"' <<<"$attached" || tc cam AttachRolePolicy --AttachRoleName "$KEEL_BILLING_ROLE" --PolicyId "$pid" "${r[@]}" >/dev/null
-    grep -q '"QcloudFinanceBillReadOnlyAccess"' <<<"$attached" || tc cam AttachRolePolicy --AttachRoleName "$KEEL_BILLING_ROLE" --PolicyName QcloudFinanceBillReadOnlyAccess "${r[@]}" >/dev/null
+    attached=$(tc cam ListAttachedRolePolicies --RoleName "$KEEL_TENCENT_BILL_ROLE" --Page 1 --Rp 200 "${r[@]}" --filter "List[].PolicyName")
+    grep -q '"KeelBillBucketRead"' <<<"$attached" || tc cam AttachRolePolicy --AttachRoleName "$KEEL_TENCENT_BILL_ROLE" --PolicyId "$pid" "${r[@]}" >/dev/null
+    grep -q '"QcloudFinanceBillReadOnlyAccess"' <<<"$attached" || tc cam AttachRolePolicy --AttachRoleName "$KEEL_TENCENT_BILL_ROLE" --PolicyName QcloudFinanceBillReadOnlyAccess "${r[@]}" >/dev/null
   else
     open_url "https://console.tencentcloud.com/cam/role"
     say "Create the role and policies above in the CAM console, then press Enter."
     pause
   fi
-  show_cmd "tccli cam ListAttachedRolePolicies --RoleName $KEEL_BILLING_ROLE --Page 1 --Rp 200"
-  attached=$(tc cam ListAttachedRolePolicies --RoleName "$KEEL_BILLING_ROLE" --Page 1 --Rp 200 --region "$KEEL_TENCENT_REGION" --filter "List[].PolicyName" 2>/dev/null || true)
+  show_cmd "tccli cam GetRole --RoleName $KEEL_TENCENT_BILL_ROLE"
+  principals=$(trusted_principals "$KEEL_TENCENT_BILL_ROLE" || true)
+  if [[ "$principals" == "$KEEL_BASE_ROLE_ARN" ]]; then
+    say "${GREEN}✓${RESET} trust allows sts:AssumeRole from $KEEL_BASE_ROLE_ARN only"
+  else
+    fail "the trust policy's AssumeRole principals are '${principals//$'\n'/, }', want exactly $KEEL_BASE_ROLE_ARN"
+  fi
+  show_cmd "tccli cam ListAttachedRolePolicies --RoleName $KEEL_TENCENT_BILL_ROLE --Page 1 --Rp 200"
+  attached=$(tc cam ListAttachedRolePolicies --RoleName "$KEEL_TENCENT_BILL_ROLE" --Page 1 --Rp 200 --region "$KEEL_TENCENT_REGION" --filter "List[].PolicyName" || true)
   ok=1
   for p in KeelBillBucketRead QcloudFinanceBillReadOnlyAccess; do
     if grep -q "\"$p\"" <<<"$attached"; then say "${GREEN}✓${RESET} $p attached"; else warn "$p not attached"; ok=0; fi
   done
   (( ok )) || fail "fix the role, then re-run this stage"
-  write_env KEEL_BILLING_ROLE_ARN "$role_arn"
+
+  cat > .keel/base-assume.json <<EOF
+{"version":"2.0","statement":[{"effect":"allow","action":["name/sts:AssumeRole"],"resource":["$KEEL_BILL_ROLE_ARN"]}]}
+EOF
+  say ""
+  say "Keel's base role also needs permission to assume it. In the account that owns"
+  say "$KEEL_BASE_ROLE_ARN, attach this policy to that role:"
+  step ".keel/base-assume.json: sts:AssumeRole on $KEEL_BILL_ROLE_ARN"
+  open_url "https://console.tencentcloud.com/cam/policy"
+  pause "Press Enter once it is attached."
+
   if confirm "Will Keel mirror Budgets to Tencent (KEEL_TENCENT_BUDGETS=1, #39)?"; then
     write_env KEEL_TENCENT_BUDGETS 1
-    warn "Add Create/Modify/Delete/DescribeBudget to the role in the CAM visual policy editor."
-    warn "UNVERIFIED: their action namespace (finance: or billing:); the editor shows the right one."
-    open_url "https://console.tencentcloud.com/cam/policy"
-    pause "Press Enter once they are attached."
+    cat > .keel/base-budgets.json <<EOF
+{"version":"2.0","statement":[{"effect":"allow","action":["name/billing:CreateBudget","name/billing:ModifyBudget","name/billing:DeleteBudget","name/billing:DescribeBudget"],"resource":["*"]}]}
+EOF
+    warn "Budgets do not use $KEEL_TENCENT_BILL_ROLE: Keel calls them as its base identity."
+    warn "Attach .keel/base-budgets.json to Keel's base role, not to the billing role."
+    note "UNVERIFIED: the budget actions' namespace (billing: or finance:); the CAM visual editor shows the right one."
+    pause "Press Enter once the base role has them."
   else
     write_env KEEL_TENCENT_BUDGETS 0
   fi
@@ -515,7 +498,7 @@ EOF
   pause
 fi
 
-# ── 7 ─────────────────────────────────────────────────────────────────────
+# ── 6 ─────────────────────────────────────────────────────────────────────
 stage "#9: who calls the *ForOrganization APIs?"
 if ! already q9; then
   say "The CN docs say a member calls DescribeBillDetailForOrganization to read bills the"
@@ -580,14 +563,14 @@ if ! already q9; then
   pause
 fi
 
-# ── 8 ─────────────────────────────────────────────────────────────────────
+# ── 7 ─────────────────────────────────────────────────────────────────────
 stage "First delivery: prefix and file mode"
 if ! already layout; then
   say "Bill Storage was enabled on ${BILL_STORAGE_ENABLED_ON:-an unknown date}. Daily files land on Day+1,"
   say "and you need two consecutive daily Standard bill (FOCUS) files for this stage."
   open_url "https://console.tencentcloud.com/cos/bucket?bucket=$KEEL_TENCENT_BILL_BUCKET&region=$KEEL_TENCENT_REGION"
   if ! confirm "Are at least two daily Standard bill (FOCUS) files in the bucket?"; then
-    SKIPPED+=("stages 8–9: re-run this wizard once two daily FOCUS files have arrived")
+    SKIPPED+=("stages 7–8: re-run this wizard once two daily FOCUS files have arrived")
     finish
     exit 0
   fi
@@ -610,25 +593,24 @@ if ! already layout; then
   pause
 fi
 
-# ── 9 ─────────────────────────────────────────────────────────────────────
+# ── 8 ─────────────────────────────────────────────────────────────────────
 stage "Configure Keel and check the first sync"
 say "Set these on keel-api (Deployment env):"
 printf '\n'
-for k in KEEL_TENCENT_BILL_BUCKET KEEL_TENCENT_BILL_PREFIX KEEL_TENCENT_PAYER_UIN KEEL_TENCENT_REGION KEEL_TENCENT_BILL_MODE KEEL_TENCENT_BUDGETS; do
-  printf '    %s=%s\n' "$k" "${!k:-}"
+for k in KEEL_TENCENT_BILL_BUCKET KEEL_TENCENT_BILL_PREFIX KEEL_TENCENT_PAYER_UIN KEEL_TENCENT_REGION \
+  KEEL_TENCENT_BILL_MODE KEEL_TENCENT_BILL_ROLE KEEL_TENCENT_BUDGETS; do
+  printf '    %s=%s\n' "$k" "${!k}"
 done
 printf '\n'
-if [[ "${KEEL_IDENTITY_KIND:-}" == tke && "${KEEL_CURRENT_ROLE_ARN:-}" != "${KEEL_BILLING_ROLE_ARN:-}" ]]; then
-  say "And point keel-api's ServiceAccount at the payer role:"
-  show_cmd "kubectl -n $KEEL_K8S_NAMESPACE annotate sa $KEEL_K8S_SA --overwrite tke.cloud.tencent.com/role-arn=$KEEL_BILLING_ROLE_ARN"
-  note "then restart keel-api so the webhook injects the new TKE_ROLE_ARN."
-elif [[ "${KEEL_IDENTITY_KIND:-}" == cvm ]]; then
-  say "And bind role $KEEL_BILLING_ROLE to Keel's CVM: CVM console → instance → More → Instance settings → Bind role."
+note "keel-api keeps its base role ($KEEL_BASE_ROLE_ARN); do not change its ServiceAccount"
+note "or CVM role. Bill sync assumes $KEEL_BILL_ROLE_ARN from it."
+if [[ "$KEEL_TENCENT_BUDGETS" == 1 ]]; then
+  note "Budgets run as the base role, so .keel/base-budgets.json belongs on that role."
 fi
 pause "Press Enter once Keel is redeployed with these values."
 say "Bill sync runs at start-up and hourly. Look for 'tencent bill sync' with new_files > 0, and no 'ALERT':"
 show_cmd "kubectl -n ${KEEL_K8S_NAMESPACE:-keel} logs deploy/keel-api | grep 'tencent bill'"
-if command -v kubectl >/dev/null && [[ "${KEEL_IDENTITY_KIND:-}" == tke ]] && confirm "Run that now?"; then
+if command -v kubectl >/dev/null && [[ "$KEEL_IDENTITY_KIND" == tke ]] && confirm "Run that now?"; then
   kubectl -n "$KEEL_K8S_NAMESPACE" logs deploy/keel-api 2>/dev/null | grep 'tencent bill' | tail -n 5 || warn "no bill sync lines yet"
 fi
 if confirm "Did Keel list and load bill files with no ALERT, and does GET /v1/tenants/{home}/cost-loads show reconcile_status ok?"; then
@@ -636,7 +618,7 @@ if confirm "Did Keel list and load bill files with no ALERT, and does GET /v1/te
   note "#29's first criterion is met. Close #29 once daily files keep arriving, and #9 after the comment is posted."
 else
   record KEEL_LISTS_BILLS_KEYLESS no
-  SKIPPED+=("Keel bill sync not confirmed: check the role trust (stage 6) and the env above")
+  SKIPPED+=("Keel bill sync not confirmed: check the role trust and base-role grant (stage 5) and the env above")
 fi
 pause
 

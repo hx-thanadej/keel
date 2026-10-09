@@ -11,10 +11,21 @@ steps 1–5 below, verifies each with `tccli` where it can, probes the
 `*ForOrganization` question for #9, and keeps its answers in `.keel/`
 (git-ignored), so a re-run resumes. It never asks for an access key.
 
-Keel signs every Tencent call with one keyless identity (`tencent.Credentials()`:
-TKE pod identity, else the CVM role). Bill sync has no role setting of its own,
-so the role Keel's pod resolves to must live in the payer UIN and carry the
-billing permissions.
+Keel signs its Tencent calls with one keyless base identity
+(`tencent.Credentials()`: TKE pod identity, else the CVM role). The wizard asks
+for that base role's ARN and creates a separate billing role in the payer,
+`KEEL_TENCENT_BILL_ROLE`, whose trust policy allows `sts:AssumeRole` from that
+ARN alone. It needs no OIDC provider in the payer, and keel-api's
+ServiceAccount or CVM role stays as it is. Keel's base role needs
+`sts:AssumeRole` on the billing role; the wizard writes that policy to
+`.keel/base-assume.json` for the account that owns the base role. Budget
+mirroring still runs as the base identity, so its budget permissions go on the
+base role (`.keel/base-budgets.json`), never on the billing role.
+
+`bash scripts/wizards/test-tencent-payer-billing.sh` dry-runs the wizard
+against a stubbed `tccli` in a temp `HOME`, fresh and resumed, and checks the
+config it prints. Run it with `/bin/bash` and a current bash after changing
+the wizard.
 
 1. **Bill delivery.** In the payer account: Billing Center → Bill Overview →
    Bill Storage → deliver **Standard bill (FOCUS)** and **Cost Allocation Bill
