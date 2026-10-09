@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/hx-thanadej/keel/internal/auth"
@@ -9,7 +11,8 @@ import (
 	"github.com/hx-thanadej/keel/internal/controls"
 )
 
-// ControlDeps serves the Controls registry (#116).
+// ControlDeps serves the Controls registry (#116), optionally narrowed to
+// one framework with ?framework= (#188, #189).
 type ControlDeps struct {
 	Authz   catalog.Authorizer
 	Service controls.Service
@@ -28,6 +31,12 @@ func mountControls(mux Mux, a auth.Authenticator, d ControlDeps) {
 		out, err := d.Service.Report(r.Context(), tenant)
 		if err != nil {
 			return err
+		}
+		if f := r.URL.Query().Get("framework"); f != "" {
+			var ok bool
+			if out, ok = out.Only(f); !ok {
+				return errors.Join(catalog.ErrInvalid, fmt.Errorf("unknown framework %q", f))
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 		return nil

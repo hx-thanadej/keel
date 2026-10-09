@@ -249,9 +249,11 @@ describe('finops screens', () => {
       [`/v1/tenants/${tat}/exceptions`]: { items: [{ id: 'x1', fingerprint: 'vuln:CVE-2026-1:', finding_ids: [], reason: 'patch next sprint', state: 'requested', requested_by: 'user:eng@harmonyx.co', decided_by: null, expires_at: '2026-11-01T00:00:00Z' }] },
       [`/v1/tenants/${tat}/exceptions/x1/approve`]: { id: 'x1', state: 'approved' },
       [`/v1/tenants/${tat}/vex`]: { items: [] },
-      [`/v1/tenants/${tat}/controls`]: { version: 'keel-controls@1', services: 1, controls: [
-        { id: 'PW.7.2', framework: 'SSDF', title: 'Review code', policies: ['keel-scans@1'], coverage: [{ name: 'keel-scans@1', point: 'pipeline', covered_services: 1 }], gap: false },
-        { id: 'PO.1.1', framework: 'SSDF', title: 'Security requirements', policies: [], coverage: [], gap: true }] },
+      [`/v1/tenants/${tat}/controls`]: { version: 'keel-controls@2', services: 1,
+        frameworks: [{ id: 'ISO27001', name: 'ISO/IEC 27001:2022 Annex A', controls: 2, mapped: 1, covered: 1, gaps: 1 }],
+        controls: [
+          { id: '8.8', framework: 'ISO27001', title: 'Management of technical vulnerabilities', covered_by: ['keel-scans@1'], coverage: [{ name: 'keel-scans@1', point: 'pipeline', covered_services: 1 }], gap: false },
+          { id: '6.1', framework: 'ISO27001', title: 'Screening', covered_by: [], gap_reason: 'People: HR process outside Keel', coverage: [], gap: true }] },
     })
     vi.stubGlobal('prompt', () => 'internal only')
     render(<App />)
@@ -259,7 +261,8 @@ describe('finops screens', () => {
     expect(await screen.findByText(/VSA failed: trigger/)).toBeTruthy()
     expect(screen.getByText(/triggered by pull_request_target/)).toBeTruthy()
     expect(screen.getByText(/2 controls, 1 without coverage, across 1 services/)).toBeTruthy()
-    expect(screen.getByText('no Keel policy yet')).toBeTruthy()
+    expect(screen.getByText('ISO/IEC 27001:2022 Annex A: 1 of 2 covered, 1 mapped to a Keel policy')).toBeTruthy()
+    expect(screen.getByText('no Keel policy: People: HR process outside Keel')).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: 'Approve exception' }))
     expect(calls).toContain(`/v1/tenants/${tat}/exceptions/x1/approve`)
     expect((screen.getByLabelText('Justification') as HTMLSelectElement).required).toBe(true)
