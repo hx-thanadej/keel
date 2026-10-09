@@ -1005,7 +1005,7 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 		return errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_BUCKET")
 	}
 	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
-	creds := tencent.Credentials()
+	creds := billCredentials(tencent.Credentials(), payer, os.Getenv("KEEL_TENCENT_BILL_ROLE"), region)
 	objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
 		Creds: archive.Refreshing(tencent.STS{Creds: creds}, 10*time.Minute)})
 	if err != nil {
@@ -1029,7 +1029,7 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 			if err != nil {
 				slog.Error("ALERT tencent bill sync failed", "err", err)
 			} else {
-				slog.Info("tencent bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads), "skipped", len(rep.Skipped))
+				slog.Info("tencent bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads), "skipped", len(rep.Skipped), "not_focus", rep.NotFOCUS)
 				for _, l := range rep.Loads {
 					if l.Reconcile == "mismatch" {
 						slog.Error("ALERT tencent bill does not reconcile with invoice", "period", l.Period.Format("2006-01"), "load", l.LoadID)
@@ -1047,6 +1047,17 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 		}
 	}()
 	return nil
+}
+
+// billCredentials is the identity that reads the payer's bills and invoices.
+// With a payer billing role it assumes that role from Keel's base identity,
+// so payer billing access never becomes Keel's identity for other calls.
+func billCredentials(base common.Provider, payer, role, region string) common.Provider {
+	if role == "" {
+		slog.Warn("KEEL_TENCENT_BILL_ROLE is unset; tencent bill sync reads bills with Keel's base identity")
+		return base
+	}
+	return &tencent.MemberRole{Base: base, Account: payer, Role: role, Region: region}
 }
 
 // fxLoop keeps ECB reference rates current: a full 3-year backfill when the

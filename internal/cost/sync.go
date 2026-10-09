@@ -77,7 +77,8 @@ type SyncedLoad struct {
 type SyncReport struct {
 	NewFiles int          `json:"new_files"`
 	Loads    []SyncedLoad `json:"loads"`
-	Skipped  []string     `json:"skipped"` // files for already-final periods
+	Skipped  []string     `json:"skipped"`   // files for already-final periods
+	NotFOCUS []string     `json:"not_focus"` // other bill types, newly seen and never ingested
 }
 
 var billExt = []string{".csv", ".csv.gz", ".gz", ".zip", ".parquet"}
@@ -114,8 +115,20 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	}
 	var known []fileInfo
 	finalPeriods := map[time.Time]bool{}
+	notFOCUS := map[string]bool{} // Activity subjects of files already skipped
 	err = b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT object_key, etag, billing_period, seen_at FROM cost_source_files WHERE provider = $1 AND billing_account_id = $2 ORDER BY seen_at`, b.Provider, b.BillingAccountID)
+		rows, err := tx.Query(ctx, `SELECT subject FROM activities WHERE type = $1`, notFOCUSType)
+		if err != nil {
+			return err
+		}
+		subjects, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, s := range subjects {
+			notFOCUS[s] = true
+		}
+		rows, err = tx.Query(ctx, `SELECT object_key, etag, billing_period, seen_at FROM cost_source_files WHERE provider = $1 AND billing_account_id = $2 ORDER BY seen_at`, b.Provider, b.BillingAccountID)
 		if err != nil {
 			return err
 		}
@@ -154,16 +167,35 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	touched := map[time.Time]bool{}
 	for _, o := range objects {
 		key := o.Key
-		if seen[key+"\x00"+o.ETag] || !slices.ContainsFunc(billExt, func(e string) bool { return strings.HasSuffix(strings.ToLower(key), e) }) {
+		subject := "bill_file/" + b.Provider + "/" + b.BillingAccountID + "/" + key + "@" + o.ETag
+		if seen[key+"\x00"+o.ETag] || notFOCUS[subject] || !slices.ContainsFunc(billExt, func(e string) bool { return strings.HasSuffix(strings.ToLower(key), e) }) {
 			continue
 		}
-		raw, err := b.Objects.Get(ctx, key)
-		if err != nil {
-			return rep, fmt.Errorf("get %s: %w", key, err)
+		var lines []Line
+		skip := costAllocationBill(key)
+		if skip == nil {
+			raw, err := b.Objects.Get(ctx, key)
+			if err != nil {
+				return rep, fmt.Errorf("get %s: %w", key, err)
+			}
+			if lines, err = ParseFOCUS(raw); errors.Is(err, ErrNotFOCUS) {
+				skip = err
+			} else if err != nil {
+				return rep, fmt.Errorf("%s: %w", key, err)
+			}
 		}
-		lines, err := ParseFOCUS(raw)
-		if err != nil {
-			return rep, fmt.Errorf("%s: %w", key, err)
+		if skip != nil {
+			detail := skip.Error()
+			if err := b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
+				_, err := activity.Record(ctx, tx, activity.Activity{TenantID: home, Source: "keel/cost", Type: notFOCUSType,
+					Subject: subject, Operation: "SkipBillFile", Kind: activity.Read, Actor: actor, Outcome: activity.Success,
+					StatusDetail: detail})
+				return err
+			}); err != nil {
+				return rep, err
+			}
+			rep.NotFOCUS = append(rep.NotFOCUS, key)
+			continue
 		}
 		counts := map[time.Time]int{}
 		for _, l := range lines {
@@ -267,6 +299,19 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		rep.Loads = append(rep.Loads, sl)
 	}
 	return rep, nil
+}
+
+const notFOCUSType = "keel.cost.bill_file_skipped"
+
+// costAllocationBill rejects Tencent's Cost Allocation Bill (FOCUS), named
+// "<uin>-<date>-FOCUS-Cost Allocation Bill-Component-detail.zip" in Bill
+// Storage (docs 555/43521). It is FOCUS-shaped and repeats the Standard bill
+// (FOCUS) charges, so ingesting it beside that bill would double-count.
+func costAllocationBill(key string) error {
+	if strings.Contains(strings.ToLower(path.Base(key)), "cost allocation bill") {
+		return errors.New("cost allocation bill: only the standard bill (FOCUS) is ingested")
+	}
+	return nil
 }
 
 func monthOf(t time.Time) time.Time {

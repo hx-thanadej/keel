@@ -18,10 +18,27 @@ to real money. Each needs someone with access to the payer / management account.
    KEEL_TENCENT_BILL_BUCKET=keel-bills-<appid>
    KEEL_TENCENT_BILL_PREFIX=focus/
    KEEL_TENCENT_PAYER_UIN=200045645249
+   KEEL_TENCENT_BILL_ROLE=<role name>    # recommended: payer role for bill sync
    KEEL_TENCENT_REGION=ap-bangkok
    KEEL_TENCENT_BILL_MODE=per-day        # see step 4
    KEEL_TENCENT_BUDGETS=1                # optional: mirror Budgets
    ```
+
+   `KEEL_TENCENT_BILL_ROLE` names a CAM role in the payer UIN
+   (`KEEL_TENCENT_PAYER_UIN`). Give it `QcloudBillingReadOnlyAccess` (or
+   `billing:DescribeBillSummaryByPayMode`) and `cos:GetObject`/`cos:GetBucket`
+   on the bill bucket. The role must trust Keel's base identity, and the base
+   identity needs `sts:AssumeRole` on it. Keel assumes it with STS AssumeRole,
+   renews it before expiry, and uses it only for bill sync and invoice
+   reconciliation. Budget mirroring (#39) still runs as the base identity, so
+   `billing:DescribeBudget` and the `billing:*Budget` write permissions from
+   step 2 stay on the base identity, not on the payer role. Unset, bill sync
+   uses the base identity and Keel logs a warning at startup.
+
+   Subscribe only **Standard bill (FOCUS)** to the prefix. Keel skips the
+   *Cost Allocation Bill (FOCUS)* and other bill types it finds there, records
+   a `keel.cost.bill_file_skipped` Activity per file, and never ingests them.
+
 4. **Confirm the file mode on the first delivery.** Open two consecutive daily
    files. If day 2's file contains only day 2's lines → `per-day` (default).
    If it also contains day 1 → `cumulative`. A wrong mode double-counts or
