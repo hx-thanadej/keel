@@ -15,9 +15,12 @@
 // named by each provider's client_secret_ref.
 //
 //	KEEL_DIGEST_KEY     base64 32-byte Ed25519 seed; enables hourly Activity Log sealing
-//	KEEL_ARCHIVE_BUCKET   S3-compatible bucket for the WORM Activity Log archive (with KEEL_DIGEST_KEY)
-//	KEEL_ARCHIVE_ENDPOINT e.g. cos.ap-bangkok.myqcloud.com
-//	KEEL_ARCHIVE_REGION   e.g. ap-bangkok; credentials are Tencent STS (keyless)
+//	KEEL_ARCHIVE_BUCKET   bucket for the WORM Activity Log archive (with KEEL_DIGEST_KEY)
+//	KEEL_ARCHIVE_PROVIDER aws (default; S3 Object Lock, ADR-0019) | tencent (existing COS archives)
+//	KEEL_ARCHIVE_REGION   bucket region, e.g. ap-southeast-1 (aws) or ap-bangkok (tencent)
+//	KEEL_ARCHIVE_ENDPOINT tencent: e.g. cos.ap-bangkok.myqcloud.com; aws: optional, default s3.<region>.amazonaws.com
+//	KEEL_ARCHIVE_RETENTION_DAYS  aws: COMPLIANCE retention per object, default 2555 (7 years), minimum 365
+//	                    credentials are keyless: aws web identity or instance role; tencent STS
 //	KEEL_TENCENT_BILL_BUCKET   COS bucket where the payer's Bill Storage delivers FOCUS bills
 //	KEEL_TENCENT_BILL_PREFIX   object prefix of the FOCUS bill files
 //	KEEL_TENCENT_PAYER_UIN     payer account id (FOCUS BillingAccountId)
@@ -794,7 +797,7 @@ func startSealer(ctx context.Context, st *store.Store) error {
 		return nil
 	}
 	sealer := &integrity.Sealer{Store: st, Signer: integrity.NewEd25519(key)}
-	objs, err := archiveStore()
+	objs, _, err := archiveStore(ctx)
 	if err != nil {
 		return err
 	}
@@ -885,13 +888,43 @@ func verifyLog(args []string) error {
 	return printReport(r)
 }
 
-func archiveStore() (archive.ObjectStore, error) {
+// archiveStore connects to the WORM archive bucket, or returns nil when
+// KEEL_ARCHIVE_BUCKET is unset. An aws bucket must have Object Lock and
+// versioning enabled; Keel refuses to archive into it otherwise (ADR-0019).
+func archiveStore(ctx context.Context) (*archive.S3, string, error) {
 	bucket := os.Getenv("KEEL_ARCHIVE_BUCKET")
 	if bucket == "" {
-		return nil, nil
+		return nil, "", nil
 	}
-	creds := archive.Refreshing(tencent.STS{Creds: tencent.Credentials()}, 10*time.Minute)
-	return archive.NewS3(archive.S3Config{Endpoint: os.Getenv("KEEL_ARCHIVE_ENDPOINT"), Region: os.Getenv("KEEL_ARCHIVE_REGION"), Bucket: bucket, Creds: creds})
+	region := os.Getenv("KEEL_ARCHIVE_REGION")
+	switch provider := envOr("KEEL_ARCHIVE_PROVIDER", "aws"); provider {
+	case "tencent":
+		creds := archive.Refreshing(tencent.STS{Creds: tencent.Credentials()}, 10*time.Minute)
+		s3, err := archive.NewS3(archive.S3Config{Endpoint: os.Getenv("KEEL_ARCHIVE_ENDPOINT"), Region: region, Bucket: bucket, Creds: creds})
+		return s3, provider, err
+	case "aws":
+		if region == "" {
+			return nil, "", errors.New("KEEL_ARCHIVE_REGION is required with KEEL_ARCHIVE_BUCKET")
+		}
+		endpoint := envOr("KEEL_ARCHIVE_ENDPOINT", "s3."+region+".amazonaws.com")
+		if strings.HasSuffix(endpoint, ".myqcloud.com") {
+			return nil, "", errors.New("KEEL_ARCHIVE_ENDPOINT is a Tencent COS endpoint; set KEEL_ARCHIVE_PROVIDER=tencent for an existing COS archive")
+		}
+		days, err := archive.ParseRetentionDays(os.Getenv("KEEL_ARCHIVE_RETENTION_DAYS"))
+		if err != nil {
+			return nil, "", err
+		}
+		s3, err := archive.NewS3(archive.S3Config{Endpoint: endpoint, Region: region, Bucket: bucket, Creds: awscreds.NewIAM(""), RetentionDays: days})
+		if err != nil {
+			return nil, "", err
+		}
+		if err := s3.RequireObjectLock(ctx); err != nil {
+			return nil, "", fmt.Errorf("refusing to archive: %w", err)
+		}
+		return s3, provider, nil
+	default:
+		return nil, "", fmt.Errorf("KEEL_ARCHIVE_PROVIDER must be aws or tencent, got %q", provider)
+	}
 }
 
 func verifyArchive(args []string) error {
@@ -905,13 +938,33 @@ func verifyArchive(args []string) error {
 	if err != nil {
 		return err
 	}
-	objs, err := archiveStore()
-	if err != nil || objs == nil {
-		return errors.New("set KEEL_ARCHIVE_BUCKET, KEEL_ARCHIVE_ENDPOINT, KEEL_ARCHIVE_REGION")
-	}
-	r, err := archive.Verify(context.Background(), objs, *tenant, keys)
+	ctx := context.Background()
+	objs, provider, err := archiveStore(ctx)
 	if err != nil {
 		return err
+	}
+	if objs == nil {
+		return errors.New("set KEEL_ARCHIVE_BUCKET and KEEL_ARCHIVE_REGION (see docs/runbooks/log-archive.md)")
+	}
+	r, err := archive.Verify(ctx, objs, *tenant, keys)
+	if err != nil {
+		return err
+	}
+	if provider == "aws" {
+		rs, err := objs.Retentions(ctx, archive.Prefix(*tenant))
+		if err != nil {
+			return err
+		}
+		for _, o := range rs {
+			if o.Mode == "" {
+				fmt.Printf("RETENTION %s none\n", o.Key)
+			} else {
+				fmt.Printf("RETENTION %s %s until %s\n", o.Key, o.Mode, o.Until.Format(time.RFC3339))
+			}
+			if o.Mode != "COMPLIANCE" {
+				r.Problems = append(r.Problems, o.Key+": not under COMPLIANCE Object Lock retention")
+			}
+		}
 	}
 	return printReport(r)
 }

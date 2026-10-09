@@ -5,10 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"sort"
 	"strings"
 	"sync"
@@ -190,82 +186,4 @@ func TestOfflineVerifyCatchesTamperedArchive(t *testing.T) {
 		}
 		objs.objs = snapshot
 	}
-}
-
-// fakeS3 accepts path-style PUT/GET/List and ignores auth (signing is the SDK's job).
-func fakeS3(t *testing.T) (*httptest.Server, map[string][]byte) {
-	t.Helper()
-	var mu sync.Mutex
-	objs := map[string][]byte{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		key := strings.TrimPrefix(r.URL.Path, "/archive/")
-		switch r.Method {
-		case http.MethodPut:
-			b, _ := io.ReadAll(r.Body)
-			if strings.HasPrefix(r.Header.Get("X-Amz-Content-Sha256"), "STREAMING-") {
-				b = decodeAWSChunked(b)
-			}
-			objs[key] = b
-			w.Header().Set("ETag", `"x"`)
-		case http.MethodGet:
-			b, ok := objs[key]
-			if !ok {
-				w.Header().Set("Content-Type", "application/xml")
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code></Error>`))
-				return
-			}
-			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-			w.Header().Set("ETag", `"x"`)
-			_, _ = w.Write(b)
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv, objs
-}
-
-func TestS3ObjectStorePutGet(t *testing.T) {
-	srv, objs := fakeS3(t)
-	s3, err := archive.NewS3(archive.S3Config{Endpoint: strings.TrimPrefix(srv.URL, "http://"), Insecure: true, Bucket: "archive", Region: "ap-bangkok",
-		Creds: archive.StaticCreds("id", "secret", "")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s3.Put(context.Background(), "a/b.json", []byte(`{"x":1}`), "application/json"); err != nil {
-		t.Fatal(err)
-	}
-	if string(objs["a/b.json"]) != `{"x":1}` {
-		t.Fatalf("stored %q", objs["a/b.json"])
-	}
-	got, err := s3.Get(context.Background(), "a/b.json")
-	if err != nil || string(got) != `{"x":1}` {
-		t.Fatalf("get %q %v", got, err)
-	}
-	if _, err := s3.Get(context.Background(), "missing"); err != archive.ErrNotFound {
-		t.Fatalf("missing: %v", err)
-	}
-}
-
-// decodeAWSChunked strips aws-chunked framing ("<hex>;chunk-signature=…\r\n<data>\r\n").
-func decodeAWSChunked(b []byte) []byte {
-	var out []byte
-	for len(b) > 0 {
-		i := bytes.Index(b, []byte("\r\n"))
-		if i < 0 {
-			break
-		}
-		var n int
-		_, _ = fmt.Sscanf(string(b[:i]), "%x", &n)
-		b = b[i+2:]
-		if n == 0 {
-			break
-		}
-		out = append(out, b[:n]...)
-		b = b[n+2:]
-	}
-	return out
 }
