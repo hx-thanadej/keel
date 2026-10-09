@@ -45,8 +45,9 @@ passing Policy decision (ADR-0008, ADR-0010), whatever the plan.
   stop unreviewed or unverified code from reaching production.
 - Keel's reusable workflows are referenced by convention, not required by
   the organisation. Drift is a Finding.
-- Audit-log streaming is unavailable. Keel does not poll the organisation
-  audit log yet. Polling is planned in #193.
+- Audit-log streaming and the audit-log REST API need Enterprise Cloud, so
+  Keel cannot read the audit log on Free or Team. Keel receives organisation
+  webhook events instead (#193).
 - Attestations for private repositories are signed and stored by Keel
   (ADR-0010) rather than by GitHub.
 - Revisit when a Tenant contract or an audit (ADR-0017) requires enforced
