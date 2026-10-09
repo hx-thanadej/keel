@@ -92,13 +92,16 @@ type (
 		ArchivedAt *time.Time `json:"archived_at,omitempty"`
 	}
 	CloudAccount struct {
-		ID            string     `json:"id"`
-		TenantID      string     `json:"tenant_id"`
-		EnvironmentID *string    `json:"environment_id"`
-		Provider      string     `json:"provider"`
-		ExternalID    string     `json:"external_id"`
-		Name          string     `json:"name"`
-		ArchivedAt    *time.Time `json:"archived_at,omitempty"`
+		ID            string    `json:"id"`
+		TenantID      string    `json:"tenant_id"`
+		EnvironmentID *string   `json:"environment_id"`
+		Provider      string    `json:"provider"`
+		ExternalID    string    `json:"external_id"`
+		Name          string    `json:"name"`
+		Ownership     Ownership `json:"ownership"`
+		// ReadOnlyRole is set exactly when Ownership is client.
+		ReadOnlyRole *ReadOnlyRole `json:"read_only_role"`
+		ArchivedAt   *time.Time    `json:"archived_at,omitempty"`
 	}
 )
 
