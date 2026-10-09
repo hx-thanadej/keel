@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 )
 
 // WasteItem is a resource that costs money without doing work (CONTEXT.md: Waste).
@@ -52,6 +53,8 @@ var wasteActions = map[string]string{
 	"unattached_disk": "delete", "unbound_eip": "delete", "empty_clb": "delete", "stopped_paying": "delete", "idle_vm": "stop",
 }
 
+var wasteActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:waste-cleanup"}
+
 var cleanable = map[string]bool{"unattached_disk": true, "unbound_eip": true}
 
 const idleCPUPct = 2.0
@@ -76,7 +79,7 @@ func (e WasteEngine) Run(ctx context.Context) (WasteResult, error) {
 }
 
 type acct struct {
-	external      string
+	id, external  string
 	env, project  *string
 	prod, optedIn bool
 }
@@ -93,14 +96,14 @@ func (e WasteEngine) tenant(ctx context.Context, tenant string, res *WasteResult
 		if err := tx.QueryRow(ctx, `SELECT currency FROM tenants WHERE id = $1`, tenant).Scan(&currency); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT a.external_id, a.environment_id::text, e.project_id::text, coalesce(e.name IN ('prod', 'production', 'prd'), false), coalesce(e.waste_cleanup, false)
+		rows, err := tx.Query(ctx, `SELECT a.id::text, a.external_id, a.environment_id::text, e.project_id::text, coalesce(e.name IN ('prod', 'production', 'prd'), false), coalesce(e.waste_cleanup, false)
 			FROM cloud_accounts a LEFT JOIN environments e ON e.id = a.environment_id WHERE a.provider = 'tencent' AND a.archived_at IS NULL`)
 		if err != nil {
 			return err
 		}
 		accounts, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (acct, error) {
 			var a acct
-			err := r.Scan(&a.external, &a.env, &a.project, &a.prod, &a.optedIn)
+			err := r.Scan(&a.id, &a.external, &a.env, &a.project, &a.prod, &a.optedIn)
 			return a, err
 		})
 		return err
@@ -213,9 +216,17 @@ func (e WasteEngine) tenant(ctx context.Context, tenant string, res *WasteResult
 	// Cleanup: every gate must hold.
 	eligibleEnv := map[string]string{} // env → account
 	for _, a := range accounts {
-		if a.env != nil && a.optedIn && !a.prod {
-			eligibleEnv[*a.env] = a.external
+		if a.env == nil || !a.optedIn || a.prod {
+			continue
 		}
+		err := catalog.RequirePlatformOwned(ctx, e.Service.Store, tenant, a.id, "CleanUpWaste", wasteActor)
+		if errors.Is(err, catalog.ErrClientOwned) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		eligibleEnv[*a.env] = a.external
 	}
 	open, err := e.Service.List(ctx, tenant, Filter{State: "open"})
 	if err != nil {
@@ -243,7 +254,7 @@ func (e WasteEngine) tenant(ctx context.Context, tenant string, res *WasteResult
 		if snap != "" {
 			note += "; snapshot " + snap
 		}
-		if err := e.Service.MarkApplied(ctx, tenant, r.ID, note, "", activity.Actor{Type: activity.ActorKeel, UID: "keel:waste-cleanup"}); err != nil && !errors.Is(err, ErrState) {
+		if err := e.Service.MarkApplied(ctx, tenant, r.ID, note, "", wasteActor); err != nil && !errors.Is(err, ErrState) {
 			return err
 		}
 		res.Deleted++
