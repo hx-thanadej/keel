@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/store"
 )
@@ -109,6 +110,11 @@ func (v Vendor) Def() flow.Def {
 			if err != nil {
 				return nil, err
 			}
+			// Adopting a row the Catalog already has must not hand a
+			// client-owned account to the baseline steps.
+			if err := catalog.RequirePlatformOwned(ctx, v.Store, r.Tenant, id, "VendCloudAccount", keelActor); err != nil {
+				return nil, flow.Permanent(err)
+			}
 			return map[string]any{"cloud_account_id": id}, nil
 		}, Undo: func(ctx context.Context, r *flow.Run) error {
 			// The provider account itself is never closed automatically:
@@ -163,21 +169,18 @@ func (v Vendor) Request(ctx context.Context, e *flow.Engine, tenant, project, en
 		}
 	}
 	input := map[string]any{"environment_id": env, "project_id": project, "provider": v.Org.Provider()}
+	var existing string
 	err := v.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var tslug, pslug, ename string
-		var has bool
 		err := tx.QueryRow(ctx, `SELECT t.slug, p.slug, e.name,
-				EXISTS (SELECT 1 FROM cloud_accounts a WHERE a.environment_id = e.id AND a.provider = $3 AND a.archived_at IS NULL)
+				coalesce((SELECT a.id::text FROM cloud_accounts a WHERE a.environment_id = e.id AND a.provider = $3 AND a.archived_at IS NULL), '')
 			FROM environments e JOIN projects p ON p.id = e.project_id JOIN tenants t ON t.id = e.tenant_id
-			WHERE e.id = $1 AND p.id = $2 AND e.archived_at IS NULL`, env, project, v.Org.Provider()).Scan(&tslug, &pslug, &ename, &has)
+			WHERE e.id = $1 AND p.id = $2 AND e.archived_at IS NULL`, env, project, v.Org.Provider()).Scan(&tslug, &pslug, &ename, &existing)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
-		if err != nil {
+		if err != nil || existing != "" {
 			return err
-		}
-		if has {
-			return ErrAlreadyVended
 		}
 		input["tenant_slug"], input["project_slug"], input["environment_name"] = tslug, pslug, ename
 		input["account_name"] = AccountName(tslug, pslug, ename, MaxNameLen)
@@ -185,6 +188,13 @@ func (v Vendor) Request(ctx context.Context, e *flow.Engine, tenant, project, en
 	})
 	if err != nil {
 		return flow.Flow{}, false, err
+	}
+	if existing != "" {
+		// A client-owned account is registered, never vended (ADR-0018).
+		if err := catalog.RequirePlatformOwned(ctx, v.Store, tenant, existing, "VendCloudAccount", by); err != nil {
+			return flow.Flow{}, false, err
+		}
+		return flow.Flow{}, false, ErrAlreadyVended
 	}
 	return e.Start(ctx, tenant, Kind(v.Org.Provider()), subject, input, by)
 }

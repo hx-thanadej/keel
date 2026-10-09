@@ -3,12 +3,14 @@ package boundary
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/store"
 )
@@ -36,6 +38,9 @@ func isProd(env string) bool { return env == "prod" || env == "production" || en
 // get the boundary.
 func (m Manager) Step() flow.Step {
 	return flow.Step{Name: "boundary", Do: func(ctx context.Context, r *flow.Run) (map[string]any, error) {
+		if err := catalog.RequirePlatformOwned(ctx, m.Store, r.Tenant, r.Out("register", "cloud_account_id"), "ApplyBoundary", keelActor); err != nil {
+			return nil, flow.Permanent(err)
+		}
 		iam, err := m.IAM(r.Out("account", "account_id"))
 		if err != nil {
 			return nil, err
@@ -99,6 +104,15 @@ func (m Manager) Check(ctx context.Context) (CheckResult, error) {
 			return res, err
 		}
 		for _, a := range accounts {
+			// Apply ensures the boundary policy even when it stamps nothing,
+			// and boundaries in a client organisation stay with the client.
+			err := catalog.RequirePlatformOwned(ctx, m.Store, tenant, a.id, "CheckBoundary", keelActor)
+			if errors.Is(err, catalog.ErrClientOwned) {
+				continue
+			}
+			if err != nil {
+				return res, err
+			}
 			res.Accounts++
 			iam, err := m.IAM(a.external)
 			if err != nil {

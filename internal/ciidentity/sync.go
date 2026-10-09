@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/flow"
 	"github.com/hx-thanadej/keel/internal/store"
 )
@@ -55,6 +56,9 @@ func (m Manager) Step() flow.Step {
 	return flow.Step{Name: "ci_identity", Do: func(ctx context.Context, r *flow.Run) (map[string]any, error) {
 		account := r.Out("account", "account_id")
 		ch, subjects, err := m.ensure(ctx, r.Tenant, r.Out("register", "cloud_account_id"), r.Str("environment_id"), account)
+		if errors.Is(err, catalog.ErrClientOwned) {
+			return nil, flow.Permanent(err)
+		}
 		if err != nil && !errors.Is(err, ErrTooManyRepos) {
 			return nil, err
 		}
@@ -64,6 +68,9 @@ func (m Manager) Step() flow.Step {
 }
 
 func (m Manager) ensure(ctx context.Context, tenant, cloudAccount, env, account string) (Change, []string, error) {
+	if err := catalog.RequirePlatformOwned(ctx, m.Store, tenant, cloudAccount, "EnsureCIIdentity", keelActor); err != nil {
+		return Change{}, nil, err
+	}
 	var bs []Binding
 	if err := m.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var err error
@@ -157,8 +164,11 @@ func (m Manager) Sync(ctx context.Context) (SyncResult, error) {
 			return res, err
 		}
 		for _, a := range accounts {
-			res.Accounts++
 			ch, _, err := m.ensure(ctx, tenant, a.id, a.env, a.external)
+			if errors.Is(err, catalog.ErrClientOwned) {
+				continue
+			}
+			res.Accounts++
 			if ch != (Change{}) {
 				res.Changed++
 			}
