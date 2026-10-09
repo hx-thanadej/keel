@@ -47,6 +47,7 @@ type Deps struct {
 	Evidence   *EvidenceDeps
 	Reports    *ReportDeps
 	Maturity   *MaturityDeps
+	PDPA       *PDPADeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -172,6 +173,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.Maturity != nil {
 			mountMaturity(mux, deps.Auth, *deps.Maturity)
+		}
+		if deps.PDPA != nil {
+			mountPDPA(mux, deps.Auth, *deps.PDPA)
 		}
 		if deps.BreakGlass != nil {
 			mountBreakGlass(mux, deps.Auth, *deps.BreakGlass)

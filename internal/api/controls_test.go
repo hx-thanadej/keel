@@ -37,7 +37,7 @@ func TestControlsFilterByFramework(t *testing.T) {
 		return res.StatusCode, rep
 	}
 	code, all := get("")
-	if code != 200 || len(all.Frameworks) != 6 {
+	if code != 200 || len(all.Frameworks) != 7 {
 		t.Fatalf("all: %d %+v", code, all.Frameworks)
 	}
 	code, iso := get("?framework=ISO27001")
@@ -51,6 +51,9 @@ func TestControlsFilterByFramework(t *testing.T) {
 		if c.Framework != "ISO27001" {
 			t.Fatalf("ISO27001 filter returned %s %s", c.Framework, c.ID)
 		}
+	}
+	if code, pdpa := get("?framework=PDPA"); code != 200 || len(pdpa.Controls) != 12 || pdpa.Frameworks[0].Mapped != 5 {
+		t.Fatalf("PDPA: %d %+v", code, pdpa.Frameworks)
 	}
 	if code, _ := get("?framework=SOC3"); code != 400 {
 		t.Fatalf("unknown framework: %d", code)

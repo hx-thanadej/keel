@@ -45,6 +45,7 @@
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
+//	KEEL_PDPA_REGIONS   default data region set for Tenants with no PDPA settings (default ap-bangkok,ap-southeast-7)
 //	KEEL_TENCENT_ORG_REGION  enables Tencent organisation discovery (e.g. ap-bangkok);
 //	                    credentials: TKE pod identity or CVM role (env keys only with KEEL_ENV=dev)
 //
@@ -121,6 +122,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/leaks"
 	"github.com/hx-thanadej/keel/internal/maturity"
 	"github.com/hx-thanadej/keel/internal/oidcauth"
+	"github.com/hx-thanadej/keel/internal/pdpa"
 	"github.com/hx-thanadej/keel/internal/pipelineauth"
 	"github.com/hx-thanadej/keel/internal/promotion"
 	"github.com/hx-thanadej/keel/internal/registry"
@@ -240,7 +242,24 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	deps.Evidence = &api.EvidenceDeps{Authz: az, Exporter: evidence.Exporter{Store: st, Controls: controls.Service{Store: st, Registry: reg}, Key: evKey}}
+	pdpaSvc := pdpa.Service{Store: st, Regions: strings.FieldsFunc(os.Getenv("KEEL_PDPA_REGIONS"), func(r rune) bool { return r == ',' }), Stores: pdpaStores()}
+	deps.PDPA = &api.PDPADeps{Authz: az, Service: pdpaSvc}
+	deps.Evidence = &api.EvidenceDeps{Authz: az, Exporter: evidence.Exporter{Store: st, Controls: controls.Service{Store: st, Registry: reg}, PDPA: pdpaSvc, Key: evKey}}
+	go every(ctx, 15*time.Minute, "PDPA breach clock", func(ctx context.Context) error {
+		n, err := pdpaSvc.RunClock(ctx)
+		if err == nil && n > 0 {
+			slog.Warn("PDPA breach clock advanced", "breaches", n)
+		}
+		return err
+	})
+	go daily(ctx, "PDPA residency", func(ctx context.Context) error {
+		_, err := pdpaSvc.RunResidency(ctx)
+		return err
+	})
+	go daily(ctx, "PDPA retention", func(ctx context.Context) error {
+		_, err := pdpaSvc.RunRetention(ctx)
+		return err
+	})
 	if os.Getenv("KEEL_KEV") != "0" {
 		cra := evidence.CRA{Store: st, KEV: evidence.CISAKEV{URL: os.Getenv("KEEL_KEV_URL")}}
 		go every(ctx, 6*time.Hour, "CRA clock", func(ctx context.Context) error {
@@ -1467,4 +1486,20 @@ func startMultiCloudBillSync(ctx context.Context, st *store.Store, ev budget.Eva
 		})
 	}
 	return nil
+}
+
+// pdpaStores lists the platform buckets that hold every Tenant's data or
+// logs, for the PDPA residency check (#190).
+func pdpaStores() []pdpa.Location {
+	var out []pdpa.Location
+	add := func(kind, bucket, region string) {
+		if bucket != "" {
+			out = append(out, pdpa.Location{Kind: kind, Name: bucket, Region: region})
+		}
+	}
+	add("archive", os.Getenv("KEEL_ARCHIVE_BUCKET"), os.Getenv("KEEL_ARCHIVE_REGION"))
+	add("bill_bucket", os.Getenv("KEEL_TENCENT_BILL_BUCKET"), envOr("KEEL_TENCENT_REGION", "ap-bangkok"))
+	add("bill_bucket", os.Getenv("KEEL_AWS_BILL_BUCKET"), envOr("KEEL_AWS_REGION", "us-east-1"))
+	add("bill_bucket", os.Getenv("KEEL_ALIBABA_BILL_BUCKET"), envOr("KEEL_ALIBABA_REGION", "ap-southeast-1"))
+	return out
 }
