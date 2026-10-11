@@ -184,6 +184,107 @@ any number of them.
    line stays in the home Tenant unallocated, whatever its tags or the home
    Tenant's allocation rules say.
 
+## AWS client-owned management account (ADR-0018, #183)
+
+Some Tenants own their AWS Organization and pay its bill. Keel reads the
+management account's Data Exports through a read-only IAM role the client
+creates there. It never writes: it does not create or change the export, the
+bucket, the bucket policy or the role. As on Tencent, each client payer is
+data, so one Keel reads any number of them.
+
+Keel assumes the role from its own keyless identity (web identity from Keel's
+cluster, or an instance or container role; access keys are refused) with
+`sts:AssumeRole`, sending its ExternalId for this payer
+([AssumeRole `ExternalId`](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html)).
+Every session also carries a session policy allowing only `s3:ListBucket` on
+the bucket and `s3:GetObject` on its objects. AWS grants the intersection of
+the role's policy and the session policy, so even an over-broad role reads
+nothing else through Keel.
+
+The role needs exactly two actions:
+
+- `s3:ListBucket` on the bucket. `ListObjectsV2` requires it
+  ([ListObjectsV2, Permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)).
+- `s3:GetObject` on the export's objects. `GetObject` requires it
+  ([GetObject, Permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)).
+
+Budgets, Security Hub and Config findings, and Compute Optimizer are not read
+yet (#183 follow-up), so the role grants none of their actions. Add them
+when Keel reads them, not before.
+
+1. **The client sets up the export.** In the management account, open
+   Billing and Cost Management, Data Exports, Create export
+   ([Creating a standard export](https://docs.aws.amazon.com/cur/latest/userguide/dataexports-create-standard.html)).
+   Choose Standard data export, the table FOCUS 1.2 with AWS columns, all
+   columns, file versioning "Overwrite existing data export file",
+   compression "gzip - text/csv", and an S3 bucket in **This account**, under
+   its own S3 path prefix. Data Exports writes its own bucket policy for
+   delivery; leave it.
+2. **The client creates the read-only role**, console first. In IAM, Roles,
+   Create role, choose **AWS account**, **Another AWS account**, and enter the
+   account id of Keel's base role. Tick **Require external ID** and enter the
+   `role_external_id` from step 3
+   ([Creating an IAM role (console)](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-user.html);
+   [Access to AWS accounts owned by third parties](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_common-scenarios_third-party.html)).
+   Skip the managed policies, name the role (for example `KeelReadOnly`), and
+   add the inline permissions policy below. Then edit the trust policy so the
+   principal is Keel's base role ARN rather than the whole account. The JSON
+   it should end with:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Principal": {"AWS": "<Keel's base role ARN>"},
+       "Action": "sts:AssumeRole",
+       "Condition": {"StringEquals": {"sts:ExternalId": "<role_external_id from step 3>"}}
+     }]
+   }
+   ```
+
+   `sts:ExternalId` is the condition key AWS documents for this
+   ([IAM and AWS STS condition context keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html#condition-keys-sts);
+   [the confused deputy problem](https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html)).
+   Keel generates the ExternalId per payer and nobody can change it, so the
+   same role registered in another Tenant gets a different ExternalId and is
+   refused. Keel's base role needs `sts:AssumeRole` on the client's role ARN.
+   The role's permissions policy:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::<bucket>"},
+       {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::<bucket>/<prefix>/*"}
+     ]
+   }
+   ```
+
+   If the bucket uses SSE-KMS with a customer managed key, also allow
+   `kms:Decrypt` on that key. No statement may grant a `Put`, `Delete`,
+   `Create`, `Update` or `Modify` action.
+3. **Register the management account in Keel.** The role must be in the
+   management account itself.
+   ```
+   POST /v1/tenants/{tenant}/cloud-accounts
+   {"provider": "aws", "external_id": "<management account id>", "name": "management", "ownership": "client",
+    "read_only_role": {"role_arn": "arn:aws:iam::<management account id>:role/KeelReadOnly"}, "why": "..."}
+   PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer
+   {"bucket": "<bucket>", "prefix": "<S3 path prefix>/<export name>", "region": "<bucket region>", "why": "..."}
+   ```
+   `mode` defaults to `export-folder`, the only AWS mode, and `region` to
+   `us-east-1`. The first PUT returns `role_external_id`, once; later PUTs do
+   not show it. The `client_role_unusable` and `bill_delivery_missing`
+   Findings work as for a Tencent client payer (step 3 above), worded for
+   AWS: the first names the role and the `sts:ExternalId` condition, the
+   second says how to create the export and what to grant.
+4. **Register the member accounts** as client-owned AWS Cloud Accounts of the
+   Tenant. As on Tencent, lines for any other account are dropped and counted
+   in `dropped_lines` and `dropped_billed`, tags and allocation rules cannot
+   move the spend into another Tenant, and Keel's own AWS export never
+   attributes spend to a client-owned account.
+
 ## AWS (optional, #44)
 
 1. Data Exports in the management account: **FOCUS 1.2 with AWS columns**,

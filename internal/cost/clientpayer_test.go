@@ -19,9 +19,15 @@ type clientTenant struct {
 	id, payer, member, payerAccount string
 }
 
-// addClient registers a Tenant with a client-owned payer and member account,
-// and marks the payer as a client payer delivering to bucket.
-func addClient(t *testing.T, w world, slug, payer, member, bucket string) clientTenant {
+// clientRoles is each provider's read-only role ARN for an account.
+var clientRoles = map[string]func(account string) string{
+	"tencent": func(a string) string { return "qcs::cam::uin/" + a + ":roleName/KeelReadOnly" },
+	"aws":     func(a string) string { return "arn:aws:iam::" + a + ":role/KeelReadOnly" },
+}
+
+// addClient registers a Tenant with a client-owned payer and member account
+// on provider, and marks the payer as a client payer delivering to bucket.
+func addClient(t *testing.T, w world, provider, slug, payer, member, bucket string) clientTenant {
 	t.Helper()
 	ctx := context.Background()
 	c := clientTenant{payer: payer, member: member}
@@ -39,17 +45,18 @@ func addClient(t *testing.T, w world, slug, payer, member, bucket string) client
 		if err := tx.QueryRow(ctx, `INSERT INTO environments (tenant_id, project_id, name) VALUES ($1, $2, 'prod') RETURNING id`, c.id, project).Scan(&env); err != nil {
 			return err
 		}
-		role := func(uin string) string { return `{"role_arn": "qcs::cam::uin/` + uin + `:roleName/KeelReadOnly"}` }
-		if err := tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, 'tencent', $2, 'payer', 'client', $3) RETURNING id`,
-			c.id, payer, role(payer)).Scan(&c.payerAccount); err != nil {
+		role := func(account string) string { return `{"role_arn": "` + clientRoles[provider](account) + `"}` }
+		if err := tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, $2, $3, 'payer', 'client', $4) RETURNING id`,
+			c.id, provider, payer, role(payer)).Scan(&c.payerAccount); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, environment_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, $2, 'tencent', $3, 'shop-prod', 'client', $4)`,
-			c.id, env, member, role(member)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, environment_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, $2, $3, $4, 'shop-prod', 'client', $5)`,
+			c.id, env, provider, member, role(member)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, bucket, prefix, region, mode) VALUES ($1, $2, $3, 'focus/', 'ap-bangkok', 'per-day')`,
-			c.payerAccount, c.id, bucket)
+		delivery := map[string][2]string{"tencent": {"ap-bangkok", "per-day"}, "aws": {"us-east-1", "export-folder"}}[provider]
+		_, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, bucket, prefix, region, mode) VALUES ($1, $2, $3, 'focus/', $4, $5)`,
+			c.payerAccount, c.id, bucket, delivery[0], delivery[1])
 		return err
 	}))
 	return c
@@ -113,8 +120,8 @@ func openFinding(t *testing.T, w world, tenant, fingerprint string) string {
 func TestClientPayerLoadsLandOnlyInTheirTenant(t *testing.T) {
 	w := setup(t)
 	ctx := context.Background()
-	c1 := addClient(t, w, "c1", "300000000001", "300000000011", "c1-bills-1250000001")
-	c2 := addClient(t, w, "c2", "300000000002", "300000000022", "c2-bills-1250000002")
+	c1 := addClient(t, w, "tencent", "c1", "300000000001", "300000000011", "c1-bills-1250000001")
+	c2 := addClient(t, w, "tencent", "c2", "300000000002", "300000000022", "c2-bills-1250000002")
 	now := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
 
 	buckets := map[string]*memObjects{
@@ -134,8 +141,8 @@ func TestClientPayerLoadsLandOnlyInTheirTenant(t *testing.T) {
 	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent", OwnPayers: []string{"200045645249"},
 		Now: func() time.Time { return now },
 		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-			connected = append(connected, p.UIN+"@"+p.RoleARN)
-			return buckets[p.UIN], fakeInvoices{total: map[string]string{c1.payer: "130.00", c2.payer: "20.00"}[p.UIN]}, nil
+			connected = append(connected, p.PayerID+"@"+p.RoleARN)
+			return buckets[p.PayerID], fakeInvoices{total: map[string]string{c1.payer: "130.00", c2.payer: "20.00"}[p.PayerID]}, nil
 		}}
 	runs, err := cs.Run(ctx)
 	must(t, err)
@@ -186,13 +193,13 @@ func TestClientPayerLoadsLandOnlyInTheirTenant(t *testing.T) {
 func TestClientPayerWithoutDeliveryRaisesFinding(t *testing.T) {
 	w := setup(t)
 	ctx := context.Background()
-	unset := addClient(t, w, "c1", "300000000001", "300000000011", "")
-	empty := addClient(t, w, "c2", "300000000002", "300000000022", "c2-bills-1250000002")
+	unset := addClient(t, w, "tencent", "c1", "300000000001", "300000000011", "")
+	empty := addClient(t, w, "tencent", "c2", "300000000002", "300000000022", "c2-bills-1250000002")
 	bucket := &memObjects{objs: map[string][]byte{}}
 	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent",
 		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-			if p.UIN != empty.payer {
-				t.Errorf("connected to %s, which has no bucket", p.UIN)
+			if p.PayerID != empty.payer {
+				t.Errorf("connected to %s, which has no bucket", p.PayerID)
 			}
 			return bucket, nil, nil
 		}}
@@ -225,7 +232,7 @@ func TestClientPayerWithoutDeliveryRaisesFinding(t *testing.T) {
 // payer id is refused rather than sharing our payer's loads.
 func TestClientPayerCannotBeOurPayer(t *testing.T) {
 	w := setup(t)
-	addClient(t, w, "c1", "200045645249", "300000000011", "c1-bills-1250000001")
+	addClient(t, w, "tencent", "c1", "200045645249", "300000000011", "c1-bills-1250000001")
 	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent", OwnPayers: []string{"200045645249"},
 		Connect: func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 			t.Error("connected to Keel's own payer as a client payer")
@@ -242,8 +249,8 @@ func TestClientPayerCannotBeOurPayer(t *testing.T) {
 func TestOurPayerNeverAllocatesClientAccounts(t *testing.T) {
 	w := setup(t)
 	ctx := context.Background()
-	c1 := addClient(t, w, "c1", "300000000001", "300000000011", "")
-	c2 := addClient(t, w, "c2", "300000000002", "300000000022", "")
+	c1 := addClient(t, w, "tencent", "c1", "300000000001", "300000000011", "")
+	c2 := addClient(t, w, "tencent", "c2", "300000000002", "300000000022", "")
 	_, err := cost.Rules{Store: w.s}.Create(ctx, w.home, cost.Rule{Provider: "tencent", SubAccountID: c1.member, Kind: "weights",
 		Shares: []cost.Share{{ProjectID: w.project, EnvironmentID: &w.prdEnv, Weight: "1"}}})
 	must(t, err)
@@ -277,17 +284,17 @@ func TestOurPayerNeverAllocatesClientAccounts(t *testing.T) {
 func TestClientPayerAssumeFailureRaisesFinding(t *testing.T) {
 	w := setup(t)
 	ctx := context.Background()
-	c1 := addClient(t, w, "c1", "300000000001", "300000000011", "c1-bills-1250000001")
-	c2 := addClient(t, w, "c2", "300000000002", "300000000022", "c2-bills-1250000002")
+	c1 := addClient(t, w, "tencent", "c1", "300000000001", "300000000011", "c1-bills-1250000001")
+	c2 := addClient(t, w, "tencent", "c2", "300000000002", "300000000022", "c2-bills-1250000002")
 	broken := true
 	externalIDs := map[string]string{}
 	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent",
 		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-			externalIDs[p.UIN] = p.RoleExternalID
-			if p.UIN == c1.payer && broken {
+			externalIDs[p.PayerID] = p.RoleExternalID
+			if p.PayerID == c1.payer && broken {
 				return nil, nil, &cost.RoleError{Err: errors.New("AssumeRole: role trust policy does not allow this principal")}
 			}
-			return &memObjects{objs: map[string][]byte{"focus/2026-09-01.csv": bill(t, p.UIN, billRow{sub: p.UIN, cost: "1.00"})}}, nil, nil
+			return &memObjects{objs: map[string][]byte{"focus/2026-09-01.csv": bill(t, p.PayerID, billRow{sub: p.PayerID, cost: "1.00"})}}, nil, nil
 		}}
 	if _, err := cs.Run(ctx); err == nil {
 		t.Fatal("a failed AssumeRole was not reported")
@@ -325,7 +332,7 @@ func TestClientPayerAssumeFailureRaisesFinding(t *testing.T) {
 func TestClientPayerBucketErrorIsDeliveryNotRole(t *testing.T) {
 	w := setup(t)
 	ctx := context.Background()
-	c1 := addClient(t, w, "c1", "300000000001", "300000000011", "c1-bills-1250000001")
+	c1 := addClient(t, w, "tencent", "c1", "300000000001", "300000000011", "c1-bills-1250000001")
 	mode := "role"
 	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent",
 		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
