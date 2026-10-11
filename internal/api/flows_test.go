@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/riverqueue/river"
@@ -119,4 +120,16 @@ func TestVendingAPI(t *testing.T) {
 	mustStatus(t, st, 200, body) // same run, not a second one
 	st, body = inTAT.do("POST", "/v1/tenants/"+tat+"/projects/"+project+"/environments/00000000-0000-4000-8000-000000000000/vend", map[string]any{"provider": "tencent"})
 	mustStatus(t, st, 404, body)
+
+	// A client-owned account is registered, never vended (ADR-0018).
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/projects/"+project+"/environments", map[string]any{"name": "uat"})
+	uat := body["id"].(string)
+	st, body = inTAT.do("POST", "/v1/tenants/"+tat+"/cloud-accounts", map[string]any{"environment_id": uat, "provider": "tencent", "external_id": "200000000009",
+		"name": "theirs", "ownership": "client", "read_only_role": clientRoles["tencent"]})
+	mustStatus(t, st, 201, body)
+	st, body = inTAT.do("POST", "/v1/tenants/"+tat+"/projects/"+project+"/environments/"+uat+"/vend", map[string]any{"provider": "tencent"})
+	mustStatus(t, st, 409, body)
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "client-owned") || !strings.Contains(msg, "ADR-0018") {
+		t.Errorf("vend into a client-owned account: %v", body)
+	}
 }

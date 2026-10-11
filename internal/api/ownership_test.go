@@ -1,10 +1,24 @@
 package api_test
 
 import (
+	"context"
+	"fmt"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/hx-thanadej/keel/internal/access"
+	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/auth"
+	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/flow/flowtest"
+	"github.com/hx-thanadej/keel/internal/store"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 var clientRoles = map[string]map[string]any{
@@ -115,4 +129,195 @@ func TestCloudAccountOwnership(t *testing.T) {
 	if denied != 1 {
 		t.Errorf("denied ownership changes recorded = %d, want 1", denied)
 	}
+}
+
+// directory is an Identity Center that knows every user. beforeAssign, when
+// set, runs inside Assign, while the grant's cloud write is in flight.
+type directory struct {
+	mu           sync.Mutex
+	assigned     map[string]bool
+	beforeAssign func()
+}
+
+func (*directory) EnsureRoleConfiguration(context.Context, string, string, string, int) (string, error) {
+	return "rc-1", nil
+}
+func (*directory) UserID(context.Context, string) (string, bool, error) { return "u-1", true, nil }
+func (d *directory) Assign(_ context.Context, cfg string, account int64, user string) error {
+	if d.beforeAssign != nil {
+		d.beforeAssign()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.assigned[fmt.Sprint(cfg, account, user)] = true
+	return nil
+}
+func (d *directory) Unassign(_ context.Context, cfg string, account int64, user string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.assigned, fmt.Sprint(cfg, account, user))
+	return nil
+}
+func (*directory) Assignments(context.Context, int64) ([]access.Assignment, error) { return nil, nil }
+
+func (d *directory) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.assigned)
+}
+
+// grantFixture is a TAT tenant with one platform-owned Tencent Cloud Account
+// and a read-only Access Role in its Environment.
+type grantFixture struct {
+	store              *store.Store
+	inTAT, eng         client
+	tat, account, role string
+	accountID          string
+	dir                *directory
+}
+
+func (f grantFixture) request() (int, map[string]any) {
+	return f.eng.do("POST", "/v1/tenants/"+f.tat+"/access/grants", map[string]any{"role_id": f.role, "hours": 1, "reason": "look at failing pods"})
+}
+
+func (f grantFixture) toClient() (int, map[string]any) {
+	return f.inTAT.do("PATCH", f.account, map[string]any{"ownership": "client", "read_only_role": clientRoles["tencent"], "why": "TAT owns this organisation"})
+}
+
+func newGrantFixture(t *testing.T) grantFixture {
+	s := storetest.New(t)
+	az, _ := authz.New()
+	home, _ := s.CreateTenant(t.Context(), "harmonyx", "HarmonyX", true)
+	dir := &directory{assigned: map[string]bool{}}
+	grants, err := access.New(s, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _ := flowtest.Client(t, s, grants.Register)
+	grants.SetClient(rc)
+	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: catalog.New(s, az), Access: &api.AccessDeps{Authz: az, Service: grants}}))
+	t.Cleanup(srv.Close)
+	c := client{t: t, url: srv.URL}
+
+	admin := c.as(homeAdmin(home))
+	_, body := admin.do("POST", "/v1/tenants", map[string]any{"slug": "tat", "name": "TAT"})
+	tat := body["id"].(string)
+	inTAT := c.as(homeAdmin(home, auth.Binding{Role: auth.RolePlatformAdmin, TenantID: tat}))
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/teams", map[string]any{"slug": "crm", "name": "CRM"})
+	team := body["id"].(string)
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/projects", map[string]any{"team_id": team, "slug": "tat-crm", "name": "TAT CRM"})
+	project := body["id"].(string)
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/projects/"+project+"/environments", map[string]any{"name": "dev"})
+	env := body["id"].(string)
+	st, body := inTAT.do("POST", "/v1/tenants/"+tat+"/cloud-accounts", map[string]any{"environment_id": env, "provider": "tencent", "external_id": "200000000001", "name": "ours"})
+	mustStatus(t, st, 201, body)
+	accountID := body["id"].(string)
+	st, body = inTAT.do("POST", "/v1/tenants/"+tat+"/access/roles", map[string]any{"environment_id": env, "team_id": team, "template": "read-only"})
+	mustStatus(t, st, 200, body)
+	eng := c.as(auth.Principal{Subject: "user:eng@harmonyx.co", Kind: auth.KindHuman, TenantID: home, Home: true,
+		Bindings: []auth.Binding{{Role: auth.RoleEngineer, TenantID: tat}}})
+	return grantFixture{store: s, inTAT: inTAT, eng: eng, tat: tat, account: "/v1/tenants/" + tat + "/cloud-accounts/" + accountID,
+		role: body["id"].(string), accountID: accountID, dir: dir}
+}
+
+// TestClientOwnedAccessGrants: an account with an active Access Grant cannot
+// become client-owned until the grant ends, so Keel removes the assignment
+// while it still may; once client-owned, no grant activates there (ADR-0018).
+func TestClientOwnedAccessGrants(t *testing.T) {
+	f := newGrantFixture(t)
+	st, body := f.request()
+	mustStatus(t, st, 200, body)
+	if body["state"] != "active" || f.dir.count() != 1 {
+		t.Fatalf("grant on a platform-owned account: %v, assigned %v", body, f.dir.assigned)
+	}
+	grant := body["id"].(string)
+
+	st, body = f.toClient()
+	mustStatus(t, st, 409, body)
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "access_grant/"+grant) || !strings.Contains(msg, "user:eng@harmonyx.co") {
+		t.Errorf("flip with an active grant: %v, want the grant listed", body)
+	}
+	st, body = f.inTAT.do("POST", "/v1/tenants/"+f.tat+"/access/grants/"+grant+"/revoke", map[string]any{"reason": "handing the account to TAT"})
+	mustStatus(t, st, 200, body)
+	if body["state"] != "revoked" || f.dir.count() != 0 {
+		t.Fatalf("revoke before the flip: %v, assigned %v", body, f.dir.assigned)
+	}
+	st, body = f.toClient()
+	mustStatus(t, st, 200, body)
+
+	st, body = f.request()
+	mustStatus(t, st, 409, body)
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "client-owned") || !strings.Contains(msg, "ADR-0018") {
+		t.Errorf("grant on a client-owned account: %v", body)
+	}
+	if f.dir.count() != 0 {
+		t.Errorf("client-owned account assigned: %v", f.dir.assigned)
+	}
+}
+
+// TestOwnershipSwitchDuringGrantActivation: a switch to client-owned and a
+// grant's Identity Center assignment serialize on the account row, so Keel
+// never assigns a role in an account that is client-owned (ADR-0018).
+func TestOwnershipSwitchDuringGrantActivation(t *testing.T) {
+	t.Run("switch while the assignment is in flight", func(t *testing.T) {
+		f := newGrantFixture(t)
+		var switched int
+		f.dir.beforeAssign = func() { switched, _ = f.toClient() }
+		st, body := f.request()
+		mustStatus(t, st, 200, body)
+		if switched != 409 {
+			t.Errorf("switch during activation: status %d, want 409 while the grant is requested", switched)
+		}
+		if body["state"] != "active" {
+			t.Errorf("grant = %v, want active on the still platform-owned account", body)
+		}
+		st, body = f.inTAT.do("GET", "/v1/tenants/"+f.tat+"/cloud-accounts", nil)
+		mustStatus(t, st, 200, body)
+		if a := items(t, body)[0]; a["ownership"] != "platform" {
+			t.Errorf("ownership = %v, want platform: the grant is still active there", a["ownership"])
+		}
+	})
+
+	t.Run("activation while the switch holds the account", func(t *testing.T) {
+		f := newGrantFixture(t)
+		locked, release, switchDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		go func() {
+			switchDone <- f.store.InTenant(context.Background(), f.tat, func(tx pgx.Tx) error {
+				if _, err := tx.Exec(context.Background(), `SELECT 1 FROM cloud_accounts WHERE id = $1 FOR UPDATE`, f.accountID); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(context.Background(), `UPDATE cloud_accounts SET ownership = 'client', read_only_role = $2 WHERE id = $1`, f.accountID, clientRoles["tencent"]); err != nil {
+					return err
+				}
+				close(locked)
+				<-release
+				return nil
+			})
+		}()
+		<-locked
+		type result struct {
+			st   int
+			body map[string]any
+		}
+		granted := make(chan result, 1)
+		go func() {
+			st, body := f.request()
+			granted <- result{st, body}
+		}()
+		var r result
+		select {
+		case r = <-granted:
+			t.Errorf("grant finished while the switch held the account: status %d, assigned %d", r.st, f.dir.count())
+			close(release)
+		case <-time.After(300 * time.Millisecond):
+			close(release)
+			r = <-granted
+		}
+		if err := <-switchDone; err != nil {
+			t.Fatal(err)
+		}
+		if r.st != 409 || f.dir.count() != 0 {
+			t.Errorf("grant after the switch committed: status %d %v, assigned %d; want 409 and nothing assigned", r.st, r.body, f.dir.count())
+		}
+	})
 }

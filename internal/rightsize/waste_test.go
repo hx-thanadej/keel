@@ -13,13 +13,17 @@ import (
 )
 
 type fakeWaste struct {
-	items   []rightsize.WasteItem
-	deleted []string
+	items    []rightsize.WasteItem
+	deleted  []string
+	onDelete func()
 }
 
 func (f *fakeWaste) Scan(context.Context) ([]rightsize.WasteItem, error) { return f.items, nil }
 func (f *fakeWaste) Delete(_ context.Context, it rightsize.WasteItem) (string, error) {
 	f.deleted = append(f.deleted, it.ResourceID)
+	if f.onDelete != nil {
+		f.onDelete()
+	}
 	if it.ResourceType == "disk" {
 		return "snap-" + it.ResourceID, nil
 	}
@@ -157,4 +161,35 @@ func TestCleanupIsGated(t *testing.T) {
 		t.Fatalf("state %s reason %q", state, reason)
 	}
 	_ = devEnv
+}
+
+func TestCleanupStopsWhenAccountTurnsClientOwnedMidLoop(t *testing.T) {
+	w, _ := wasteWorld(t)
+	ctx := context.Background()
+	dev := &fakeWaste{items: []rightsize.WasteItem{{ResourceID: "disk-dev", ResourceType: "disk", Kind: "unattached_disk"}, {ResourceID: "eip-dev", ResourceType: "eip", Kind: "unbound_eip"}}}
+	scanners := map[string]*fakeWaste{"dev-uin": dev}
+	_, err := wasteEngine(w, scanners, asOf, true).Run(ctx)
+	must(t, err)
+	must(t, w.s.InTenant(ctx, w.tat, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE environments SET waste_cleanup = true`)
+		return err
+	}))
+	dev.onDelete = func() {
+		must(t, w.s.InTenant(ctx, w.tat, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE cloud_accounts SET ownership = 'client', read_only_role = '{"role_arn": "qcs::cam::uin/100001:roleName/keel-readonly"}' WHERE external_id = 'dev-uin'`)
+			return err
+		}))
+	}
+	res, err := wasteEngine(w, scanners, asOf.AddDate(0, 0, 8), true).Run(ctx)
+	must(t, err)
+	if len(dev.deleted) != 1 || res.Deleted != 1 {
+		t.Fatalf("deleted %v res %+v, want exactly one delete before the refusal", dev.deleted, res)
+	}
+	var refusals int
+	must(t, w.s.InTenant(ctx, w.tat, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM activities WHERE type = 'keel.cloud_account.change_refused'`).Scan(&refusals)
+	}))
+	if refusals != 1 {
+		t.Fatalf("refusals %d, want 1", refusals)
+	}
 }

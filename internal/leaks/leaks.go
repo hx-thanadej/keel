@@ -22,6 +22,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/store"
 )
 
@@ -191,7 +192,7 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 		return err
 	}
 	// Every account Keel manages for this provider, with the Tenant that owns it.
-	type acct struct{ tenant, external, env, project string }
+	type acct struct{ tenant, id, external, env, project string }
 	var accounts []acct
 	rows, err := s.Store.AppPool().Query(ctx, `SELECT t::text FROM tenant_ids() AS t`)
 	if err != nil {
@@ -203,14 +204,14 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 	}
 	for _, t := range tenants {
 		if err := s.Store.InTenant(ctx, t, func(tx pgx.Tx) error {
-			rows, err := tx.Query(ctx, `SELECT a.external_id, coalesce(a.environment_id::text, ''), coalesce(e.project_id::text, '') FROM cloud_accounts a
+			rows, err := tx.Query(ctx, `SELECT a.id::text, a.external_id, coalesce(a.environment_id::text, ''), coalesce(e.project_id::text, '') FROM cloud_accounts a
 				LEFT JOIN environments e ON e.id = a.environment_id WHERE a.provider = $1 AND a.archived_at IS NULL`, provider)
 			if err != nil {
 				return err
 			}
 			for rows.Next() {
 				a := acct{tenant: t}
-				if err := rows.Scan(&a.external, &a.env, &a.project); err != nil {
+				if err := rows.Scan(&a.id, &a.external, &a.env, &a.project); err != nil {
 					return err
 				}
 				accounts = append(accounts, a)
@@ -230,11 +231,6 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 		if found, ok, err = k.Find(ctx, keyID, ids); err != nil {
 			return err
 		}
-		if ok {
-			if err := k.Disable(ctx, found); err != nil {
-				return err // retried: the key must not stay active
-			}
-		}
 	}
 	owner := acct{tenant: home}
 	for _, a := range accounts {
@@ -242,13 +238,31 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 			owner = a
 		}
 	}
+	disabled := false
+	if ok {
+		err := catalog.RequirePlatformOwned(ctx, s.Store, owner.tenant, owner.id, "DisableLeakedKey", keelActor)
+		if err != nil && !errors.Is(err, catalog.ErrClientOwned) {
+			return err
+		}
+		if err == nil {
+			if err := s.Keys[provider].Disable(ctx, found); err != nil {
+				return err // retried: the key must not stay active
+			}
+			disabled = true
+		}
+	}
 	title := fmt.Sprintf("Leaked %s access key %s in %s", provider, mask(keyID), repo)
 	detail := map[string]any{"repository": repo, "alert": number, "key": mask(keyID), "provider": provider}
 	act := "Keel could not find this key in any account it manages: find and disable it by hand"
-	if ok {
+	switch {
+	case disabled:
 		title = fmt.Sprintf("Leaked %s access key %s of %s in %s was disabled", provider, mask(keyID), found.Owner, found.Account)
 		detail["account"], detail["owner"] = found.Account, found.Owner
 		act = "disabled at once; move the owner to workload identity (no replacement key)"
+	case ok:
+		title = fmt.Sprintf("Leaked %s access key %s of %s in client-owned %s is still active", provider, mask(keyID), found.Owner, found.Account)
+		detail["account"], detail["owner"], detail["client_owned"] = found.Account, found.Owner, true
+		act = "Keel is read-only in the client's organisation (ADR-0018) and did not disable it: the client must disable it now and move the owner to workload identity"
 	}
 	detail["action"] = act
 	raw, _ := json.Marshal(detail)
@@ -264,7 +278,7 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 			return err
 		}
 		outcome := activity.Success
-		if !ok {
+		if !disabled {
 			outcome = activity.Failure
 		}
 		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: owner.tenant, Source: "keel/leaked-keys", Type: "keel.leaked_key.handled", Subject: "repository/" + repo,

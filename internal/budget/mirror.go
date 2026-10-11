@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 )
 
 // NativeSpec is what a provider budget should contain to mirror a Keel Budget.
@@ -230,13 +231,25 @@ func (m Mirror) spec(ctx context.Context, tenant string, b Budget, provider stri
 	}
 	ok := true
 	err := m.Service.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT a.external_id FROM cloud_accounts a JOIN environments e ON e.id = a.environment_id
-			WHERE a.provider = $1 AND a.archived_at IS NULL AND e.project_id = $2 AND ($3::uuid IS NULL OR e.id = $3) ORDER BY 1`, provider, b.ProjectID, b.EnvironmentID)
+		rows, err := tx.Query(ctx, `SELECT a.id::text, a.external_id FROM cloud_accounts a JOIN environments e ON e.id = a.environment_id
+			WHERE a.provider = $1 AND a.archived_at IS NULL AND e.project_id = $2 AND ($3::uuid IS NULL OR e.id = $3) ORDER BY 2`, provider, b.ProjectID, b.EnvironmentID)
 		if err != nil {
 			return err
 		}
-		if s.Accounts, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+		scoped, err := pgx.CollectRows(rows, pgx.RowToStructByPos[struct{ ID, External string }])
+		if err != nil {
 			return err
+		}
+		// A client-owned account is billed to the client's payer, not ours,
+		// and Keel creates nothing in the client's organisation (ADR-0018).
+		for _, a := range scoped {
+			client, err := catalog.IsClientOwned(ctx, tx, a.ID)
+			if err != nil {
+				return err
+			}
+			if !client {
+				s.Accounts = append(s.Accounts, a.External)
+			}
 		}
 		if len(s.Accounts) == 0 {
 			ok = false
