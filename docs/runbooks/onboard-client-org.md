@@ -171,21 +171,35 @@ dropped from that Tenant.
 The client sync runs at keel-api start and then hourly. It needs no
 environment variable; client payers are data.
 
-1. **Role.** `GET /v1/tenants/{tenant}/findings?kind=client_role_unusable`
+1. **Role health.** Open the Tenant page in the portal. Each client-owned
+   account shows a read-only role panel, under "Unassigned client-owned
+   accounts" until the account is assigned to a project. The same data is at
+   `GET /v1/tenants/{tenant}/cloud-accounts/role-health`.
+   - **Last successful assume** is `client_payers.last_assumed_at`. Every
+     client bill sync stamps it when a real AssumeRole succeeds. Resolving a
+     Finding by hand never moves it. It reads "never" until the first
+     success. Only the payer's role is ever assumed, so a member account
+     always reads "never".
+   - **Last bill ingested** is the latest cost load that carried the
+     account's lines.
+   - **Open role and delivery Findings** lists the open
+     `client_role_unusable`, `bill_delivery_missing` and `bill_sync_blocked`
+     Findings for the account.
+2. **Role Finding.** `GET /v1/tenants/{tenant}/findings?kind=client_role_unusable`
    lists a Finding while Keel cannot assume the role (missing role, wrong
    principal, wrong or missing ExternalId). Its `detail.configure` says what
-   to fix. It resolves on the next successful AssumeRole. A dedicated
-   role-health endpoint is in review (#186) and not on main.
-2. **Delivery.** `GET /v1/tenants/{tenant}/findings?kind=bill_delivery_missing`
+   to fix. It resolves on the next successful AssumeRole.
+3. **Delivery.** `GET /v1/tenants/{tenant}/findings?kind=bill_delivery_missing`
    lists a Finding while no bucket is recorded, the bucket cannot be opened
    after the role was assumed, or it holds no bill files under the prefix. It
    resolves once bills arrive.
-3. **First bill.** `GET /v1/tenants/{tenant}/activities?type=keel.cost.loaded`
-   shows each load in the client Tenant. A home-Tenant operator sees the load
-   itself, with `dropped_lines`, `dropped_billed` and `reconcile_status`, at
+4. **First bill.** "Last bill ingested" fills in, and
+   `GET /v1/tenants/{tenant}/activities?type=keel.cost.loaded` shows each
+   load in the client Tenant. A home-Tenant operator sees the load itself,
+   with `dropped_lines`, `dropped_billed` and `reconcile_status`, at
    `GET /v1/tenants/{home}/cost-loads`. AWS has no invoice source, so AWS
    client loads are not reconciled against an invoice.
-4. **Keel's own side.** If Keel's AWS identity cannot load or is not
+5. **Keel's own side.** If Keel's AWS identity cannot load or is not
    keyless, keel-api logs `ALERT client bill sync failed` for provider `aws`
    once per run and raises no client Finding. Tencent sync carries on.
 
@@ -194,9 +208,11 @@ files charge the same sub-account for the same hours. That happens only in
 Tencent `per-day` mode, usually because the month-to-date files need
 `cumulative` or a second bill type is delivered to the prefix. Fix the
 client payer's `mode` with `PUT .../client-payer`, or have the client clean
-the prefix; the next load resolves it. On main this Finding is raised in
-Keel's **home** Tenant, not the client's, and its hint names
-`KEEL_TENCENT_BILL_MODE`, which applies only to Keel's own payer.
+the prefix; the next load resolves it. For a client payer this Finding is
+raised in the **client's** Tenant and shows in its role health panel. Its
+hint text still says to check `KEEL_TENCENT_BILL_MODE`. Ignore that for a
+client payer: the variable sets only Keel's own payer's mode, and a client
+payer's mode is the `mode` field above (#216).
 
 ## 5. Offboard
 
@@ -228,5 +244,4 @@ in #213.
   steps for them yet.
 - **Findings, Budgets and rightsizing from client organisations** (#182,
   #183 follow-ups). Only bills are read today.
-- **Portal status for client-owned accounts** (#186).
 - **ExternalId rotation and re-onboarding** (#213).
