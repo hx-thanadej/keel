@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/scans"
 )
 
@@ -15,7 +16,7 @@ const (
 // item is one alert normalised to the Finding it becomes.
 type item struct {
 	tool        string
-	kind        string
+	kind        findings.Kind
 	fingerprint string
 	severity    string
 	rule        string // title prefix
@@ -81,7 +82,7 @@ func codeItem(a CodeAlert, repoID int64) item {
 	if it.title == "" {
 		it.title = trim(a.Message, 200)
 	}
-	if kind == "vulnerability" {
+	if kind == findings.Vulnerability {
 		it.vuln = a.RuleID
 	}
 	return it
@@ -94,7 +95,7 @@ func dependabotItems(alerts []DependabotAlert, service string) []item {
 		if id == "" {
 			continue // an alert without an advisory id cannot be matched to anything
 		}
-		out = append(out, item{tool: toolDependabot, kind: "vulnerability", severity: a.Severity, rule: id, title: trim(a.Summary, 200), vuln: id,
+		out = append(out, item{tool: toolDependabot, kind: findings.Vulnerability, severity: a.Severity, rule: id, title: trim(a.Summary, 200), vuln: id,
 			fingerprint: "vuln:" + id + ":" + service,
 			detail:      map[string]any{"ghsa": a.GHSA, "cve": a.CVE, "components": []string{a.Ecosystem + "/" + a.Package}, "locations": []string{a.ManifestPath}, "alert_numbers": []int{a.Number}}})
 	}
@@ -119,7 +120,7 @@ func secretItems(alerts []SecretAlert, repoKey string) []item {
 		if name == "" {
 			name = a.Type
 		}
-		out = append(out, item{tool: toolSecrets, kind: "secret", severity: "critical", rule: a.Type, title: fmt.Sprintf("%s (secret scanning alert #%d)", name, a.Number),
+		out = append(out, item{tool: toolSecrets, kind: findings.Secret, severity: "critical", rule: a.Type, title: fmt.Sprintf("%s (secret scanning alert #%d)", name, a.Number),
 			fingerprint: fmt.Sprintf("secret:github:%s:%d", repoKey, a.Number),
 			detail:      map[string]any{"rule_id": a.Type, "secret_type": a.Type, "alert_url": a.URL, "alert_numbers": []int{a.Number}}})
 	}

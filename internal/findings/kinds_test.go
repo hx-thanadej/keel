@@ -1,6 +1,9 @@
 package findings_test
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -47,7 +50,24 @@ func TestEveryKindRaisedInSQLIsRegistered(t *testing.T) {
 	}
 }
 
+// Go code raises a kind through its findings.Kind value; SQL names it
+// literally.
 func TestEveryRegisteredKindIsRaisedSomewhere(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "kinds.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ident := map[string]string{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if v, ok := n.(*ast.ValueSpec); ok && len(v.Values) == 1 {
+			if call, ok := v.Values[0].(*ast.CallExpr); ok && len(call.Args) == 1 {
+				if lit, ok := call.Args[0].(*ast.BasicLit); ok {
+					ident[strings.Trim(lit.Value, `"`)] = v.Names[0].Name
+				}
+			}
+		}
+		return true
+	})
 	var all strings.Builder
 	for path, src := range sources(t) {
 		if !strings.HasSuffix(path, "kinds.go") {
@@ -55,7 +75,12 @@ func TestEveryRegisteredKindIsRaisedSomewhere(t *testing.T) {
 		}
 	}
 	for _, k := range findings.Kinds {
-		if !strings.Contains(all.String(), `'`+k+`'`) && !strings.Contains(all.String(), `"`+k+`"`) {
+		name, ok := ident[k.String()]
+		if !ok {
+			t.Fatalf("kinds.go declares no variable for %q", k)
+		}
+		inGo := regexp.MustCompile(`\bfindings\.` + name + `\b`).MatchString(all.String())
+		if !inGo && !strings.Contains(all.String(), `'`+k.String()+`'`) {
 			t.Errorf("findings.Kinds lists %q but no source raises it", k)
 		}
 	}

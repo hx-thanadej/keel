@@ -47,6 +47,9 @@ type Control struct {
 	Title     string   `yaml:"title" json:"title"`
 	CoveredBy []string `yaml:"covered_by" json:"covered_by"`
 	GapReason string   `yaml:"gap_reason" json:"gap_reason,omitempty"`
+	// Findings are the Finding kinds, of those CoveredBy raises, whose open
+	// Findings count against this Control.
+	Findings []string `yaml:"findings" json:"-"`
 }
 
 // Registry is the versioned data.
@@ -75,7 +78,7 @@ func parse(data []byte) (Registry, error) {
 	for _, f := range r.Frameworks {
 		frameworks[f.ID] = true
 	}
-	known := map[string]bool{}
+	raises := map[string][]string{}
 	for _, p := range r.Policies {
 		if _, ok := coverage[p.Name]; !ok {
 			return r, fmt.Errorf("policy %s has no coverage query", p.Name)
@@ -85,7 +88,7 @@ func parse(data []byte) (Registry, error) {
 				return r, fmt.Errorf("policy %s names unknown Finding kind %s", p.Name, k)
 			}
 		}
-		known[p.Name] = true
+		raises[p.Name] = p.Findings
 	}
 	seen := map[string]bool{}
 	for _, c := range r.Controls {
@@ -100,9 +103,17 @@ func parse(data []byte) (Registry, error) {
 		if (len(c.CoveredBy) == 0) == (c.GapReason == "") {
 			return r, fmt.Errorf("control %s needs either covered_by or a gap_reason, not both", key)
 		}
+		var kinds []string
 		for _, p := range c.CoveredBy {
-			if !known[p] {
+			k, ok := raises[p]
+			if !ok {
 				return r, fmt.Errorf("control %s names unknown policy %s", key, p)
+			}
+			kinds = append(kinds, k...)
+		}
+		for i, k := range c.Findings {
+			if !slices.Contains(kinds, k) || slices.Contains(c.Findings[:i], k) {
+				return r, fmt.Errorf("control %s links Finding kind %s that none of its policies raise, or twice", key, k)
 			}
 		}
 	}
@@ -264,13 +275,8 @@ func (s Service) Report(ctx context.Context, tenant string) (Report, error) {
 }
 
 // WithFindings sets every Control's OpenFindings from the Tenant's open
-// Findings of the kinds its Policies raise. Controls with none get an empty
-// list.
+// Findings of the kinds it links. Controls with none get an empty list.
 func (s Service) WithFindings(ctx context.Context, tenant string, rep Report) (Report, error) {
-	kindsOf := map[string][]string{}
-	for _, p := range s.Registry.Policies {
-		kindsOf[p.Name] = p.Findings
-	}
 	byKind := map[string]*OpenFindings{}
 	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT kind, id::text, title, severity, total FROM (
@@ -299,14 +305,10 @@ func (s Service) WithFindings(ctx context.Context, tenant string, rep Report) (R
 	}
 	for i, c := range rep.Controls {
 		open := OpenFindings{Items: []FindingRef{}}
-		seen := map[string]bool{}
-		for _, policy := range c.CoveredBy {
-			for _, kind := range kindsOf[policy] {
-				if k := byKind[kind]; k != nil && !seen[kind] {
-					seen[kind] = true
-					open.Count += k.Count
-					open.Items = append(open.Items, k.Items...)
-				}
+		for _, kind := range c.Findings {
+			if k := byKind[kind]; k != nil {
+				open.Count += k.Count
+				open.Items = append(open.Items, k.Items...)
 			}
 		}
 		slices.SortStableFunc(open.Items, func(a, b FindingRef) int {

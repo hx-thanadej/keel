@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/hx-thanadej/keel/internal/findings"
 )
 
 // ClientPayer is a client-owned payer Cloud Account whose bills Keel reads
@@ -130,7 +132,7 @@ func (c *ClientBillSync) one(ctx context.Context, p ClientPayer) (ClientSync, er
 		cs.NoDelivery = true
 		return cs, c.noDelivery(ctx, p, fmt.Sprintf("bucket %s holds no bill files under prefix %q", p.Bucket, p.Prefix))
 	}
-	return cs, c.resolve(ctx, p, deliveryMissing, "bills delivered")
+	return cs, c.resolve(ctx, p, findings.BillDeliveryMissing, "bills delivered")
 }
 
 func (c *ClientBillSync) now() time.Time {
@@ -140,14 +142,8 @@ func (c *ClientBillSync) now() time.Time {
 	return time.Now()
 }
 
-// Finding kinds a client payer's sync raises in its Tenant.
-const (
-	deliveryMissing = "bill_delivery_missing"
-	roleUnusable    = "client_role_unusable"
-)
-
-func (c *ClientBillSync) fingerprint(kind string, p ClientPayer) string {
-	return kind + ":" + c.Provider + "/" + p.PayerID
+func (c *ClientBillSync) fingerprint(kind findings.Kind, p ClientPayer) string {
+	return kind.String() + ":" + c.Provider + "/" + p.PayerID
 }
 
 // clientPayerHelp says, per provider, what the client configures when
@@ -180,17 +176,17 @@ var clientPayerHelp = map[string]struct{ role, delivery func(ClientPayer) string
 // roleUnusable keeps one open Finding in the payer's Tenant until Keel can
 // assume the payer's read-only role again.
 func (c *ClientBillSync) roleUnusable(ctx context.Context, p ClientPayer, cause error) error {
-	return c.raise(ctx, p, roleUnusable, "high", fmt.Sprintf("Keel cannot assume %s read-only role %s for payer %s", c.Provider, p.RoleARN, p.PayerID),
+	return c.raise(ctx, p, findings.ClientRoleUnusable, "high", fmt.Sprintf("Keel cannot assume %s read-only role %s for payer %s", c.Provider, p.RoleARN, p.PayerID),
 		cause.Error(), clientPayerHelp[c.Provider].role(p))
 }
 
 // noDelivery keeps one open Finding in the payer's Tenant until bills arrive.
 func (c *ClientBillSync) noDelivery(ctx context.Context, p ClientPayer, why string) error {
-	return c.raise(ctx, p, deliveryMissing, "medium", fmt.Sprintf("%s bills for payer %s are not delivered to Keel: %s", c.Provider, p.PayerID, why),
+	return c.raise(ctx, p, findings.BillDeliveryMissing, "medium", fmt.Sprintf("%s bills for payer %s are not delivered to Keel: %s", c.Provider, p.PayerID, why),
 		why, clientPayerHelp[c.Provider].delivery(p))
 }
 
-func (c *ClientBillSync) raise(ctx context.Context, p ClientPayer, kind, severity, title, why, todo string) error {
+func (c *ClientBillSync) raise(ctx context.Context, p ClientPayer, kind findings.Kind, severity, title, why, todo string) error {
 	return c.Ingester.Store.InTenant(ctx, p.TenantID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
 			VALUES ($1, $2, $3, $4, $5, jsonb_build_object('provider', $6::text, 'payer', $7::text, 'cloud_account_id', $8::text, 'reason', $9::text, 'configure', $10::text), $11)
@@ -210,10 +206,10 @@ func (c *ClientBillSync) assumed(ctx context.Context, p ClientPayer) error {
 	}); err != nil {
 		return err
 	}
-	return c.resolve(ctx, p, roleUnusable, "role assumed")
+	return c.resolve(ctx, p, findings.ClientRoleUnusable, "role assumed")
 }
 
-func (c *ClientBillSync) resolve(ctx context.Context, p ClientPayer, kind, resolution string) error {
+func (c *ClientBillSync) resolve(ctx context.Context, p ClientPayer, kind findings.Kind, resolution string) error {
 	return c.Ingester.Store.InTenant(ctx, p.TenantID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = $3
 			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, c.fingerprint(kind, p), c.now(), resolution)

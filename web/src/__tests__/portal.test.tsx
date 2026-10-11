@@ -523,6 +523,63 @@ describe('finops screens', () => {
     expect(card.id).toBe('finding-v2')
   })
 
+  it('a linked Finding outside the loaded list is fetched by id and focused', async () => {
+    const finding = (id: string, title: string, severity: string) => ({ id, kind: 'vulnerability', severity, status: 'open', title, detail: {}, first_seen_at: '2026-10-01T00:00:00Z', resolution: null })
+    const calls = mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/controls`]: controlReport,
+      [`/v1/tenants/${tat}/pdpa`]: pdpaOverview(),
+      [`/v1/tenants/${tat}/findings`]: { items: Array.from({ length: 200 }, (_, i) => finding(`c${i}`, `Overdue cost anomaly ${i}`, 'low')) },
+      [`/v1/tenants/${tat}/findings/v2`]: finding('v2', 'SQL injection in crm-api', 'high'),
+    })
+    render(<App />)
+    await compliancePage()
+    const vulns = within(screen.getByRole('table')).getByRole('rowheader', { name: '8.8 Management of technical vulnerabilities' }).closest('tr') as HTMLElement
+    await userEvent.click(within(vulns).getByRole('link', { name: 'High: SQL injection in crm-api' }))
+    const card = (await screen.findByText('SQL injection in crm-api')).closest('article') as HTMLElement
+    await waitFor(() => expect(document.activeElement).toBe(card))
+    expect(card.id).toBe('finding-v2')
+    expect(screen.getByRole('status').textContent).toMatch(/not among the 200 Findings listed below/)
+    expect(calls).toContain(`/v1/tenants/${tat}/findings/v2`)
+  })
+
+  it('a linked Finding that cannot be loaded says so instead of failing silently', async () => {
+    mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/controls`]: controlReport,
+      [`/v1/tenants/${tat}/pdpa`]: pdpaOverview(),
+      [`/v1/tenants/${tat}/findings`]: { items: [] },
+      [`/v1/tenants/${tat}/findings/v2`]: new Response('{"error":"not found"}', { status: 404 }),
+    })
+    render(<App />)
+    await compliancePage()
+    const vulns = within(screen.getByRole('table')).getByRole('rowheader', { name: '8.8 Management of technical vulnerabilities' }).closest('tr') as HTMLElement
+    await userEvent.click(within(vulns).getByRole('link', { name: 'High: SQL injection in crm-api' }))
+    expect((await screen.findByRole('alert')).textContent).toMatch(/linked Finding could not be loaded/)
+  })
+
+  it('opening the Findings tab by hand does not re-focus a previously linked Finding', async () => {
+    const finding = (id: string, title: string, severity: string) => ({ id, kind: 'vulnerability', severity, status: 'open', title, detail: {}, first_seen_at: '2026-10-01T00:00:00Z', resolution: null })
+    mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/controls`]: controlReport,
+      [`/v1/tenants/${tat}/pdpa`]: pdpaOverview(),
+      [`/v1/tenants/${tat}/findings`]: { items: [finding('v1', 'CVE-2026-7 in openssl', 'critical'), finding('v2', 'SQL injection in crm-api', 'high')] },
+    })
+    render(<App />)
+    await compliancePage()
+    const vulns = within(screen.getByRole('table')).getByRole('rowheader', { name: '8.8 Management of technical vulnerabilities' }).closest('tr') as HTMLElement
+    await userEvent.click(within(vulns).getByRole('link', { name: 'High: SQL injection in crm-api' }))
+    const linked = (await screen.findByText('SQL injection in crm-api')).closest('article') as HTMLElement
+    await waitFor(() => expect(document.activeElement).toBe(linked))
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Compliance' }))
+    await userEvent.click(screen.getByRole('tab', { name: 'Findings' }))
+    const card = (await screen.findByText('SQL injection in crm-api')).closest('article') as HTMLElement
+    await new Promise((r) => setTimeout(r, 50))
+    expect(document.activeElement).not.toBe(card)
+  })
+
   it('compliance exports the chosen framework\'s evidence and shows a server error next to the button', async () => {
     const create = vi.fn(() => 'blob:x')
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() }))

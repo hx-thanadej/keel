@@ -70,7 +70,13 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
         <ul>
           {tenants.map((t) => (
             <li key={t.id}>
-              <button aria-current={t.id === selected} onClick={() => setSelected(t.id)}>
+              <button
+                aria-current={t.id === selected}
+                onClick={() => {
+                  setFocusFinding(undefined)
+                  setSelected(t.id)
+                }}
+              >
                 {t.name}
                 {t.is_home && <span className="badge">home</span>}
               </button>
@@ -84,7 +90,15 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
             <h1>{current.name}</h1>
             <div role="tablist">
               {tabs.map(([id, name]) => (
-                <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>
+                <button
+                  key={id}
+                  role="tab"
+                  aria-selected={tab === id}
+                  onClick={() => {
+                    setFocusFinding(undefined)
+                    setTab(id)
+                  }}
+                >
                   {name}
                 </button>
               ))}

@@ -59,6 +59,39 @@ func TestFindingsInbox(t *testing.T) {
 	_ = low
 }
 
+// The compliance view links to Findings that may lie beyond the inbox's first 200 (#210).
+func TestFindingByIDWithinTheCallersTenant(t *testing.T) {
+	s := storetest.New(t)
+	az, _ := authz.New()
+	tat, _ := s.CreateTenant(t.Context(), "tat", "TAT", false)
+	other, _ := s.CreateTenant(t.Context(), "other", "Other", false)
+	cat := catalog.New(s, az)
+	cat.Now = storetest.Clock()
+	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: cat, Authz: az}))
+	t.Cleanup(srv.Close)
+	insert := func(tenant string) (id string) {
+		if err := s.InTenant(t.Context(), tenant, func(tx pgx.Tx) error {
+			return tx.QueryRow(t.Context(), `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at) VALUES ($1, 'vulnerability', 'a', 'critical', 'A CVE', $2) RETURNING id::text`, tenant, cat.Now()).Scan(&id)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	mine, theirs := insert(tat), insert(other)
+	c := client{t: t, url: srv.URL}
+	viewer := c.as(auth.Principal{Subject: "user:v@tat.or.th", Kind: auth.KindHuman, TenantID: tat, Bindings: []auth.Binding{{Role: auth.RoleTenantViewer, TenantID: tat}}})
+
+	st, body := viewer.do("GET", "/v1/tenants/"+tat+"/findings/"+mine, nil)
+	mustStatus(t, st, 200, body)
+	if body["id"] != mine || body["title"] != "A CVE" {
+		t.Fatalf("finding by id: %s", body)
+	}
+	st, body = viewer.do("GET", "/v1/tenants/"+tat+"/findings/"+theirs, nil)
+	mustStatus(t, st, 404, body)
+	st, body = viewer.do("GET", "/v1/tenants/"+other+"/findings/"+theirs, nil)
+	mustStatus(t, st, 403, body)
+}
+
 // The overdue filter compares due dates with the catalog's clock (#176).
 func TestFindingsInboxOverdueOnTheServiceClock(t *testing.T) {
 	s := storetest.New(t)

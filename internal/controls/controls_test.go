@@ -110,6 +110,13 @@ func TestRegistryRejectsBadMappings(t *testing.T) {
 	if _, err := controls.Parse([]byte(unknownKind + `  - {framework: ISO27001, id: "5.15", title: t, covered_by: [keel-authz@1]}`)); err == nil || !strings.Contains(err.Error(), "unknown Finding kind vulnerabilty") {
 		t.Fatalf("misspelt Finding kind: %v", err)
 	}
+	raisesVuln := strings.Replace(head, "description: d}", "description: d, findings: [vulnerability]}", 1)
+	if _, err := controls.Parse([]byte(raisesVuln + `  - {framework: ISO27001, id: "5.15", title: t, covered_by: [keel-authz@1], findings: [vulnerability]}`)); err != nil {
+		t.Fatalf("control linking a kind its policy raises: %v", err)
+	}
+	if _, err := controls.Parse([]byte(raisesVuln + `  - {framework: ISO27001, id: "5.15", title: t, covered_by: [keel-authz@1], findings: [secret]}`)); err == nil || !strings.Contains(err.Error(), "links Finding kind secret") {
+		t.Fatalf("control linking a kind no policy of its raises: %v", err)
+	}
 }
 
 func TestReportCountsCoveredAndGapsPerFramework(t *testing.T) {
@@ -315,21 +322,21 @@ func TestOpenFindingsLinkToControlsThroughTheirPoliciesWithinOneTenant(t *testin
 		}
 		byID[c.Framework+" "+c.ID] = c
 	}
-	// keel-scans@1 raises both kinds; most severe first; resolved and
-	// unrelated kinds are left out.
+	// ISO 8.8 links both kinds; most severe first; resolved and unrelated
+	// kinds are left out.
 	want := []controls.FindingRef{{ID: critical, Title: "SQL injection in crm-api", Severity: "critical"}, {ID: medium, Title: "CVE-2026-1 in openssl", Severity: "medium"}}
-	if got := byID["SSDF PW.7.2"].OpenFindings; got.Count != 2 || !slices.Equal(got.Items, want) {
-		t.Fatalf("PW.7.2 open findings %+v, want %+v", got, want)
+	if got := byID["ISO27001 8.8"].OpenFindings; got.Count != 2 || !slices.Equal(got.Items, want) {
+		t.Fatalf("8.8 open findings %+v, want %+v", got, want)
 	}
-	// keel-sbom@1 raises vulnerabilities only; reached through two Policies,
-	// the CVE still counts once.
-	if got := byID["SSDF RV.1.1"].OpenFindings; got.Count != 2 || len(got.Items) != 2 {
+	// Code review links SAST but not dependency vulnerabilities, though
+	// keel-scans@1 raises both.
+	if got := byID["SSDF PW.7.2"].OpenFindings; got.Count != 1 || !slices.Equal(got.Items, want[:1]) {
+		t.Fatalf("PW.7.2 open findings %+v", got)
+	}
+	if got := byID["SSDF RV.1.1"].OpenFindings; got.Count != 1 || !slices.Equal(got.Items, want[1:]) {
 		t.Fatalf("RV.1.1 open findings %+v", got)
 	}
-	if got := byID["CRA CRA-I.2.1"].OpenFindings; got.Count != 1 || !slices.Equal(got.Items, want[1:]) {
-		t.Fatalf("CRA-I.2.1 open findings %+v", got)
-	}
-	for _, key := range []string{"SLSA SLSA-BUILD-L1", "SSDF PO.1.1"} {
+	for _, key := range []string{"SLSA SLSA-BUILD-L1", "SSDF PO.1.1", "CRA CRA-I.2.1"} {
 		if got := byID[key].OpenFindings; got.Count != 0 || len(got.Items) != 0 {
 			t.Fatalf("%s should link no Findings: %+v", key, got)
 		}
@@ -346,9 +353,9 @@ func TestOpenFindingsLinkToControlsThroughTheirPoliciesWithinOneTenant(t *testin
 		t.Fatal(err)
 	}
 	for _, c := range otherRep.Controls {
-		if c.Framework == "SSDF" && c.ID == "PW.7.2" {
+		if c.Framework == "ISO27001" && c.ID == "8.8" {
 			if c.OpenFindings.Count != 1 || c.OpenFindings.Items[0].Title != "Other tenant CVE" {
-				t.Fatalf("other tenant PW.7.2 %+v", c.OpenFindings)
+				t.Fatalf("other tenant 8.8 %+v", c.OpenFindings)
 			}
 		}
 	}
@@ -370,5 +377,47 @@ func TestEveryPolicyFindingKindIsAKindKeelRaises(t *testing.T) {
 	}
 	if linked == 0 {
 		t.Fatal("no Policy links a Finding kind")
+	}
+}
+
+// A Policy raises many kinds; each Control links only those that evidence it,
+// so a leaked secret does not show under change management.
+func TestControlsLinkOnlyTheFindingKindsThatFitThem(t *testing.T) {
+	r, err := controls.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string][]string{}
+	for _, c := range r.Controls {
+		kinds[c.Framework+" "+c.ID] = c.Findings
+	}
+	for _, pair := range [][2]string{
+		{"ISO27001 8.8", "vulnerability"},
+		{"ISO27001 8.9", "iac"},
+		{"SSDF PW.7.2", "sast"},
+		{"SSDF RV.1.1", "vulnerability"},
+		{"OWASP-CICD CICD-SEC-6", "secret"},
+		{"ISO27001 5.17", "leaked_key"},
+		{"ISO27001 8.4", "github_governance"},
+		{"SOC2 CC6.3", "standing_access"},
+		{"PDPA s.28", "pdpa_residency"},
+	} {
+		if !slices.Contains(kinds[pair[0]], pair[1]) {
+			t.Errorf("%s should link %s Findings: %v", pair[0], pair[1], kinds[pair[0]])
+		}
+	}
+	for _, pair := range [][2]string{
+		{"ISO27001 8.4", "secret"},
+		{"ISO27001 8.32", "secret"},
+		{"SOC2 CC8.1", "secret"},
+		{"OWASP-CICD CICD-SEC-1", "secret"},
+		{"ISO27001 8.9", "vulnerability"},
+		{"ISO27001 8.9", "sast"},
+		{"CRA CRA-I.2.1", "vulnerability"},
+		{"SSDF PW.7.2", "vulnerability"},
+	} {
+		if slices.Contains(kinds[pair[0]], pair[1]) {
+			t.Errorf("%s should not link %s Findings: %v", pair[0], pair[1], kinds[pair[0]])
+		}
 	}
 }

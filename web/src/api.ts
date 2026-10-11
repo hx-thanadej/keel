@@ -237,6 +237,7 @@ export const finops = {
   daily: (t: string, from: string, to: string) => list<DailyCost>(`/v1/tenants/${t}/costs/daily?from=${from}&to=${to}`),
   dailyCsvUrl: (t: string, from: string, to: string) => `/v1/tenants/${t}/costs/daily?from=${from}&to=${to}&format=csv`,
   findings: (t: string) => list<Finding>(`/v1/tenants/${t}/findings`),
+  finding: (t: string, id: string) => request<Finding>(`/v1/tenants/${t}/findings/${id}`),
   resolve: (t: string, id: string, resolution: string) => send<Finding>(`/v1/tenants/${t}/findings/${id}/resolve`, 'POST', { resolution }),
   recommendations: (t: string) => list<Recommendation>(`/v1/tenants/${t}/recommendations`),
   savings: (t: string, project?: string) => request<Savings>(`/v1/tenants/${t}/savings${project ? `?project=${project}` : ''}`),

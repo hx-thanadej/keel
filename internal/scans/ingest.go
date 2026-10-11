@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/store"
 )
 
@@ -99,7 +100,7 @@ func (s Service) Ingest(ctx context.Context, tenant, service string, u Upload, b
 				continue
 			}
 			current = append(current, r.Fingerprint)
-			if r.Kind == "vulnerability" {
+			if r.Kind == findings.Vulnerability {
 				var suppressed bool
 				if err := tx.QueryRow(ctx, `SELECT vex_suppressed($1, $2)`, r.RuleID, service).Scan(&suppressed); err != nil {
 					return err
