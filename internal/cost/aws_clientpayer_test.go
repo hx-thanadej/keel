@@ -189,3 +189,36 @@ func TestAWSClientPayerFindingsSayWhatToConfigureInAWS(t *testing.T) {
 		t.Errorf("c1 facts %v after the role worked, want its export loaded", got)
 	}
 }
+
+// TestKeelIdentityFailureRaisesNoClientFinding: when Keel's own identity is
+// unusable (static keys instead of web identity), the run fails once with
+// that error. No client is told to fix its trust policy, and no role is
+// tried. With no payers the identity is not checked at all.
+func TestKeelIdentityFailureRaisesNoClientFinding(t *testing.T) {
+	w := awsWorld(t)
+	ctx := context.Background()
+	checked := 0
+	ready := func(context.Context) error {
+		checked++
+		return errors.New(`aws credentials from "EnvConfigCredentials" refused: never access keys`)
+	}
+	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "aws", Ready: ready,
+		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+			t.Errorf("connected to %s with Keel's identity refused", p.PayerID)
+			return nil, nil, errors.New("unreachable")
+		}}
+	if _, err := cs.Run(ctx); err != nil || checked != 0 {
+		t.Fatalf("run with no payers = %v after %d identity checks, want nil after none", err, checked)
+	}
+	c1 := addClient(t, w, "aws", "c1", "300000000001", "300000000011", "c1-bills")
+	c2 := addClient(t, w, "aws", "c2", "300000000002", "300000000022", "c2-bills")
+	runs, err := cs.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "never access keys") || len(runs) != 0 || checked != 1 {
+		t.Fatalf("run = %v, %v after %d identity checks; want one error naming Keel's identity", runs, err, checked)
+	}
+	for _, c := range []clientTenant{c1, c2} {
+		if got := openFinding(t, w, c.id, "client_role_unusable:aws/"+c.payer); got != "" {
+			t.Errorf("client %s got a role Finding for Keel's own fault: %s", c.payer, got)
+		}
+	}
+}

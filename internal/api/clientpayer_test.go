@@ -60,9 +60,10 @@ func TestClientPayer(t *testing.T) {
 	if body["bucket"] != "" || body["mode"] != "export-folder" || body["region"] != "us-east-1" || body["role_external_id"] == ext {
 		t.Errorf("aws payer without delivery = %v, want export-folder in us-east-1 with its own ExternalId", body)
 	}
-	st, body = inTAT.do("PUT", accounts+"/"+aws+"/client-payer", map[string]any{"bucket": "tat-cur.exports", "prefix": "focus", "region": "us-gov-west-1", "why": "export set up"})
+	st, body = inTAT.do("PUT", accounts+"/"+aws+"/client-payer", map[string]any{"bucket": "tat-cur.exports", "prefix": "focus", "region": "us-gov-west-1",
+		"kms_key_arn": "arn:aws-us-gov:kms:us-gov-west-1:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab", "why": "export set up"})
 	mustStatus(t, st, 200, body)
-	if body["bucket"] != "tat-cur.exports" || body["region"] != "us-gov-west-1" || body["mode"] != "export-folder" {
+	if body["bucket"] != "tat-cur.exports" || body["region"] != "us-gov-west-1" || body["mode"] != "export-folder" || body["kms_key_arn"] != "arn:aws-us-gov:kms:us-gov-west-1:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab" {
 		t.Errorf("aws payer with delivery = %v", body)
 	}
 
@@ -77,6 +78,9 @@ func TestClientPayer(t *testing.T) {
 		"bucket without appid":    {payer, map[string]any{"bucket": "tat-bills"}},
 		"unknown mode":            {payer, map[string]any{"mode": "hourly"}},
 		"malformed region":        {payer, map[string]any{"region": "Bangkok"}},
+		"tencent with a kms key":  {payer, map[string]any{"kms_key_arn": "arn:aws:kms:ap-bangkok:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab"}},
+		"aws kms key elsewhere":   {aws, map[string]any{"bucket": "tat-cur.exports", "kms_key_arn": "arn:aws:kms:us-west-2:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab"}},
+		"aws wildcard prefix":     {aws, map[string]any{"bucket": "tat-cur.exports", "prefix": "focus/*"}},
 	} {
 		tc.in["why"] = "x"
 		if st, body := inTAT.do("PUT", accounts+"/"+tc.account+"/client-payer", tc.in); st != 400 {

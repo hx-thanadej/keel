@@ -20,13 +20,17 @@ import (
 // the payer before delivery is set up; bill sync then raises a Finding
 // saying what the client must configure.
 type ClientPayer struct {
-	CloudAccountID string    `json:"cloud_account_id"`
-	TenantID       string    `json:"tenant_id"`
-	Bucket         string    `json:"bucket"`
-	Prefix         string    `json:"prefix"`
-	Region         string    `json:"region"`
-	Mode           string    `json:"mode"` // tencent: per-day | cumulative; aws: export-folder
-	UpdatedAt      time.Time `json:"updated_at"`
+	CloudAccountID string `json:"cloud_account_id"`
+	TenantID       string `json:"tenant_id"`
+	Bucket         string `json:"bucket"`
+	Prefix         string `json:"prefix"`
+	Region         string `json:"region"`
+	Mode           string `json:"mode"` // tencent: per-day | cumulative; aws: export-folder
+	// KMSKeyARN is the SSE-KMS key of an AWS export bucket, in the bucket's
+	// region. Keel's session may then use it, through S3 only, to read the
+	// export. Empty for SSE-S3 buckets and for Tencent.
+	KMSKeyARN string    `json:"kms_key_arn"`
+	UpdatedAt time.Time `json:"updated_at"`
 	// RoleExternalID is the ExternalId Keel sends when assuming the payer's
 	// role. Keel generates it; it is returned only when the payer is first
 	// recorded, for the client's trust-policy condition.
@@ -34,7 +38,8 @@ type ClientPayer struct {
 }
 
 // clientPayerKind is what a client payer's delivery looks like on one
-// provider. Migration 00051 checks only what every provider shares.
+// provider, for defaults and readable errors. Migration 00051 holds each
+// provider's full rules.
 type clientPayerKind struct {
 	bucket        *regexp.Regexp
 	region        string // default
@@ -79,11 +84,14 @@ func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID
 			if in.Bucket != "" && !kind.bucket.MatchString(in.Bucket) {
 				return "", invalid("a %s client payer's bucket is %s", provider, kind.bucketMeaning)
 			}
-			err := tx.QueryRow(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, bucket, prefix, region, mode) VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT (cloud_account_id) DO UPDATE SET bucket = excluded.bucket, prefix = excluded.prefix, region = excluded.region, mode = excluded.mode, updated_at = now()
-				RETURNING cloud_account_id::text, tenant_id::text, bucket, prefix, region, mode, updated_at, role_external_id, xmax = 0`,
-				accountID, tenantID, in.Bucket, in.Prefix, in.Region, in.Mode).
-				Scan(&out.CloudAccountID, &out.TenantID, &out.Bucket, &out.Prefix, &out.Region, &out.Mode, &out.UpdatedAt, &out.RoleExternalID, &inserted)
+			if in.KMSKeyARN != "" && provider != "aws" {
+				return "", invalid("only an aws client payer has a KMS key")
+			}
+			err := tx.QueryRow(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, prefix, region, mode, kms_key_arn) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				ON CONFLICT (cloud_account_id) DO UPDATE SET bucket = excluded.bucket, prefix = excluded.prefix, region = excluded.region, mode = excluded.mode, kms_key_arn = excluded.kms_key_arn, updated_at = now()
+				RETURNING cloud_account_id::text, tenant_id::text, bucket, prefix, region, mode, kms_key_arn, updated_at, role_external_id, xmax = 0`,
+				accountID, tenantID, provider, in.Bucket, in.Prefix, in.Region, in.Mode, in.KMSKeyARN).
+				Scan(&out.CloudAccountID, &out.TenantID, &out.Bucket, &out.Prefix, &out.Region, &out.Mode, &out.KMSKeyARN, &out.UpdatedAt, &out.RoleExternalID, &inserted)
 			if !inserted {
 				out.RoleExternalID = ""
 			}

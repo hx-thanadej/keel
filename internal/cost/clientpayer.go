@@ -23,6 +23,7 @@ type ClientPayer struct {
 	Prefix         string
 	Region         string
 	Mode           FileMode
+	KMSKeyARN      string // aws: the export bucket's SSE-KMS key, or empty
 }
 
 // RoleError marks a Connect failure in assuming the payer's role (missing
@@ -46,7 +47,11 @@ type ClientBillSync struct {
 	// Connect returns bill access through the payer's read-only role. It
 	// wraps a failure to assume the role in *RoleError.
 	Connect func(ClientPayer) (Objects, InvoiceSource, error)
-	Now     func() time.Time
+	// Ready checks Keel's own side, such as its base identity, once per run
+	// that has payers. Its failure is Keel's, not any client's, so the run
+	// stops with that error and raises no client Finding.
+	Ready func(context.Context) error
+	Now   func() time.Time
 }
 
 // ClientSync reports one client payer's run.
@@ -65,6 +70,11 @@ func (c *ClientBillSync) Run(ctx context.Context) ([]ClientSync, error) {
 	payers, err := c.payers(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if len(payers) > 0 && c.Ready != nil {
+		if err := c.Ready(ctx); err != nil {
+			return nil, fmt.Errorf("%d %s client payers not synced: %w", len(payers), c.Provider, err)
+		}
 	}
 	var out []ClientSync
 	var failed []error
@@ -150,8 +160,8 @@ var clientPayerHelp = map[string]struct{ role, delivery func(ClientPayer) string
 		},
 		delivery: func(p ClientPayer) string {
 			return fmt.Sprintf("In management account %s, open Billing and Cost Management, Data Exports, and create a standard export of FOCUS 1.2 with AWS columns, "+
-				"gzip text/csv, overwrite, to an S3 bucket in that account under its own prefix. Allow role %s s3:ListBucket on the bucket and s3:GetObject on its objects. "+
-				"Then record the bucket, prefix and region on the payer's Cloud Account in Keel. Keel only reads; it never changes the export or the bucket.", p.PayerID, p.RoleARN)
+				"gzip text/csv, overwrite, to an S3 bucket in that account under its own prefix. Allow role %s s3:ListBucket on the bucket and s3:GetObject on its objects, and kms:Decrypt on the bucket's key if it uses SSE-KMS. "+
+				"Then record the bucket, prefix, region and any SSE-KMS key ARN on the payer's Cloud Account in Keel. Keel only reads; it never changes the export or the bucket.", p.PayerID, p.RoleARN)
 		},
 	},
 }
@@ -192,14 +202,14 @@ func (c *ClientBillSync) resolve(ctx context.Context, p ClientPayer, kind, resol
 var payerModes = map[string]FileMode{"per-day": PerDayFiles, "cumulative": CumulativeFiles, "export-folder": LatestExportFolder}
 
 func (c *ClientBillSync) payers(ctx context.Context) ([]ClientPayer, error) {
-	rows, err := c.Ingester.Store.AppPool().Query(ctx, `SELECT tenant_id::text, cloud_account_id::text, external_id, role_arn, role_external_id, bucket, prefix, region, mode FROM client_payers_for($1)`, c.Provider)
+	rows, err := c.Ingester.Store.AppPool().Query(ctx, `SELECT tenant_id::text, cloud_account_id::text, external_id, role_arn, role_external_id, bucket, prefix, region, mode, kms_key_arn FROM client_payers_for($1)`, c.Provider)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (ClientPayer, error) {
 		var p ClientPayer
 		var mode string
-		err := r.Scan(&p.TenantID, &p.CloudAccountID, &p.PayerID, &p.RoleARN, &p.RoleExternalID, &p.Bucket, &p.Prefix, &p.Region, &mode)
+		err := r.Scan(&p.TenantID, &p.CloudAccountID, &p.PayerID, &p.RoleARN, &p.RoleExternalID, &p.Bucket, &p.Prefix, &p.Region, &mode, &p.KMSKeyARN)
 		p.Mode = payerModes[mode]
 		return p, err
 	})

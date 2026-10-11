@@ -33,7 +33,7 @@ func TestReadOnlyRoleMustBeInTheManagementAccount(t *testing.T) {
 		"not a role":     {"arn:aws:iam::300000000001:user/keel", "0123456789abcdef0123456789abcdef"},
 		"no external id": {"arn:aws:iam::300000000001:role/KeelReadOnly", ""},
 	} {
-		if _, err := aws.ReadOnlyRole(nil, tc.arn, "300000000001", tc.externalID, "c1-bills", "us-east-1", "http://127.0.0.1:1"); err == nil {
+		if _, err := aws.ReadOnlyRole(nil, tc.arn, "300000000001", tc.externalID, aws.Export{Bucket: "c1-bills", Region: "us-east-1"}, "http://127.0.0.1:1"); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

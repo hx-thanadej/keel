@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -193,8 +194,18 @@ func TestAWSClientPayerConnectReadsEachExportAsItsClient(t *testing.T) {
 	connect := awsClientPayerConnect(webIdentity{}, stsSrv.URL, s3Srv.URL)
 
 	payers := []cost.ClientPayer{
-		{TenantID: "t1", PayerID: "300000000001", RoleARN: "arn:aws:iam::300000000001:role/KeelReadOnly", RoleExternalID: "0123456789abcdef0123456789abcdef", Bucket: "c1-bills", Region: "us-east-1"},
-		{TenantID: "t2", PayerID: "300000000002", RoleARN: "arn:aws:iam::300000000002:role/billing/AcmeKeelRead", RoleExternalID: "fedcba9876543210fedcba9876543210", Bucket: "c2-bills", Region: "ap-southeast-1"},
+		{TenantID: "t1", PayerID: "300000000001", RoleARN: "arn:aws:iam::300000000001:role/KeelReadOnly", RoleExternalID: "0123456789abcdef0123456789abcdef", Bucket: "c1-bills", Prefix: "exports/", Region: "us-east-1"},
+		{TenantID: "t2", PayerID: "300000000002", RoleARN: "arn:aws:iam::300000000002:role/billing/AcmeKeelRead", RoleExternalID: "fedcba9876543210fedcba9876543210", Bucket: "c2-bills", Prefix: "exports/", Region: "ap-southeast-1",
+			KMSKeyARN: "arn:aws:kms:ap-southeast-1:300000000002:key/1234abcd-12ab-34cd-56ef-1234567890ab"},
+	}
+	wantPolicies := []string{
+		`{"Version":"2012-10-17","Statement":[` +
+			`{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::c1-bills","Condition":{"StringLike":{"s3:prefix":"exports/*"}}},` +
+			`{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::c1-bills/exports/*"}]}`,
+		`{"Version":"2012-10-17","Statement":[` +
+			`{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::c2-bills","Condition":{"StringLike":{"s3:prefix":"exports/*"}}},` +
+			`{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::c2-bills/exports/*"},` +
+			`{"Effect":"Allow","Action":"kms:Decrypt","Resource":"arn:aws:kms:ap-southeast-1:300000000002:key/1234abcd-12ab-34cd-56ef-1234567890ab","Condition":{"StringEquals":{"kms:ViaService":"s3.ap-southeast-1.amazonaws.com"}}}]}`,
 	}
 	for _, p := range payers {
 		objs, inv, err := connect(p)
@@ -224,16 +235,8 @@ func TestAWSClientPayerConnectReadsEachExportAsItsClient(t *testing.T) {
 		if !strings.Contains(a.signer, "Credential=KEELBASE/") {
 			t.Errorf("AssumeRole signed by %q, want Keel's base identity", a.signer)
 		}
-		var policy struct {
-			Statement []struct{ Effect, Action, Resource string }
-		}
-		if err := json.Unmarshal([]byte(a.policy), &policy); err != nil {
-			t.Fatalf("session policy %q: %v", a.policy, err)
-		}
-		want := []struct{ Effect, Action, Resource string }{
-			{"Allow", "s3:ListBucket", "arn:aws:s3:::" + p.Bucket}, {"Allow", "s3:GetObject", "arn:aws:s3:::" + p.Bucket + "/*"}}
-		if !slices.Equal(policy.Statement, want) {
-			t.Errorf("session policy %+v, want only reads of %s", policy.Statement, p.Bucket)
+		if a.policy != wantPolicies[i] {
+			t.Errorf("session policy %s\nwant %s", a.policy, wantPolicies[i])
 		}
 	}
 	if len(reads) != 4 {
@@ -267,5 +270,41 @@ func TestAWSClientPayerConnectReadsEachExportAsItsClient(t *testing.T) {
 	}
 	if len(reads) != 0 {
 		t.Errorf("S3 calls %+v after the role failed", reads)
+	}
+}
+
+// TestBrokenAWSIdentityLeavesTencentSyncing: an AWS config Keel cannot load
+// does not stop the Tencent client sync, and the AWS sync reports it as
+// Keel's own identity problem. Access keys in the environment fail the same
+// keyless check before any client role is tried.
+func TestBrokenAWSIdentityLeavesTencentSyncing(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/config", []byte("[profile other\nregion = us-east-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, env := range map[string]map[string]string{
+		"malformed config": {"AWS_CONFIG_FILE": dir + "/config", "AWS_PROFILE": "missing"},
+		"access keys":      {"AWS_CONFIG_FILE": "/dev/null", "AWS_ACCESS_KEY_ID": "AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY": "secret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+			for k, v := range env {
+				t.Setenv(k, v)
+			}
+			syncs := clientBillSyncs(context.Background(), nil)
+			providers := []string{}
+			for _, cs := range syncs {
+				providers = append(providers, cs.Provider)
+			}
+			if !slices.Equal(providers, []string{"tencent", "aws"}) {
+				t.Fatalf("client syncs %v, want tencent and aws", providers)
+			}
+			if syncs[0].Ready != nil || syncs[0].Connect == nil {
+				t.Error("the Tencent sync depends on Keel's AWS identity")
+			}
+			if err := syncs[1].Ready(context.Background()); err == nil {
+				t.Error("the AWS sync is ready with a broken Keel identity")
+			}
+		})
 	}
 }

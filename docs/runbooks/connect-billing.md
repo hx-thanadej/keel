@@ -196,17 +196,33 @@ Keel assumes the role from its own keyless identity (web identity from Keel's
 cluster, or an instance or container role; access keys are refused) with
 `sts:AssumeRole`, sending its ExternalId for this payer
 ([AssumeRole `ExternalId`](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html)).
-Every session also carries a session policy allowing only `s3:ListBucket` on
-the bucket and `s3:GetObject` on its objects. AWS grants the intersection of
-the role's policy and the session policy, so even an over-broad role reads
-nothing else through Keel.
+If Keel's own identity is not keyless, or its AWS config cannot load, each
+hourly run with AWS client payers logs one `ALERT client bill sync failed`
+for provider `aws` and tries no client role, so no client gets a Finding for
+Keel's fault. The Tencent client sync carries on.
+Every session also carries a session policy built from the payer's record
+in Keel. It allows `s3:ListBucket` on the bucket only with the condition
+`StringLike` `s3:prefix` `<prefix>*`, and `s3:GetObject` only on
+`arn:aws:s3:::<bucket>/<prefix>*`. When the payer records an SSE-KMS key, it
+also allows `kms:Decrypt` on that key ARN only, with the condition
+`StringEquals` `kms:ViaService` `s3.<region>.amazonaws.com`, so the key
+decrypts only for S3 in the bucket's region and never for a direct KMS call
+([kms:ViaService](https://docs.aws.amazon.com/kms/latest/developerguide/conditions-kms.html#conditions-kms-via-service)).
+AWS grants the intersection of the role's policy and the session policy, so
+even an over-broad role lists and reads only the export prefix through Keel.
+A payer recorded with an empty prefix gets the whole bucket: `ListBucket`
+without a condition and `GetObject` on `<bucket>/*`. Record the prefix.
 
-The role needs exactly two actions:
+The role needs exactly these actions:
 
 - `s3:ListBucket` on the bucket. `ListObjectsV2` requires it
   ([ListObjectsV2, Permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)).
 - `s3:GetObject` on the export's objects. `GetObject` requires it
   ([GetObject, Permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)).
+- Only for an SSE-KMS bucket, `kms:Decrypt` on the bucket's key. Downloading
+  an SSE-KMS object requires it, and the key is in the bucket's region
+  ([Using SSE-KMS, Permissions](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html)).
+  A bucket on the default SSE-S3 needs no KMS permission.
 
 Budgets, Security Hub and Config findings, and Compute Optimizer are not read
 yet (#183 follow-up), so the role grants none of their actions. Add them
@@ -261,9 +277,17 @@ when Keel reads them, not before.
    }
    ```
 
-   If the bucket uses SSE-KMS with a customer managed key, also allow
-   `kms:Decrypt` on that key. No statement may grant a `Put`, `Delete`,
-   `Create`, `Update` or `Modify` action.
+   If the bucket uses SSE-KMS, add this statement, and make sure the key's
+   key policy lets the role use it (a customer managed key's policy that
+   delegates to IAM in the account does):
+
+   ```json
+   {"Effect": "Allow", "Action": "kms:Decrypt", "Resource": "<key ARN>",
+    "Condition": {"StringEquals": {"kms:ViaService": "s3.<bucket region>.amazonaws.com"}}}
+   ```
+
+   No statement may grant a `Put`, `Delete`, `Create`, `Update` or `Modify`
+   action.
 3. **Register the management account in Keel.** The role must be in the
    management account itself.
    ```
@@ -271,8 +295,12 @@ when Keel reads them, not before.
    {"provider": "aws", "external_id": "<management account id>", "name": "management", "ownership": "client",
     "read_only_role": {"role_arn": "arn:aws:iam::<management account id>:role/KeelReadOnly"}, "why": "..."}
    PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer
-   {"bucket": "<bucket>", "prefix": "<S3 path prefix>/<export name>", "region": "<bucket region>", "why": "..."}
+   {"bucket": "<bucket>", "prefix": "<S3 path prefix>/<export name>", "region": "<bucket region>",
+    "kms_key_arn": "<the bucket's SSE-KMS key ARN, or omit for SSE-S3>", "why": "..."}
    ```
+   `kms_key_arn` must be a key ARN (`arn:aws:kms:<bucket region>:<account>:key/<id>`),
+   not an alias. The prefix may not contain `*`, `?` or `$`, since it becomes
+   part of the session policy.
    `mode` defaults to `export-folder`, the only AWS mode, and `region` to
    `us-east-1`. The first PUT returns `role_external_id`, once; later PUTs do
    not show it. The `client_role_unusable` and `bill_delivery_missing`

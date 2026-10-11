@@ -106,7 +106,7 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 		if _, err := tx.Exec(ctx, `INSERT INTO pdpa_settings (tenant_id, data_regions, updated_at, updated_by) VALUES ($1, '{ap-bangkok}', now(), 'u')`, f.tenant); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, region) VALUES ($1, $2, 'ap-bangkok')`, f.account, f.tenant); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, region) VALUES ($1, $2, 'tencent', 'ap-bangkok')`, f.account, f.tenant); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO pdpa_breaches (tenant_id, title, aware_at, declared_at, declared_by) VALUES ($1, 'b', now(), now(), 'u')`, f.tenant); err != nil {

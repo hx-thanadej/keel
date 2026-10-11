@@ -434,12 +434,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	clientSyncs, err := clientBillSyncs(ctx, st)
-	if err != nil {
-		pool.Close()
-		return api.Deps{}, noop, err
-	}
-	go clientBillSyncLoop(ctx, evaluator, clientSyncs)
+	go clientBillSyncLoop(ctx, evaluator, clientBillSyncs(ctx, st))
 	if err := startAWSBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
@@ -1096,23 +1091,32 @@ func billCredentials(base common.Provider, payer, role, region string) common.Pr
 // clientBillSyncs reads client payers' bills on each provider, each through
 // its client's read-only role and into its own Tenant (ADR-0018): Tencent
 // payers (#182) and AWS management accounts (#183). Client payers are data:
-// client_payers rows on client-owned Cloud Accounts.
-func clientBillSyncs(ctx context.Context, st *store.Store) ([]*cost.ClientBillSync, error) {
+// client_payers rows on client-owned Cloud Accounts. A broken AWS identity
+// (unloadable config, or access keys instead of a keyless source) fails the
+// AWS sync's Ready check once per run with payers, as Keel's fault, and
+// never stops the Tencent sync.
+func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSync {
 	own := func(env string) []string {
 		if v := os.Getenv(env); v != "" {
 			return []string{v}
 		}
 		return nil
 	}
-	awsBase, err := awsadapter.Keyless(ctx)
-	if err != nil {
-		return nil, err
-	}
 	in := &cost.Ingester{Store: st}
+	aws := &cost.ClientBillSync{Ingester: in, Provider: "aws", OwnPayers: own("KEEL_AWS_PAYER_ACCOUNT")}
+	if base, err := awsadapter.Keyless(ctx); err != nil {
+		aws.Ready = func(context.Context) error { return fmt.Errorf("loading Keel's AWS identity: %w", err) }
+	} else {
+		aws.Connect = awsClientPayerConnect(base, "", "")
+		aws.Ready = func(ctx context.Context) error {
+			_, err := base.Retrieve(ctx)
+			return err
+		}
+	}
 	return []*cost.ClientBillSync{
 		{Ingester: in, Provider: "tencent", OwnPayers: own("KEEL_TENCENT_PAYER_UIN"), Connect: clientPayerConnect(tencent.Credentials(), "")},
-		{Ingester: in, Provider: "aws", OwnPayers: own("KEEL_AWS_PAYER_ACCOUNT"), Connect: awsClientPayerConnect(awsBase, "", "")},
-	}, nil
+		aws,
+	}
 }
 
 // clientBillSyncLoop runs every client payer sync hourly.
@@ -1174,7 +1178,8 @@ func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.Clie
 // s3Endpoint (scheme://host) override the AWS endpoints in tests.
 func awsClientPayerConnect(base awsadapter.Identity, stsEndpoint, s3Endpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-		role, err := awsadapter.ReadOnlyRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Bucket, p.Region, stsEndpoint)
+		role, err := awsadapter.ReadOnlyRole(base, p.RoleARN, p.PayerID, p.RoleExternalID,
+			awsadapter.Export{Bucket: p.Bucket, Prefix: p.Prefix, Region: p.Region, KMSKeyARN: p.KMSKeyARN}, stsEndpoint)
 		if err != nil {
 			return nil, nil, &cost.RoleError{Err: err}
 		}

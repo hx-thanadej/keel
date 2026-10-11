@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -57,12 +58,64 @@ type ClientRole struct {
 	creds *sdk.CredentialsCache
 }
 
+// Export is where a client management account's Data Exports land: the S3
+// bucket and its region, the export's key prefix (empty means the whole
+// bucket), and the bucket's SSE-KMS key ARN when it has one.
+type Export struct {
+	Bucket, Prefix, Region, KMSKeyARN string
+}
+
+var kmsKeyARN = regexp.MustCompile(`^arn:(aws|aws-cn|aws-us-gov):kms:([a-z0-9-]+):\d{12}:key/(mrk-[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
+
+type statement struct {
+	Effect    string
+	Action    string
+	Resource  string
+	Condition map[string]map[string]string `json:",omitempty"`
+}
+
+// sessionPolicy allows reading e and nothing else: s3:ListBucket on the
+// bucket only for keys under the prefix, s3:GetObject only on objects under
+// it, and, for an SSE-KMS bucket, kms:Decrypt on its key only when S3 in the
+// bucket's region calls KMS for this session (kms:ViaService). An empty
+// prefix allows the whole bucket. partition is the role's ARN partition.
+func sessionPolicy(partition string, e Export) (string, error) {
+	if e.Bucket == "" {
+		return "", fmt.Errorf("export has no bucket")
+	}
+	if strings.ContainsAny(e.Bucket+e.Prefix, "*?$") {
+		return "", fmt.Errorf("export bucket %q or prefix %q holds an IAM wildcard or policy variable", e.Bucket, e.Prefix)
+	}
+	list := statement{Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:" + partition + ":s3:::" + e.Bucket}
+	get := statement{Effect: "Allow", Action: "s3:GetObject", Resource: "arn:" + partition + ":s3:::" + e.Bucket + "/" + e.Prefix + "*"}
+	if e.Prefix != "" {
+		list.Condition = map[string]map[string]string{"StringLike": {"s3:prefix": e.Prefix + "*"}}
+	}
+	statements := []statement{list, get}
+	if e.KMSKeyARN != "" {
+		m := kmsKeyARN.FindStringSubmatch(e.KMSKeyARN)
+		if m == nil || m[1] != partition || m[2] != e.Region {
+			return "", fmt.Errorf("KMS key %q is not arn:%s:kms:%s:<account>:key/<id>, the bucket's partition and region", e.KMSKeyARN, partition, e.Region)
+		}
+		// AWS documents the ViaService name as s3.<region>.amazonaws.com in
+		// every partition.
+		statements = append(statements, statement{Effect: "Allow", Action: "kms:Decrypt", Resource: e.KMSKeyARN,
+			Condition: map[string]map[string]string{"StringEquals": {"kms:ViaService": "s3." + e.Region + ".amazonaws.com"}}})
+	}
+	b, err := json.Marshal(struct {
+		Version   string
+		Statement []statement
+	}{"2012-10-17", statements})
+	return string(b), err
+}
+
 // ReadOnlyRole assumes arn, which must live in account, the client's
-// management account. Every session carries a session policy allowing only
-// s3:ListBucket and s3:GetObject on bucket, so the credentials read the
-// bill export and nothing else, whatever the role itself allows (AWS grants
-// the intersection). stsEndpoint overrides the STS endpoint, for tests.
-func ReadOnlyRole(base Identity, arn, account, externalID, bucket, region, stsEndpoint string) (*ClientRole, error) {
+// management account. Every session carries sessionPolicy(export), and AWS
+// grants the intersection of the role's policies and the session policy, so
+// even a role that allows more reads only the export's prefix (and decrypts
+// only through S3 with the export's key) through Keel. stsEndpoint
+// overrides the STS endpoint, for tests.
+func ReadOnlyRole(base Identity, arn, account, externalID string, export Export, stsEndpoint string) (*ClientRole, error) {
 	m := roleARN.FindStringSubmatch(arn)
 	if m == nil {
 		return nil, fmt.Errorf("read-only role %q is not arn:aws:iam::<account>:role/<name>", arn)
@@ -73,14 +126,11 @@ func ReadOnlyRole(base Identity, arn, account, externalID, bucket, region, stsEn
 	if externalID == "" {
 		return nil, fmt.Errorf("read-only role %s has no ExternalId", arn)
 	}
-	policy, err := json.Marshal(map[string]any{"Version": "2012-10-17", "Statement": []map[string]any{
-		{"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:" + m[1] + ":s3:::" + bucket},
-		{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:" + m[1] + ":s3:::" + bucket + "/*"},
-	}})
+	policy, err := sessionPolicy(m[1], export)
 	if err != nil {
 		return nil, err
 	}
-	client := sts.New(sts.Options{Region: region, Credentials: base}, func(o *sts.Options) {
+	client := sts.New(sts.Options{Region: export.Region, Credentials: base}, func(o *sts.Options) {
 		if stsEndpoint != "" {
 			o.BaseEndpoint = &stsEndpoint
 		}
@@ -88,7 +138,7 @@ func ReadOnlyRole(base Identity, arn, account, externalID, bucket, region, stsEn
 	p := stscreds.NewAssumeRoleProvider(client, arn, func(o *stscreds.AssumeRoleOptions) {
 		o.RoleSessionName = "keel"
 		o.ExternalID = &externalID
-		o.Policy = sdk.String(string(policy))
+		o.Policy = &policy
 		o.Duration = time.Hour
 	})
 	return &ClientRole{creds: sdk.NewCredentialsCache(p)}, nil
