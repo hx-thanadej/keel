@@ -93,6 +93,10 @@ writes there: it does not set up Bill Storage, touch the bucket or change the
 role. Each client payer is data, not an environment variable, so one Keel runs
 any number of them.
 
+[onboard-client-org.md](onboard-client-org.md) gives the end-to-end
+onboarding order, verification and offboarding for Tencent and AWS client
+payers.
+
 1. **The client creates a read-only CAM role in its payer account.** The
    trust policy allows `sts:AssumeRole` from Keel's base role ARN and nothing
    else, and requires Keel's ExternalId for this payer (step 3 returns it as
