@@ -122,6 +122,23 @@ A time-boxed, approved, recorded permission for a Finding or Policy violation to
 stand. Always has an expiry and an approver.
 _Avoid_: waiver, suppression, ignore, allowlist entry
 
+**Data Region**:
+The set of cloud regions a Tenant's data and logs may be stored in under
+PDPA. Defaults to the Thailand set; a Platform Admin changes it.
+_Avoid_: residency zone, home region
+
+**Retention Schedule**:
+How long Keel keeps each class of data it stores. The deletion run is a dry
+run until a Platform Admin enables deletion for the Tenant, and deletes
+nothing under a legal hold or while a breach is open.
+_Avoid_: purge policy, TTL
+
+**Breach Clock**:
+The 72 hours from becoming aware of a personal data breach to notifying the
+PDPC: declared, warning at 48 hours, deadline at 72, ended when the
+notification is recorded (notified) or the breach is closed with a reason.
+_Avoid_: incident timer
+
 ### Access
 
 **Cloud Account**:

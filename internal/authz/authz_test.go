@@ -74,6 +74,15 @@ func TestDecide(t *testing.T) {
 		{"team lead cannot manage teams", principal(home, true, bind(auth.RoleTeamLead, home)), "team.create", authz.Resource{Type: "team", TenantID: home}, false},
 		{"several matching bindings", principal(home, true, bind(auth.RoleTeamLead, tat, teamA), bind(auth.RoleEngineer, tat, teamA)), "service.create", authz.Resource{Type: "service", TenantID: tat, TeamID: teamA}, true},
 		{"finops lead reads", principal(home, true, bind(auth.RoleFinOpsLead, tat)), "project.read", inTAT, true},
+
+		// PDPA (#190): only a platform admin changes the data region set,
+		// deletion or a legal hold; a security lead may run the breach clock.
+		{"platform admin configures pdpa", principal(home, true, bind(auth.RolePlatformAdmin, tat)), "pdpa.configure", authz.Resource{Type: "pdpa", TenantID: tat}, true},
+		{"security lead cannot enable deletion", principal(home, true, bind(auth.RoleSecurityLead, tat)), "pdpa.configure", authz.Resource{Type: "pdpa", TenantID: tat}, false},
+		{"tenant approver cannot enable deletion", principal(tat, false, bind(auth.RoleTenantApprover, tat)), "pdpa.configure", authz.Resource{Type: "pdpa", TenantID: tat}, false},
+		{"security lead declares a breach", principal(home, true, bind(auth.RoleSecurityLead, tat)), "pdpa.breach", authz.Resource{Type: "pdpa", TenantID: tat}, true},
+		{"engineer cannot declare a breach", principal(home, true, bind(auth.RoleEngineer, tat)), "pdpa.breach", authz.Resource{Type: "pdpa", TenantID: tat}, false},
+		{"security lead of another tenant cannot declare", principal(home, true, bind(auth.RoleSecurityLead, acme)), "pdpa.breach", authz.Resource{Type: "pdpa", TenantID: tat}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
