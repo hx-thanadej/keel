@@ -79,6 +79,7 @@ type SyncReport struct {
 	Loads    []SyncedLoad `json:"loads"`
 	Skipped  []string     `json:"skipped"`   // files for already-final periods
 	NotFOCUS []string     `json:"not_focus"` // other bill types, newly seen and never ingested
+	Blocked  []string     `json:"blocked"`   // periods (YYYY-MM) left unloaded because their files overlap
 }
 
 var billExt = []string{".csv", ".csv.gz", ".gz", ".zip", ".parquet"}
@@ -266,12 +267,17 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 		var lines []Line
 		invoiced := true
-		// Per-day files must not share a (sub-account, day): a month-to-date
-		// file in this mode would double count. Export folder parts are split
-		// by size, not by day, so they legitimately share keys.
-		type subDay struct{ sub, day string }
-		supplier := map[subDay]string{}
+		// Per-day files must not both charge a sub-account for the same
+		// interval: a month-to-date file in this mode would double count.
+		// Export folder parts are split by size, so they legitimately share
+		// intervals.
+		type charge struct {
+			sub        string
+			start, end int64
+		}
+		supplier := map[charge]string{}
 		var overlap error
+		var pair [2]string
 		for _, key := range files {
 			raw, err := b.Objects.Get(ctx, key)
 			if err != nil {
@@ -286,11 +292,13 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 					continue
 				}
 				if b.Mode == PerDayFiles && overlap == nil {
-					k := subDay{l.SubAccountID, l.ChargePeriodStart.UTC().Format(time.DateOnly)}
+					k := charge{l.SubAccountID, l.ChargePeriodStart.UnixNano(), l.ChargePeriodEnd.UnixNano()}
 					if first, ok := supplier[k]; !ok {
 						supplier[k] = key
 					} else if first != key {
-						overlap = fmt.Errorf("%s and %s both hold sub-account %s on %s: files overlap; check KEEL_TENCENT_BILL_MODE or the bill types delivered to the prefix", first, key, k.sub, k.day)
+						pair = [2]string{first, key}
+						overlap = fmt.Errorf("%s and %s both charge sub-account %s for %s to %s: %s", first, key, k.sub,
+							l.ChargePeriodStart.UTC().Format(time.RFC3339), l.ChargePeriodEnd.UTC().Format(time.RFC3339), overlapHint)
 					}
 				}
 				lines = append(lines, l)
@@ -298,10 +306,14 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 			}
 		}
 		if overlap != nil {
-			if err := b.recordOverlap(ctx, home, p, overlap); err != nil {
+			changed, err := b.block(ctx, home, p, files, pair, overlap, now())
+			if err != nil {
 				return rep, err
 			}
-			failed = append(failed, fmt.Errorf("period %s: %w", p.Format("2006-01"), overlap))
+			rep.Blocked = append(rep.Blocked, p.Format("2006-01"))
+			if changed {
+				failed = append(failed, fmt.Errorf("period %s: %w", p.Format("2006-01"), overlap))
+			}
 			continue
 		}
 		final := PeriodFinal(b.Provider, p, now(), invoiced && len(lines) > 0)
@@ -312,6 +324,13 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 		if err != nil {
 			return rep, fmt.Errorf("load %s: %w", p.Format("2006-01"), err)
+		}
+		if err := b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'period loaded'
+				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, b.blockedFingerprint(p), now())
+			return err
+		}); err != nil {
+			return rep, err
 		}
 		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Reconcile: "pending"}
 		if b.Invoices != nil {
@@ -324,14 +343,46 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	return rep, errors.Join(failed...)
 }
 
-// recordOverlap records a period left unloaded because its files overlap.
-func (b *BillSync) recordOverlap(ctx context.Context, home string, period time.Time, cause error) error {
-	return b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: home, Source: "keel/cost", Type: "keel.cost.bill_files_overlap",
-			Subject: "cost_period/" + b.Provider + "/" + b.BillingAccountID + "/" + period.Format("2006-01"), Operation: "LoadBill",
+const overlapHint = "files overlap; check KEEL_TENCENT_BILL_MODE or the bill types delivered to the prefix"
+
+func (b *BillSync) blockedFingerprint(period time.Time) string {
+	return "bill_sync_blocked:" + b.Provider + "/" + b.BillingAccountID + "/" + period.Format("2006-01")
+}
+
+// block keeps a period whose files overlap open as one Finding, resolved by
+// the period's next load. It records an Activity and reports changed only
+// when the Finding is new or the period's files differ from those it last
+// saw, so a period retried every hour after finality alerts once.
+func (b *BillSync) block(ctx context.Context, home string, period time.Time, files []string, pair [2]string, cause error, now time.Time) (changed bool, err error) {
+	fp := b.blockedFingerprint(period)
+	month := period.Format("2006-01")
+	err = b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
+		var seen []string
+		err := tx.QueryRow(ctx, `SELECT detail->'files' FROM findings WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp).Scan(&seen)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			changed = true
+		case err != nil:
+			return err
+		default:
+			changed = !slices.Equal(seen, files)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
+			VALUES ($1, 'bill_sync_blocked', $2, 'high', $3, jsonb_build_object('provider', $4::text, 'billing_account', $5::text, 'period', $6::text, 'files', to_jsonb($7::text[]), 'error', $8::text), $9)
+			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = excluded.first_seen_at, detail = excluded.detail`,
+			home, fp, fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, month, pair[0], pair[1], overlapHint),
+			b.Provider, b.BillingAccountID, month, files, cause.Error(), now); err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: home, Source: "keel/cost", Type: "keel.cost.bill_files_overlap",
+			Subject: "cost_period/" + b.Provider + "/" + b.BillingAccountID + "/" + month, Operation: "LoadBill",
 			Kind: activity.Read, Actor: actor, Outcome: activity.Failure, StatusDetail: cause.Error()})
 		return err
 	})
+	return changed, err
 }
 
 const notFOCUSType = "keel.cost.bill_file_skipped"
