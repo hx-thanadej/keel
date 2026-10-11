@@ -401,6 +401,8 @@ func TestControlsLinkOnlyTheFindingKindsThatFitThem(t *testing.T) {
 		{"ISO27001 8.4", "github_governance"},
 		{"SOC2 CC6.3", "standing_access"},
 		{"PDPA s.28", "pdpa_residency"},
+		{"ISO27001 8.15", "landing_zone_drift"},
+		{"CRA CRA-I.1.2c", "unowned_findings"},
 	} {
 		if !slices.Contains(kinds[pair[0]], pair[1]) {
 			t.Errorf("%s should link %s Findings: %v", pair[0], pair[1], kinds[pair[0]])

@@ -54,7 +54,7 @@ controls:
   - {framework: SLSA, id: "SLSA-BUILD-L2", title: "Hosted build platform, signed provenance", covered_by: [keel-release@1]}
   - {framework: SLSA, id: "SLSA-BUILD-L3", title: "Hardened build: isolated, provenance unforgeable by tenants", covered_by: [keel-release@1, keel-admission@1]}
   # EU Cyber Resilience Act, Annex I
-  - {framework: CRA, id: "CRA-I.1.2c", title: "Vulnerabilities addressed by security updates", covered_by: [keel-findings@1, keel-promotion@1]}
+  - {framework: CRA, id: "CRA-I.1.2c", title: "Vulnerabilities addressed by security updates", covered_by: [keel-findings@1, keel-promotion@1], findings: [unowned_findings]}
   - {framework: CRA, id: "CRA-I.1.2f", title: "Protection of integrity of data, programs and configuration", covered_by: [keel-release@1, keel-admission@1, keel-activity@1]}
   - {framework: CRA, id: "CRA-I.2.1", title: "Identify and document components, including an SBOM", covered_by: [keel-sbom@1]}
   - {framework: CRA, id: "CRA-I.2.2", title: "Address and remediate vulnerabilities without delay", covered_by: [keel-findings@1, keel-sbom@1], findings: [vulnerability, unowned_findings]}
@@ -144,7 +144,7 @@ controls:
   - {framework: ISO27001, id: "8.12", title: "Data leakage prevention", covered_by: [], gap_reason: "Secret push protection covers credentials only (5.17)"}
   - {framework: ISO27001, id: "8.13", title: "Information backup", covered_by: [], gap_reason: "No backup Policy"}
   - {framework: ISO27001, id: "8.14", title: "Redundancy of information processing facilities", covered_by: [], gap_reason: "No redundancy Policy"}
-  - {framework: ISO27001, id: "8.15", title: "Logging", covered_by: [keel-activity@1, keel-baseline@1]}
+  - {framework: ISO27001, id: "8.15", title: "Logging", covered_by: [keel-activity@1, keel-baseline@1], findings: [landing_zone_drift]}
   - {framework: ISO27001, id: "8.16", title: "Monitoring activities", covered_by: [], gap_reason: "Audit logs are protected but not monitored by a Keel Policy"}
   - {framework: ISO27001, id: "8.17", title: "Clock synchronization", covered_by: [], gap_reason: "Provided by the cloud provider; no Policy"}
   - {framework: ISO27001, id: "8.18", title: "Use of privileged utility programs", covered_by: [], gap_reason: "No Policy"}
