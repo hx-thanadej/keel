@@ -18,8 +18,11 @@ var ErrClientOwned = errors.New("the Cloud Account is client-owned and Keel is r
 // Account calls before the write. It reads ownership at call time, so an
 // account flipped to client-owned is refused on the next run whatever
 // markers it still carries. The read waits for an uncommitted ownership
-// switch, so a caller that commits its intent first (an Access Grant stays
-// requested until its assignment is done) is seen by the switch. A refusal
+// switch. Only grant activation is serialized with it: an Access Grant stays
+// requested until its assignment is done, and the switch refuses while one is
+// requested or active. Every other flow checks before each write, and a switch
+// can land between the check and the call; the next run refuses it. Waste
+// cleanup re-checks before each resource it deletes. A refusal
 // is recorded as an Activity in its own transaction, so it survives the
 // caller's error path, and the error wraps ErrClientOwned.
 func RequirePlatformOwned(ctx context.Context, st *store.Store, tenant, accountID, operation string, by activity.Actor) error {

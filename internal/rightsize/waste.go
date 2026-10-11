@@ -214,7 +214,8 @@ func (e WasteEngine) tenant(ctx context.Context, tenant string, res *WasteResult
 		return nil
 	}
 	// Cleanup: every gate must hold.
-	eligibleEnv := map[string]string{} // env → account
+	eligibleEnv := map[string]acct{} // env → account
+	stopped := map[string]bool{}     // account ids refused mid-loop
 	for _, a := range accounts {
 		if a.env == nil || !a.optedIn || a.prod {
 			continue
@@ -226,7 +227,7 @@ func (e WasteEngine) tenant(ctx context.Context, tenant string, res *WasteResult
 		if err != nil {
 			return err
 		}
-		eligibleEnv[*a.env] = a.external
+		eligibleEnv[*a.env] = a
 	}
 	open, err := e.Service.List(ctx, tenant, Filter{State: "open"})
 	if err != nil {
@@ -238,12 +239,20 @@ func (e WasteEngine) tenant(ctx context.Context, tenant string, res *WasteResult
 			continue
 		}
 		account, ok := eligibleEnv[*r.EnvironmentID]
-		if !ok || at.Sub(r.GeneratedAt) < time.Duration(e.GraceDays)*24*time.Hour {
+		if !ok || stopped[account.id] || at.Sub(r.GeneratedAt) < time.Duration(e.GraceDays)*24*time.Hour {
 			continue
 		}
-		cleaner := cleaners[account]
+		cleaner := cleaners[account.external]
 		if cleaner == nil {
 			continue
+		}
+		err := catalog.RequirePlatformOwned(ctx, e.Service.Store, tenant, account.id, "CleanUpWaste", wasteActor)
+		if errors.Is(err, catalog.ErrClientOwned) {
+			stopped[account.id] = true
+			continue
+		}
+		if err != nil {
+			return err
 		}
 		snap, err := cleaner.Delete(ctx, WasteItem{ResourceID: r.ResourceID, ResourceType: r.ResourceType, Kind: kind})
 		if err != nil {
