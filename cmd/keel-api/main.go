@@ -64,10 +64,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -855,22 +855,24 @@ func verifyEvidence(args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: keel-api verify-evidence <bundle.json> <base64 ed25519 public key>")
 	}
-	raw, err := os.ReadFile(args[0])
+	f, err := os.Open(args[0])
 	if err != nil {
 		return err
 	}
-	var b evidence.Bundle
-	if err := json.Unmarshal(raw, &b); err != nil {
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(f, evidence.MaxBundleBytes+1))
+	if err != nil {
 		return err
 	}
 	pub, err := base64.StdEncoding.DecodeString(args[1])
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return errors.New("public key must be base64 of 32 bytes")
 	}
-	if err := evidence.Verify(pub, b); err != nil {
+	b, err := evidence.Verify(pub, raw)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("OK: %s for tenant %s, %s → %s, %d sections\n", b.Manifest.Format, b.Manifest.Tenant, b.Manifest.From.Format("2006-01-02"), b.Manifest.To.Format("2006-01-02"), len(b.Sections))
+	fmt.Printf("OK: %s for tenant %s, frameworks [%s], %s → %s, %d sections\n", b.Manifest.Format, b.Manifest.Tenant, strings.Join(b.Manifest.Frameworks, " "), b.Manifest.From.Format("2006-01-02"), b.Manifest.To.Format("2006-01-02"), len(b.Sections))
 	return nil
 }
 

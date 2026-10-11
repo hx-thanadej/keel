@@ -350,7 +350,7 @@ export const insights = {
   reports: (t: string) => request<ReportSummary[]>(`/v1/tenants/${t}/reports`),
   regenerateReport: (t: string, period: string) => request<unknown>(`/v1/tenants/${t}/reports/${period}/regenerate`, { method: 'POST', body: '{}' }),
   reportURL: (t: string, period: string) => `/v1/tenants/${t}/reports/${period}?format=html`,
-  evidenceURL: (t: string, from: string, to: string) => `/v1/tenants/${t}/evidence?from=${from}&to=${to}`,
+  evidenceURL: (t: string, from: string, to: string, framework = '') => `/v1/tenants/${t}/evidence?from=${from}&to=${to}${framework ? `&framework=${framework}` : ''}`,
   maturity: (t: string) => request<MaturityView>(`/v1/tenants/${t}/maturity`),
   submitMaturity: (t: string, quarter: string, answers: Record<string, MaturityAnswer>) =>
     request<MaturityAssessment>(`/v1/tenants/${t}/maturity/${quarter}`, { method: 'PUT', body: JSON.stringify({ answers }) }),

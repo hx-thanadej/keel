@@ -319,9 +319,13 @@ describe('finops screens', () => {
     expect(screen.getByText(/60 ↑/)).toBeTruthy()
     expect((screen.getByRole('link', { name: 'Download report 2026-09' }) as HTMLAnchorElement).getAttribute('href')).toBe(`/v1/tenants/${tat}/reports/2026-09?format=html`)
     expect((screen.getByRole('link', { name: 'Export evidence' }) as HTMLAnchorElement).getAttribute('href')).toMatch(new RegExp(`^/v1/tenants/${tat}/evidence\\?from=\\d{4}-\\d{2}-01&to=`))
+    await userEvent.selectOptions(screen.getByLabelText('Framework'), 'pdpa')
+    const evidence = screen.getByRole('link', { name: 'Export evidence' }) as HTMLAnchorElement
+    expect(evidence.getAttribute('href')).toMatch(new RegExp(`^/v1/tenants/${tat}/evidence\\?from=\\d{4}-\\d{2}-01&to=\\d{4}-\\d{2}-01&framework=pdpa$`))
+    expect(evidence.getAttribute('download')).toMatch(/^keel-evidence-pdpa-/)
     expect(screen.getByText('Operational')).toBeTruthy() // Q3 trend cell
     expect(screen.getByText('Keel measures Scalable')).toBeTruthy()
-    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('3') // pre-filled from the measure
+    expect((screen.getByLabelText(/How do teams come to use the platform/) as HTMLSelectElement).value).toBe('3') // pre-filled from the measure
     await userEvent.type(screen.getByLabelText(/Search decisions/), 'queue')
     await userEvent.click(screen.getByRole('button', { name: 'Search' }))
     expect(await screen.findByText(/crm-api: ADR-0003 Use River for jobs/)).toBeTruthy()

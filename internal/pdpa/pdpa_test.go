@@ -545,15 +545,16 @@ func TestEvidenceExportCarriesEveryPDPAControl(t *testing.T) {
 
 	pub, key, _ := ed25519.GenerateKey(nil)
 	from := c.now().AddDate(0, 0, -1)
-	bundle, err := evidence.Exporter{Store: s, Controls: cs, PDPA: svc, Key: key, Now: c.now}.Export(ctx, tat, from, from.AddDate(0, 0, 2), admin)
+	bundle, err := evidence.Exporter{Store: s, Controls: cs, PDPA: svc, Key: key, Now: c.now}.Export(ctx, tat, "pdpa", from, from.AddDate(0, 0, 2), admin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bundle.Manifest.Format != "keel-evidence@1" || evidence.Verify(pub, bundle) != nil {
-		t.Fatalf("bundle %s does not verify", bundle.Manifest.Format)
+	signed, _ := json.Marshal(bundle)
+	if _, err := evidence.Verify(pub, signed); err != nil || bundle.Manifest.Format != "keel-evidence@2" || !slices.Equal(bundle.Manifest.Frameworks, []string{"PDPA"}) {
+		t.Fatalf("bundle %s %v does not verify", bundle.Manifest.Format, bundle.Manifest.Frameworks)
 	}
-	var sec pdpa.Evidence
-	if err := json.Unmarshal(bundle.Sections["pdpa"], &sec); err != nil {
+	var fw evidence.FrameworkSection
+	if err := json.Unmarshal(bundle.Sections["frameworks/PDPA"], &fw); err != nil {
 		t.Fatal(err)
 	}
 	var want []string
@@ -562,13 +563,26 @@ func TestEvidenceExportCarriesEveryPDPAControl(t *testing.T) {
 			want = append(want, ctl.ID)
 		}
 	}
-	if len(want) != len(sec.Controls) || len(want) == 0 {
-		t.Fatalf("pdpa section has %d controls, registry %d", len(sec.Controls), len(want))
+	if len(want) != len(fw.Controls) || len(want) == 0 {
+		t.Fatalf("PDPA section has %d controls, registry %d", len(fw.Controls), len(want))
 	}
-	for i, ce := range sec.Controls {
-		if ce.ID != want[i] || (len(ce.Evidence) == 0) == (ce.GapReason == "") {
-			t.Errorf("control %+v: needs evidence or a gap reason, not both", ce)
+	refs := map[string]int{}
+	for i, ce := range fw.Controls {
+		if ce.ID != want[i] || (len(ce.CoveredBy) == 0) != (len(ce.Evidence) == 0) || (ce.Gap && ce.GapReason == "") {
+			t.Errorf("control %+v: needs evidence or a gap reason", ce)
 		}
+		for _, r := range ce.Evidence {
+			if r.Items != nil {
+				refs[r.Section] = *r.Items
+			}
+		}
+	}
+	if refs["pdpa.breaches"] != 1 || refs["pdpa.retention_runs"] == 0 || refs["pdpa.retention_schedule"] != len(pdpa.Schedule) {
+		t.Fatalf("PDPA controls point at %v", refs)
+	}
+	var sec pdpa.Evidence
+	if err := json.Unmarshal(bundle.Sections["pdpa"], &sec); err != nil {
+		t.Fatal(err)
 	}
 	if len(sec.Breaches) != 1 || len(sec.Schedule) != len(pdpa.Schedule) || string(sec.RetentionRuns) == "[]" {
 		t.Fatalf("pdpa section %s", bundle.Sections["pdpa"])

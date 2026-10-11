@@ -55,6 +55,9 @@ func TestControlsFilterByFramework(t *testing.T) {
 	if code, pdpa := get("?framework=PDPA"); code != 200 || len(pdpa.Controls) != 12 || pdpa.Frameworks[0].Mapped != 5 {
 		t.Fatalf("PDPA: %d %+v", code, pdpa.Frameworks)
 	}
+	if code, lower := get("?framework=iso27001"); code != 200 || len(lower.Controls) != 93 {
+		t.Fatalf("iso27001: %d %d controls", code, len(lower.Controls))
+	}
 	if code, _ := get("?framework=SOC3"); code != 400 {
 		t.Fatalf("unknown framework: %d", code)
 	}
