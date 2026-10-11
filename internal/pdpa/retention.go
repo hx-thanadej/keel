@@ -79,6 +79,8 @@ type RetentionRun struct {
 	Classes []ClassRun `json:"classes"`
 }
 
+func retentionType(m Mode) string { return "keel.pdpa.retention." + string(m) }
+
 // RunRetention applies the schedule to every Tenant, one Activity per Tenant.
 func (s Service) RunRetention(ctx context.Context) ([]RetentionRun, error) {
 	list, err := tenants(ctx, s.Store)
@@ -153,7 +155,7 @@ func (s Service) Retain(ctx context.Context, tenant string) (RetentionRun, error
 		if run.Mode == Deleted {
 			kind, verb = activity.Delete, "deleted"
 		}
-		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/pdpa", Type: "keel.pdpa.retention." + string(run.Mode), Subject: "tenant/" + tenant,
+		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/pdpa", Type: retentionType(run.Mode), Subject: "tenant/" + tenant,
 			Operation: "ApplyRetention", Kind: kind, Actor: keelActor, Outcome: activity.Success, Time: now,
 			StatusDetail: fmt.Sprintf("%s (%s): %s", verb, run.Why, strings.Join(parts, ", "))})
 		return err

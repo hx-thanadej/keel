@@ -3,7 +3,8 @@ import {
   insights,
   monthStarts,
   ApiError,
-  fetchBlob,
+  frameworks,
+  saveDownload,
   type DecisionEntry,
   type DoraReport,
   type MaturityAnswer,
@@ -21,17 +22,6 @@ const monthName = (iso: string) => new Date(iso).toLocaleString('en-GB', { month
 /** Insights: DORA trend, scorecards, decisions, monthly reports, evidence and maturity (#155). */
 type Section = 'dora' | 'cards' | 'reports' | 'maturity'
 type Errors = Partial<Record<Section, string>>
-
-async function save(url: string, filename: string) {
-  const href = URL.createObjectURL(await fetchBlob(url))
-  const a = document.createElement('a')
-  a.href = href
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(href), 1000)
-}
 
 const SectionError = ({ text }: { text?: string }) => (text ? <p className="notice error" role="alert">{text}</p> : null)
 
@@ -84,7 +74,7 @@ export function InsightsView({ tenantId, canSubmit, canGenerate }: { tenantId: s
   const download = (key: string, url: string, filename: string) => (e: React.MouseEvent) => {
     e.preventDefault()
     setActionError(key)
-    save(url, filename).catch((err) => setActionError(key, message(err)))
+    saveDownload(url, filename).catch((err) => setActionError(key, message(err)))
   }
 
   const regenerate = async (period: string) => {
@@ -285,16 +275,6 @@ function Decisions({ tenantId }: { tenantId: string }) {
   )
 }
 
-const evidenceFrameworks = [
-  ['iso27001', 'ISO/IEC 27001:2022'],
-  ['soc2', 'SOC 2'],
-  ['pdpa', 'PDPA'],
-  ['ssdf', 'NIST SSDF'],
-  ['slsa', 'SLSA'],
-  ['cra', 'EU CRA'],
-  ['owasp-cicd', 'OWASP CI/CD Top 10'],
-] as const
-
 function Evidence({ tenantId, download, error }: { tenantId: string; download: (key: string, url: string, filename: string) => (e: React.MouseEvent) => void; error?: string }) {
   const [from, setFrom] = useState(monthStarts(3)[0])
   const [to, setTo] = useState(monthStarts(1)[1])
@@ -314,7 +294,7 @@ function Evidence({ tenantId, download, error }: { tenantId: string; download: (
           Framework{' '}
           <select value={framework} onChange={(e) => setFramework(e.target.value)}>
             <option value="">All frameworks</option>
-            {evidenceFrameworks.map(([id, name]) => (
+            {frameworks.map(([id, name]) => (
               <option key={id} value={id}>
                 {name}
               </option>

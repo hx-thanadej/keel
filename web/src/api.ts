@@ -74,6 +74,18 @@ export async function fetchBlob(path: string): Promise<Blob> {
   return res.blob()
 }
 
+/** Fetches a file and saves it; the object URL is revoked only after the click has used it. */
+export async function saveDownload(path: string, filename: string) {
+  const href = URL.createObjectURL(await fetchBlob(path))
+  const a = document.createElement('a')
+  a.href = href
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(href), 1000)
+}
+
 const list = async <T,>(path: string) => (await request<{ items: T[] }>(path)).items
 
 export const api = {
@@ -252,7 +264,6 @@ export type VexStatement = {
 export type Attestation = { id: string; image_digest: string; passed: boolean; checks: { name: string; pass: boolean; detail: string }[]; created_at: string }
 
 export const security = {
-  controls: (t: string) => request<ControlReport>(`/v1/tenants/${t}/controls`),
   exceptions: (t: string) => list<Exception>(`/v1/tenants/${t}/exceptions`),
   requestException: (t: string, b: { fingerprint: string; reason: string; expires_at: string }) => post<Exception>(`/v1/tenants/${t}/exceptions`, b),
   decideException: (t: string, id: string, decision: 'approve' | 'reject', note: string) => post<Exception>(`/v1/tenants/${t}/exceptions/${id}/${decision}`, { note }),
@@ -364,4 +375,50 @@ export function monthStarts(n: number, today = new Date()): string[] {
     out.push(d.toISOString().slice(0, 10))
   }
   return out
+}
+
+/** The frameworks Keel maps Controls to (ADR-0017); ids match the API's ?framework= without case. */
+export const frameworks = [
+  ['iso27001', 'ISO/IEC 27001:2022'],
+  ['soc2', 'SOC 2'],
+  ['pdpa', 'PDPA'],
+  ['ssdf', 'NIST SSDF'],
+  ['slsa', 'SLSA'],
+  ['cra', 'EU CRA'],
+  ['owasp-cicd', 'OWASP CI/CD Top 10'],
+] as const
+export type FrameworkId = (typeof frameworks)[number][0]
+
+export type BreachState = 'declared' | 'warning' | 'deadline' | 'notified' | 'closed'
+export type Breach = {
+  id: string
+  title: string
+  description: string
+  state: BreachState
+  aware_at: string
+  notify_by: string
+  declared_at: string
+  declared_by: string
+  notified_at?: string
+  pdpc_reference?: string
+  close_reason?: string
+  ended_at?: string
+}
+export type PdpaSettings = { data_regions: string[]; deletion_enabled: boolean; legal_hold: string; updated_at?: string; updated_by?: string }
+export type RetentionMode = 'dry_run' | 'deleted' | 'held'
+export type PdpaOverview = {
+  settings: PdpaSettings
+  breaches: Breach[] | null
+  last_retention_run: { ran_at: string; mode: RetentionMode; detail: string } | null
+}
+/** A partial settings change. Lifting a hold is legal_hold "" with a lift_reason; the API refuses it without one. */
+export type PdpaChange =
+  | { data_regions?: string[]; deletion_enabled?: boolean }
+  | { legal_hold: string }
+  | { legal_hold: ''; lift_reason: string }
+
+export const compliance = {
+  controls: (t: string) => request<ControlReport>(`/v1/tenants/${t}/controls`),
+  pdpa: (t: string) => request<PdpaOverview>(`/v1/tenants/${t}/pdpa`),
+  configurePdpa: (t: string, change: PdpaChange) => request<PdpaSettings>(`/v1/tenants/${t}/pdpa/settings`, { method: 'PATCH', body: JSON.stringify(change) }),
 }

@@ -10,8 +10,9 @@ import { DeliveryView } from './DeliveryView'
 import { SecurityView } from './SecurityView'
 import { AccessView } from './AccessView'
 import { InsightsView } from './InsightsView'
+import { ComplianceView } from './ComplianceView'
 
-type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'delivery' | 'security' | 'access' | 'insights' | 'catalog' | 'activity'
+type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'delivery' | 'security' | 'compliance' | 'access' | 'insights' | 'catalog' | 'activity'
 const tabs: [Tab, string][] = [
   ['budgets', 'Budgets'],
   ['costs', 'Costs'],
@@ -19,6 +20,7 @@ const tabs: [Tab, string][] = [
   ['savings', 'Savings'],
   ['delivery', 'Delivery'],
   ['security', 'Security'],
+  ['compliance', 'Compliance'],
   ['access', 'Access'],
   ['insights', 'Insights'],
   ['catalog', 'Projects'],
@@ -88,6 +90,7 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
             {tab === 'savings' && <SavingsView key={current.id} tenantId={current.id} />}
             {tab === 'delivery' && <DeliveryView key={current.id} tenantId={current.id} />}
             {tab === 'security' && <SecurityView key={current.id} tenantId={current.id} />}
+            {tab === 'compliance' && <ComplianceView key={current.id} tenantId={current.id} canConfigure={me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin')} />}
             {tab === 'access' && <AccessView key={current.id} tenantId={current.id} />}
             {tab === 'insights' && <InsightsView key={current.id} tenantId={current.id} canSubmit={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'tenant_approver'))} canGenerate={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'finops_lead'))} />}
             {tab === 'catalog' && <TenantView key={current.id} tenant={current} />}

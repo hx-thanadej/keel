@@ -239,7 +239,7 @@ describe('finops screens', () => {
     expect(screen.getByRole('button', { name: 'Create repository and service' })).toBeTruthy()
   })
 
-  it('security tab shows VSA results, approves exceptions, requires VEX justification and lists control gaps', async () => {
+  it('security tab shows VSA results, approves exceptions, requires VEX justification', async () => {
     const calls = mockFetch({
       ...routes([]),
       [`/v1/tenants/${tat}/services`]: { items: [{ id: 's1', project_id: 'p1', slug: 'crm-api', name: 'CRM API', repository: '', template: '' }] },
@@ -249,20 +249,12 @@ describe('finops screens', () => {
       [`/v1/tenants/${tat}/exceptions`]: { items: [{ id: 'x1', fingerprint: 'vuln:CVE-2026-1:', finding_ids: [], reason: 'patch next sprint', state: 'requested', requested_by: 'user:eng@harmonyx.co', decided_by: null, expires_at: '2026-11-01T00:00:00Z' }] },
       [`/v1/tenants/${tat}/exceptions/x1/approve`]: { id: 'x1', state: 'approved' },
       [`/v1/tenants/${tat}/vex`]: { items: [] },
-      [`/v1/tenants/${tat}/controls`]: { version: 'keel-controls@2', services: 1,
-        frameworks: [{ id: 'ISO27001', name: 'ISO/IEC 27001:2022 Annex A', controls: 2, mapped: 1, covered: 1, gaps: 1 }],
-        controls: [
-          { id: '8.8', framework: 'ISO27001', title: 'Management of technical vulnerabilities', covered_by: ['keel-scans@1'], coverage: [{ name: 'keel-scans@1', point: 'pipeline', covered_services: 1 }], gap: false },
-          { id: '6.1', framework: 'ISO27001', title: 'Screening', covered_by: [], gap_reason: 'People: HR process outside Keel', coverage: [], gap: true }] },
     })
     vi.stubGlobal('prompt', () => 'internal only')
     render(<App />)
     await userEvent.click(await screen.findByRole('tab', { name: 'Security' }))
     expect(await screen.findByText(/VSA failed: trigger/)).toBeTruthy()
     expect(screen.getByText(/triggered by pull_request_target/)).toBeTruthy()
-    expect(screen.getByText(/2 controls, 1 without coverage, across 1 services/)).toBeTruthy()
-    expect(screen.getByText('ISO/IEC 27001:2022 Annex A: 1 of 2 covered, 1 mapped to a Keel policy')).toBeTruthy()
-    expect(screen.getByText('no Keel policy: People: HR process outside Keel')).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: 'Approve exception' }))
     expect(calls).toContain(`/v1/tenants/${tat}/exceptions/x1/approve`)
     expect((screen.getByLabelText('Justification') as HTMLSelectElement).required).toBe(true)
@@ -444,6 +436,151 @@ describe('finops screens', () => {
     await userEvent.click(await screen.findByRole('tab', { name: 'Insights' }))
     expect(await screen.findByText('Operational')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Save .* assessment/ })).toBeNull()
+  })
+
+  const controlReport = {
+    version: 'keel-controls@2',
+    services: 3,
+    frameworks: [
+      { id: 'ISO27001', name: 'ISO/IEC 27001:2022 Annex A', controls: 3, mapped: 2, covered: 1, gaps: 2 },
+      { id: 'PDPA', name: 'Thailand Personal Data Protection Act B.E. 2562 (2019)', controls: 2, mapped: 2, covered: 2, gaps: 0 },
+    ],
+    controls: [
+      { id: '8.8', framework: 'ISO27001', title: 'Management of technical vulnerabilities', covered_by: ['keel-scans@1'], coverage: [{ name: 'keel-scans@1', point: 'pipeline', covered_services: 3 }], gap: false },
+      { id: '6.1', framework: 'ISO27001', title: 'Screening', covered_by: [], gap_reason: 'People: HR process outside Keel', coverage: [], gap: true },
+      { id: '8.32', framework: 'ISO27001', title: 'Change management', covered_by: ['keel-promotion@1'], coverage: [{ name: 'keel-promotion@1', point: 'promotion', covered_services: 0 }], gap: true },
+      { id: 's.37(4)', framework: 'PDPA', title: 'Notify the PDPC of a breach within 72 hours', covered_by: ['keel-pdpa-breach@1'], coverage: [{ name: 'keel-pdpa-breach@1', point: 'platform', covered_services: 3 }], gap: false },
+      { id: 's.37(3)', framework: 'PDPA', title: 'Erase personal data past its retention period', covered_by: ['keel-pdpa-retention@1'], coverage: [{ name: 'keel-pdpa-retention@1', point: 'platform', covered_services: 3 }], gap: false },
+    ],
+  }
+  const hours = (h: number) => new Date(Date.now() + h * 3600000).toISOString()
+  const pdpaOverview = (legalHold = '') => ({
+    settings: { data_regions: ['ap-bangkok', 'ap-southeast-7'], deletion_enabled: false, legal_hold: legalHold },
+    retention_schedule: [],
+    breaches: [
+      { id: 'b1', title: 'CRM export emailed to the wrong partner', description: '', state: 'warning', aware_at: hours(-50), notify_by: hours(22), declared_at: hours(-50), declared_by: 'user:sec@tat.or.th' },
+      { id: 'b2', title: 'Old laptop lost', description: '', state: 'notified', aware_at: hours(-200), notify_by: hours(-128), declared_at: hours(-200), declared_by: 'user:sec@tat.or.th', notified_at: hours(-190), pdpc_reference: 'PDPC-1' },
+    ],
+    last_retention_run: { ran_at: '2026-10-10T02:00:00Z', mode: 'dry_run', detail: 'would delete (deletion is off for this Tenant): findings 4, sessions 12' },
+  })
+  const compliancePage = async () => {
+    await userEvent.click(await screen.findByRole('tab', { name: 'Compliance' }))
+    await screen.findByRole('status')
+  }
+
+  it('compliance picker switches frameworks and their counts, and filters to gaps with reasons', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/controls`]: controlReport, [`/v1/tenants/${tat}/pdpa`]: pdpaOverview() })
+    render(<App />)
+    await compliancePage()
+    expect(screen.getByRole('status').textContent).toMatch(/ISO\/IEC 27001:2022 Annex A: 1 of 3 controls covered, 2 gaps\. 2 mapped to a Keel policy, across 3 services\./)
+    const table = screen.getByRole('table')
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Control', 'Status', 'Keel policies (services covered)', 'Gap reason'])
+    expect(within(table).getByRole('rowheader', { name: '8.8 Management of technical vulnerabilities' })).toBeTruthy()
+    expect(within(table).getByText('keel-scans@1 @pipeline (3)')).toBeTruthy()
+    expect(within(table).getAllByText('✕ Gap')).toHaveLength(2)
+
+    await userEvent.click(screen.getByLabelText('Show gaps only'))
+    expect(within(table).queryByText(/Management of technical vulnerabilities/)).toBeNull()
+    const screening = within(table).getByRole('rowheader', { name: '6.1 Screening' }).closest('tr') as HTMLElement
+    expect(within(screening).getByText('People: HR process outside Keel')).toBeTruthy()
+    const change = within(table).getByRole('rowheader', { name: '8.32 Change management' }).closest('tr') as HTMLElement
+    expect(within(change).getByText('Mapped to a Keel policy that has not covered any Service yet')).toBeTruthy()
+
+    await userEvent.selectOptions(screen.getByLabelText('Framework'), 'PDPA')
+    expect(screen.getByRole('status').textContent).toMatch(/Thailand Personal Data Protection Act B\.E\. 2562 \(2019\): 2 of 2 controls covered, 0 gaps\./)
+    expect(screen.getByText('No gaps in this framework.')).toBeTruthy()
+    await userEvent.click(screen.getByLabelText('Show gaps only'))
+    expect(screen.getByRole('rowheader', { name: 's.37(4) Notify the PDPC of a breach within 72 hours' })).toBeTruthy()
+    expect(screen.queryByText(/Screening/)).toBeNull()
+  })
+
+  it('compliance exports the chosen framework\'s evidence and shows a server error next to the button', async () => {
+    const create = vi.fn(() => 'blob:x')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() }))
+    const calls = mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/controls`]: controlReport,
+      [`/v1/tenants/${tat}/pdpa`]: pdpaOverview(),
+      [`/v1/tenants/${tat}/evidence`]: (u: URL) =>
+        u.searchParams.get('framework') === 'soc2' ? new Response('{"error":"signing key unavailable"}', { status: 500 }) : new Response('{"version":"keel-evidence@2"}', { status: 200 }),
+    })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      render(<App />)
+      await compliancePage()
+      await userEvent.selectOptions(screen.getByLabelText('Framework'), 'PDPA')
+      await userEvent.click(screen.getByRole('button', { name: 'Export PDPA evidence' }))
+      await waitFor(() => expect(create).toHaveBeenCalledTimes(1))
+      expect(calls.filter((c) => c.includes('/evidence'))).toEqual([expect.stringMatching(new RegExp(`^/v1/tenants/${tat}/evidence\\?from=\\d{4}-\\d{2}-01&to=\\d{4}-\\d{2}-01&framework=pdpa$`))])
+
+      await userEvent.selectOptions(screen.getByLabelText('Framework'), 'SOC 2')
+      await userEvent.click(screen.getByRole('button', { name: 'Export SOC 2 evidence' }))
+      expect((await screen.findByRole('alert')).textContent).toBe('signing key unavailable')
+      expect(calls.at(-1)).toMatch(/framework=soc2$/)
+      expect(create).toHaveBeenCalledTimes(1)
+    } finally {
+      click.mockRestore()
+    }
+  })
+
+  it('compliance PDPA panel falls back to the raw mode for an unknown retention mode', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/controls`]: controlReport, [`/v1/tenants/${tat}/pdpa`]: { ...pdpaOverview(), last_retention_run: { ran_at: '2026-10-10T02:00:00Z', mode: 'archived', detail: 'moved 3 rows' } } })
+    render(<App />)
+    await compliancePage()
+    await userEvent.selectOptions(screen.getByLabelText('Framework'), 'PDPA')
+    expect(await screen.findByText(/10 Oct 2026.*archived\. moved 3 rows/)).toBeTruthy()
+    expect(screen.queryByText(/undefined/)).toBeNull()
+  })
+
+  it('compliance PDPA panel shows region, hold, open breaches with time left and the last retention run, read-only for a viewer', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/controls`]: controlReport, [`/v1/tenants/${tat}/pdpa`]: pdpaOverview('Litigation TAT-2026-14') })
+    render(<App />)
+    await compliancePage()
+    await userEvent.selectOptions(screen.getByLabelText('Framework'), 'PDPA')
+    expect(await screen.findByText('ap-bangkok, ap-southeast-7')).toBeTruthy()
+    expect(screen.getByText('In place: Litigation TAT-2026-14')).toBeTruthy()
+    expect(screen.getByText('Off: retention runs are dry runs')).toBeTruthy()
+    const breach = screen.getByText('CRM export emailed to the wrong partner').closest('article') as HTMLElement
+    expect(within(breach).getByText('Warning: over 48 hours since aware')).toBeTruthy()
+    expect(within(breach).getByText(/22 h left to notify the PDPC/)).toBeTruthy()
+    expect(screen.queryByText('Old laptop lost')).toBeNull()
+    expect(screen.getByText(/10 Oct 2026.*Dry run, nothing deleted\. would delete \(deletion is off for this Tenant\): findings 4, sessions 12/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /legal hold|Save PDPA settings/ })).toBeNull()
+    expect(screen.queryByRole('textbox')).toBeNull()
+  })
+
+  it('compliance lets a platform admin lift a legal hold only with a reason', async () => {
+    const bodies: Record<string, unknown> = {}
+    const calls = mockFetch(
+      { '/auth/me': operator, ...tenantRoutes, [`/v1/tenants/${tat}/controls`]: controlReport, [`/v1/tenants/${tat}/pdpa`]: pdpaOverview('Litigation TAT-2026-14'), [`/v1/tenants/${tat}/pdpa/settings`]: { data_regions: ['ap-bangkok'], deletion_enabled: false, legal_hold: '' } },
+      bodies,
+    )
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'TAT' }))
+    await compliancePage()
+    await userEvent.selectOptions(screen.getByLabelText('Framework'), 'PDPA')
+    await userEvent.click(await screen.findByRole('button', { name: 'Lift legal hold' }))
+    expect(calls.filter((c) => c.endsWith('/pdpa/settings'))).toEqual([])
+    await userEvent.type(screen.getByLabelText('Reason for lifting the hold'), '   ')
+    await userEvent.click(screen.getByRole('button', { name: 'Lift legal hold' }))
+    expect(calls.filter((c) => c.endsWith('/pdpa/settings'))).toEqual([])
+
+    await userEvent.type(screen.getByLabelText('Reason for lifting the hold'), 'Case TAT-2026-14 settled')
+    await userEvent.click(screen.getByRole('button', { name: 'Lift legal hold' }))
+    await waitFor(() => expect(bodies[`/v1/tenants/${tat}/pdpa/settings`]).toEqual({ legal_hold: '', lift_reason: 'Case TAT-2026-14 settled' }))
+  })
+
+  it('compliance shows the not-allowed message per section on a 403', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/controls`]: new Response('{"error":"forbidden"}', { status: 403 }) })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Compliance' }))
+    expect((await screen.findByRole('alert')).textContent).toBe('You are not allowed to see this here.')
+    expect(screen.queryByText('No gaps in this framework.')).toBeNull()
+    await userEvent.selectOptions(screen.getByLabelText('Framework'), 'PDPA')
+    await waitFor(() => expect(screen.getAllByRole('alert').map((a) => a.textContent)).toEqual(['You are not allowed to see this here.', 'You are not allowed to see this here.']))
+    expect(screen.queryByText('No open personal data breaches.')).toBeNull()
+    expect(screen.queryByText('Retention has not run yet.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Export PDPA evidence' })).toBeTruthy()
   })
 
   it('findings tab lists anomalies with severity label and contributors', async () => {

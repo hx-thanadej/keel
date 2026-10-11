@@ -178,12 +178,21 @@ func (s Service) Configure(ctx context.Context, tenant string, ch Change, by act
 	return out, nil
 }
 
-// Overview is what the API shows: settings, the retention schedule and every
-// breach.
+// Overview is what the API shows: settings, the retention schedule, every
+// breach and the newest retention run.
 type Overview struct {
-	Settings Settings `json:"settings"`
-	Schedule []Class  `json:"retention_schedule"`
-	Breaches []Breach `json:"breaches"`
+	Settings      Settings `json:"settings"`
+	Schedule      []Class  `json:"retention_schedule"`
+	Breaches      []Breach `json:"breaches"`
+	LastRetention *LastRun `json:"last_retention_run"`
+}
+
+// LastRun is a retention run as its Activity recorded it; Detail carries the
+// per-class counts.
+type LastRun struct {
+	RanAt  time.Time `json:"ran_at"`
+	Mode   Mode      `json:"mode"`
+	Detail string    `json:"detail"`
 }
 
 // Overview reads one Tenant's PDPA state.
@@ -194,8 +203,23 @@ func (s Service) Overview(ctx context.Context, tenant string) (Overview, error) 
 		if out.Settings, err = s.settings(ctx, tx); err != nil {
 			return err
 		}
-		out.Breaches, err = breaches(ctx, tx, `TRUE ORDER BY aware_at DESC`)
-		return err
+		if out.Breaches, err = breaches(ctx, tx, `TRUE ORDER BY aware_at DESC`); err != nil {
+			return err
+		}
+		var run LastRun
+		var typ string
+		err = tx.QueryRow(ctx, `SELECT occurred_at, type, coalesce(event->'data'->>'status_detail', '') FROM activities
+			WHERE type = ANY ($1) ORDER BY seq DESC LIMIT 1`, []string{retentionType(DryRun), retentionType(Deleted), retentionType(Held)}).
+			Scan(&run.RanAt, &typ, &run.Detail)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		run.RanAt, run.Mode = run.RanAt.UTC(), Mode(strings.TrimPrefix(typ, retentionType("")))
+		out.LastRetention = &run
+		return nil
 	})
 	return out, err
 }
