@@ -27,8 +27,19 @@ instance (`KEEL_SIGSTORE_GITHUB_PRIVATE`).
 
 ## Evidence
 
-`GET /v1/tenants/{tenant}/evidence?from=&to=` returns a signed `keel-evidence@1` bundle;
-`keel-api verify-evidence bundle.json <pubkey>` checks it offline. CISA KEV
+`GET /v1/tenants/{tenant}/evidence?from=&to=` returns a signed `keel-evidence@2`
+bundle for every framework. Add `&framework=` with `iso27001`, `soc2`, `pdpa`,
+`ssdf`, `slsa`, `cra` or `owasp-cicd` for one framework. An unknown name is a
+400. Each `frameworks/<id>` section lists every Control of that framework with
+the Policies covering it, the Services each Policy evaluated, references to
+the evidence sections for the period (with item counts), and a gap reason
+when no Policy reached a Service. The bundle carries only the evidence
+sections the chosen frameworks reference, so a SOC 2 bundle holds no PDPA
+breach records. The manifest lists the frameworks, hashes every section and
+is signed with `KEEL_DIGEST_KEY`. Sections are hashed in a canonical JSON
+form, so a re-indented bundle still verifies.
+`keel-api verify-evidence bundle.json <pubkey>` checks it offline, and still
+accepts `keel-evidence@1` bundles exported before #191. CISA KEV
 matches against deployed software start the EU CRA reporting clock
 (`KEEL_KEV`).
 

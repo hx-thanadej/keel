@@ -870,7 +870,7 @@ func verifyEvidence(args []string) error {
 	if err := evidence.Verify(pub, b); err != nil {
 		return err
 	}
-	fmt.Printf("OK: %s for tenant %s, %s → %s, %d sections\n", b.Manifest.Format, b.Manifest.Tenant, b.Manifest.From.Format("2006-01-02"), b.Manifest.To.Format("2006-01-02"), len(b.Sections))
+	fmt.Printf("OK: %s for tenant %s, frameworks [%s], %s → %s, %d sections\n", b.Manifest.Format, b.Manifest.Tenant, strings.Join(b.Manifest.Frameworks, " "), b.Manifest.From.Format("2006-01-02"), b.Manifest.To.Format("2006-01-02"), len(b.Sections))
 	return nil
 }
 

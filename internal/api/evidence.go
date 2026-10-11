@@ -12,7 +12,8 @@ import (
 	"github.com/hx-thanadej/keel/internal/evidence"
 )
 
-// EvidenceDeps serves evidence export (#151).
+// EvidenceDeps serves evidence export (#151), for every framework or one
+// named by ?framework= (#191).
 type EvidenceDeps struct {
 	Authz    catalog.Authorizer
 	Exporter evidence.Exporter
@@ -34,8 +35,8 @@ func mountEvidence(mux Mux, a auth.Authenticator, d EvidenceDeps) {
 		if err1 != nil || err2 != nil || !from.Before(to) {
 			return errors.Join(catalog.ErrInvalid, errors.New("from and to are YYYY-MM-DD, from before to"))
 		}
-		b, err := d.Exporter.Export(r.Context(), tenant, from, to, actor(p))
-		if errors.Is(err, evidence.ErrNoKey) {
+		b, err := d.Exporter.Export(r.Context(), tenant, q.Get("framework"), from, to, actor(p))
+		if errors.Is(err, evidence.ErrNoKey) || errors.Is(err, evidence.ErrUnknownFramework) {
 			return errors.Join(catalog.ErrInvalid, err)
 		}
 		if err != nil {

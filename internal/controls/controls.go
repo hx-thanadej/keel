@@ -11,6 +11,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"go.yaml.in/yaml/v3"
@@ -153,12 +154,12 @@ type Report struct {
 	Controls   []ControlView       `json:"controls"`
 }
 
-// Only narrows the report to one framework; false if the registry has no
-// such framework.
+// Only narrows the report to one framework, matched without case (iso27001
+// is ISO27001); false if the registry has no such framework.
 func (r Report) Only(framework string) (Report, bool) {
 	out := Report{Version: r.Version, Services: r.Services, Controls: []ControlView{}}
 	for _, f := range r.Frameworks {
-		if f.ID == framework {
+		if strings.EqualFold(f.ID, framework) {
 			out.Frameworks = []FrameworkCoverage{f}
 		}
 	}
@@ -166,7 +167,7 @@ func (r Report) Only(framework string) (Report, bool) {
 		return r, false
 	}
 	for _, c := range r.Controls {
-		if c.Framework == framework {
+		if c.Framework == out.Frameworks[0].ID {
 			out.Controls = append(out.Controls, c)
 		}
 	}

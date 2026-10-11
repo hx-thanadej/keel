@@ -1,9 +1,13 @@
 package evidence_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -56,24 +60,23 @@ func world(t *testing.T) (*store.Store, string, string) {
 	return s, tenant, svc
 }
 
-func TestEvidenceBundleIsSignedAndTamperEvident(t *testing.T) {
-	s, tenant, _ := world(t)
+func export(t *testing.T, s *store.Store, tenant, framework string) (evidence.Bundle, ed25519.PublicKey, controls.Report) {
+	t.Helper()
 	ctx := context.Background()
-	reg, _ := controls.Load()
-	pub, key, _ := ed25519.GenerateKey(nil)
-	e := evidence.Exporter{Store: s, Controls: controls.Service{Store: s, Registry: reg}, Key: key}
-	from, to := time.Now().AddDate(0, 0, -30), time.Now().Add(time.Hour)
-	b, err := e.Export(ctx, tenant, from, to, activity.Actor{Type: activity.ActorHuman, UID: "user:auditor"})
+	reg, err := controls.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sec := range []string{"controls", "releases", "findings", "exceptions", "access_grants", "activity_chain"} {
-		if _, ok := b.Manifest.Sections[sec]; !ok {
-			t.Fatalf("missing section %s", sec)
-		}
+	pub, key, _ := ed25519.GenerateKey(nil)
+	cs := controls.Service{Store: s, Registry: reg}
+	from, to := time.Now().AddDate(0, 0, -30), time.Now().Add(time.Hour)
+	b, err := evidence.Exporter{Store: s, Controls: cs, Key: key}.Export(ctx, tenant, framework, from, to, activity.Actor{Type: activity.ActorHuman, UID: "user:auditor"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(b.Sections["releases"]), `"verified": true`) && !strings.Contains(string(b.Sections["releases"]), `"verified":true`) {
-		t.Fatalf("releases %s", b.Sections["releases"])
+	rep, err := cs.Report(ctx, tenant)
+	if err != nil {
+		t.Fatal(err)
 	}
 	// Round trip through JSON as an auditor would receive it.
 	raw, _ := json.Marshal(b)
@@ -81,16 +84,133 @@ func TestEvidenceBundleIsSignedAndTamperEvident(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if err := evidence.Verify(pub, got); err != nil {
-		t.Fatalf("clean bundle: %v", err)
+	return got, pub, rep
+}
+
+func TestEveryFrameworkBundleVerifiesAndEverySectionIsTamperEvident(t *testing.T) {
+	s, tenant, _ := world(t)
+	for _, f := range []string{"", "iso27001", "soc2", "pdpa", "ssdf", "slsa", "cra", "owasp-cicd"} {
+		b, pub, rep := export(t, s, tenant, f)
+		if b.Manifest.Format != "keel-evidence@2" {
+			t.Fatalf("%q: format %s", f, b.Manifest.Format)
+		}
+		if err := evidence.Verify(pub, b); err != nil {
+			t.Fatalf("%q: clean bundle: %v", f, err)
+		}
+		want := len(rep.Frameworks)
+		if f != "" {
+			want = 1
+		}
+		if len(b.Manifest.Frameworks) != want {
+			t.Fatalf("%q: manifest frameworks %v", f, b.Manifest.Frameworks)
+		}
+		for _, id := range b.Manifest.Frameworks {
+			if _, ok := b.Sections["frameworks/"+id]; !ok || (f != "" && !strings.EqualFold(id, f)) {
+				t.Fatalf("%q: framework sections %v", f, b.Manifest.Sections)
+			}
+		}
+		// An auditor's tools may re-indent the JSON; the bundle still verifies.
+		pretty, _ := json.MarshalIndent(b, "", "  ")
+		var reformatted evidence.Bundle
+		if err := json.Unmarshal(pretty, &reformatted); err != nil || evidence.Verify(pub, reformatted) != nil {
+			t.Fatalf("%q: re-indented bundle does not verify", f)
+		}
+		for name, raw := range b.Sections {
+			tampered := b
+			tampered.Sections = map[string]json.RawMessage{}
+			for n, r := range b.Sections {
+				tampered.Sections[n] = r
+			}
+			tampered.Sections[name] = json.RawMessage(strings.Replace(string(raw), "}", `,"x":1}`, 1))
+			if string(tampered.Sections[name]) == string(raw) {
+				tampered.Sections[name] = json.RawMessage(`[{"x":1}]`)
+			}
+			if err := evidence.Verify(pub, tampered); err == nil {
+				t.Fatalf("%q: altered section %s verified", f, name)
+			}
+		}
+		other, _, _ := ed25519.GenerateKey(nil)
+		if err := evidence.Verify(other, b); err == nil {
+			t.Fatalf("%q: wrong key verified", f)
+		}
 	}
-	got.Sections["findings"] = json.RawMessage(`{"overdue": 0}`)
-	if err := evidence.Verify(pub, got); err == nil {
-		t.Fatal("altered section verified")
+}
+
+func TestISOBundleListsEveryAnnexAControlWithItsGaps(t *testing.T) {
+	s, tenant, _ := world(t)
+	b, _, rep := export(t, s, tenant, "iso27001")
+	var sec evidence.FrameworkSection
+	if err := json.Unmarshal(b.Sections["frameworks/ISO27001"], &sec); err != nil {
+		t.Fatal(err)
 	}
-	other, _, _ := ed25519.GenerateKey(nil)
-	if err := evidence.Verify(other, b); err == nil {
-		t.Fatal("wrong key verified")
+	want, _ := rep.Only("ISO27001")
+	if sec.Coverage != want.Frameworks[0] || len(sec.Controls) != 93 || sec.Coverage.Controls != 93 {
+		t.Fatalf("coverage %+v, %d controls; report %+v", sec.Coverage, len(sec.Controls), want.Frameworks[0])
+	}
+	covered, gaps, unmapped := 0, 0, 0
+	for i, c := range sec.Controls {
+		if c.ID != want.Controls[i].ID || c.Gap != want.Controls[i].Gap {
+			t.Fatalf("control %d: %s gap=%v, report %s gap=%v", i, c.ID, c.Gap, want.Controls[i].ID, want.Controls[i].Gap)
+		}
+		if c.Gap {
+			gaps++
+			if c.GapReason == "" {
+				t.Errorf("gap %s has no reason", c.ID)
+			}
+		} else {
+			covered++
+		}
+		if len(c.CoveredBy) == 0 {
+			unmapped++
+			if !c.Gap || len(c.Evidence) != 0 {
+				t.Errorf("control %s with no Policy is not a gap: %+v", c.ID, c)
+			}
+		}
+	}
+	if covered != sec.Coverage.Covered || gaps != sec.Coverage.Gaps || unmapped == 0 {
+		t.Fatalf("covered %d gaps %d unmapped %d; coverage %+v", covered, gaps, unmapped, sec.Coverage)
+	}
+	// 8.32 change management points at the Releases in the period.
+	for _, c := range sec.Controls {
+		if c.ID == "8.32" && !slices.ContainsFunc(c.Evidence, func(r evidence.Ref) bool { return r.Section == "releases" && r.Items != nil && *r.Items == 1 }) {
+			t.Fatalf("8.32 evidence %+v", c.Evidence)
+		}
+	}
+	for name := range b.Sections {
+		if strings.HasPrefix(name, "frameworks/") && name != "frameworks/ISO27001" {
+			t.Fatalf("ISO bundle carries %s", name)
+		}
+	}
+}
+
+func TestExportRejectsUnknownFramework(t *testing.T) {
+	s, tenant, _ := world(t)
+	reg, _ := controls.Load()
+	_, key, _ := ed25519.GenerateKey(nil)
+	_, err := evidence.Exporter{Store: s, Controls: controls.Service{Store: s, Registry: reg}, Key: key}.Export(context.Background(), tenant, "soc3", time.Now().AddDate(0, 0, -1), time.Now(), activity.Actor{})
+	if !errors.Is(err, evidence.ErrUnknownFramework) {
+		t.Fatalf("soc3: %v", err)
+	}
+}
+
+// testdata/keel-evidence-v1.json is a keel-evidence@1 bundle exported by the
+// code before #191, signed with the key from seed 0x07 * 32.
+func TestKeelEvidenceV1BundleStillVerifies(t *testing.T) {
+	raw, err := os.ReadFile("testdata/keel-evidence-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b evidence.Bundle
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	pub := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32)).Public().(ed25519.PublicKey)
+	if b.Manifest.Format != "keel-evidence@1" || evidence.Verify(pub, b) != nil {
+		t.Fatalf("%s bundle does not verify: %v", b.Manifest.Format, evidence.Verify(pub, b))
+	}
+	b.Sections["findings"] = json.RawMessage(`{"overdue": 0}`)
+	if evidence.Verify(pub, b) == nil {
+		t.Fatal("altered v1 section verified")
 	}
 }
 
@@ -152,7 +272,7 @@ func TestEvidenceCountsFindingsOnTheWritersClock(t *testing.T) {
 	reg, _ := controls.Load()
 	_, key, _ := ed25519.GenerateKey(nil)
 	e := evidence.Exporter{Store: s, Controls: controls.Service{Store: s, Registry: reg}, Key: key, Now: sla.Now}
-	b, err := e.Export(ctx, home, storetest.Epoch.Add(-time.Hour), sla.Now().Add(time.Hour), activity.Actor{Type: activity.ActorHuman, UID: "user:auditor"})
+	b, err := e.Export(ctx, home, "", storetest.Epoch.Add(-time.Hour), sla.Now().Add(time.Hour), activity.Actor{Type: activity.ActorHuman, UID: "user:auditor"})
 	if err != nil {
 		t.Fatal(err)
 	}

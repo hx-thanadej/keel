@@ -285,9 +285,22 @@ function Decisions({ tenantId }: { tenantId: string }) {
   )
 }
 
+const evidenceFrameworks = [
+  ['iso27001', 'ISO/IEC 27001:2022'],
+  ['soc2', 'SOC 2'],
+  ['pdpa', 'PDPA'],
+  ['ssdf', 'NIST SSDF'],
+  ['slsa', 'SLSA'],
+  ['cra', 'EU CRA'],
+  ['owasp-cicd', 'OWASP CI/CD Top 10'],
+] as const
+
 function Evidence({ tenantId, download, error }: { tenantId: string; download: (key: string, url: string, filename: string) => (e: React.MouseEvent) => void; error?: string }) {
   const [from, setFrom] = useState(monthStarts(3)[0])
   const [to, setTo] = useState(monthStarts(1)[1])
+  const [framework, setFramework] = useState('')
+  const url = insights.evidenceURL(tenantId, from, to, framework)
+  const file = `keel-evidence-${framework ? `${framework}-` : ''}${from}-${to}.json`
   return (
     <>
       <div className="toolbar">
@@ -297,7 +310,18 @@ function Evidence({ tenantId, download, error }: { tenantId: string; download: (
         <label>
           To <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
         </label>
-        <a className="button primary" href={insights.evidenceURL(tenantId, from, to)} download={`keel-evidence-${from}-${to}.json`} onClick={download('evidence', insights.evidenceURL(tenantId, from, to), `keel-evidence-${from}-${to}.json`)}>
+        <label>
+          Framework{' '}
+          <select value={framework} onChange={(e) => setFramework(e.target.value)}>
+            <option value="">All frameworks</option>
+            {evidenceFrameworks.map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <a className="button primary" href={url} download={file} onClick={download('evidence', url, file)}>
           Export evidence
         </a>
       </div>
