@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { delivery, security, ApiError, type Attestation, type ControlReport, type Exception, type Release, type ServiceEntry, type VexStatement } from './api'
+import { delivery, security, ApiError, type Attestation, type Exception, type Release, type ServiceEntry, type VexStatement } from './api'
 
 const justifications = [
   'component_not_present',
@@ -11,9 +11,8 @@ const justifications = [
 
 const message = (e: unknown) => (e instanceof ApiError && e.status === 403 ? 'You are not allowed to do that here.' : (e as Error).message)
 
-/** Security: Controls coverage, Exceptions, VEX and release provenance (#117). */
+/** Security: Exceptions, VEX and release provenance (#117). Controls coverage lives in ComplianceView. */
 export function SecurityView({ tenantId }: { tenantId: string }) {
-  const [controls, setControls] = useState<ControlReport | null>(null)
   const [exceptions, setExceptions] = useState<Exception[]>([])
   const [vex, setVex] = useState<VexStatement[]>([])
   const [services, setServices] = useState<ServiceEntry[]>([])
@@ -25,12 +24,11 @@ export function SecurityView({ tenantId }: { tenantId: string }) {
   useEffect(() => {
     let stale = false
     const ok = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback)
-    Promise.all([ok(security.controls(tenantId), null), ok(security.exceptions(tenantId), []), ok(security.vex(tenantId), []), ok(delivery.services(tenantId), []), ok(delivery.releases(tenantId), [])])
-      .then(async ([c, ex, vx, ss, rs]) => {
+    Promise.all([ok(security.exceptions(tenantId), []), ok(security.vex(tenantId), []), ok(delivery.services(tenantId), []), ok(delivery.releases(tenantId), [])])
+      .then(async ([ex, vx, ss, rs]) => {
         const recent = rs.slice(0, 8)
         const att = await Promise.all(recent.map((r) => ok(security.attestations(tenantId, r.id), [])))
         if (stale) return
-        setControls(c)
         setExceptions(ex)
         setVex(vx)
         setServices(ss)
@@ -58,7 +56,6 @@ export function SecurityView({ tenantId }: { tenantId: string }) {
     }
   }
 
-  const gaps = controls?.controls.filter((c) => c.gap).length ?? 0
   return (
     <section className="delivery">
       {error && <p className="notice error">{error}</p>}
@@ -123,46 +120,6 @@ export function SecurityView({ tenantId }: { tenantId: string }) {
         </article>
       ))}
       {services.length > 0 && <VexForm tenantId={tenantId} services={services} onDone={again} onError={fail} />}
-
-      <h2>
-        Controls {controls && <span className="badge">{controls.version}</span>}
-      </h2>
-      {controls && (
-        <p className="meta">
-          {controls.controls.length} controls, {gaps} without coverage, across {controls.services} services.
-        </p>
-      )}
-      {controls && (
-        <ul className="meta">
-          {controls.frameworks.map((f) => (
-            <li key={f.id}>
-              {f.name}: {f.covered} of {f.controls} covered, {f.mapped} mapped to a Keel policy
-            </li>
-          ))}
-        </ul>
-      )}
-      {controls && (
-        <div className="table-wrap">
-          <table className="data-table controls">
-            <thead>
-              <tr>
-                <th>Control</th>
-                <th>Policies (services covered)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {controls.controls.map((c) => (
-                <tr key={c.framework + c.id}>
-                  <td>
-                    <span className={`status ${c.gap ? 'critical' : 'good'}`}>{c.gap ? '✕' : '✓'}</span> {c.framework} {c.id} — {c.title}
-                  </td>
-                  <td>{c.coverage.length === 0 ? `no Keel policy: ${c.gap_reason ?? 'not yet mapped'}` : c.coverage.map((p) => `${p.name} @${p.point} (${p.covered_services})`).join(', ')}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </section>
   )
 }
