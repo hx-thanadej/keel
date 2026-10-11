@@ -549,7 +549,8 @@ func TestEvidenceExportCarriesEveryPDPAControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bundle.Manifest.Format != "keel-evidence@2" || !slices.Equal(bundle.Manifest.Frameworks, []string{"PDPA"}) || evidence.Verify(pub, bundle) != nil {
+	signed, _ := json.Marshal(bundle)
+	if _, err := evidence.Verify(pub, signed); err != nil || bundle.Manifest.Format != "keel-evidence@2" || !slices.Equal(bundle.Manifest.Frameworks, []string{"PDPA"}) {
 		t.Fatalf("bundle %s %v does not verify", bundle.Manifest.Format, bundle.Manifest.Frameworks)
 	}
 	var fw evidence.FrameworkSection

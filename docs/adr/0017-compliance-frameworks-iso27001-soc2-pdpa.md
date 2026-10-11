@@ -12,7 +12,7 @@ Q5 in [DESIGN.md §10](../DESIGN.md#10-open-questions) asked whether Tenants
 contractually require a change advisory board (CAB) or specific frameworks
 (#12). Keel's Control catalogue (`internal/controls`) maps Policies to SSDF,
 SLSA, CRA and OWASP CI/CD today. The evidence export (`internal/evidence`,
-`keel-evidence@1`) and the CRA reporting clock cover those frameworks.
+`keel-evidence@2`) and the CRA reporting clock cover those frameworks.
 
 ## Decision
 

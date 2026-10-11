@@ -94,7 +94,7 @@ func TestEveryFrameworkBundleVerifiesAndEverySectionIsTamperEvident(t *testing.T
 		if b.Manifest.Format != "keel-evidence@2" {
 			t.Fatalf("%q: format %s", f, b.Manifest.Format)
 		}
-		if err := evidence.Verify(pub, b); err != nil {
+		if err := verifyBundle(pub, b); err != nil {
 			t.Fatalf("%q: clean bundle: %v", f, err)
 		}
 		want := len(rep.Frameworks)
@@ -111,8 +111,7 @@ func TestEveryFrameworkBundleVerifiesAndEverySectionIsTamperEvident(t *testing.T
 		}
 		// An auditor's tools may re-indent the JSON; the bundle still verifies.
 		pretty, _ := json.MarshalIndent(b, "", "  ")
-		var reformatted evidence.Bundle
-		if err := json.Unmarshal(pretty, &reformatted); err != nil || evidence.Verify(pub, reformatted) != nil {
+		if err := verify(pub, pretty); err != nil {
 			t.Fatalf("%q: re-indented bundle does not verify", f)
 		}
 		for name, raw := range b.Sections {
@@ -125,12 +124,12 @@ func TestEveryFrameworkBundleVerifiesAndEverySectionIsTamperEvident(t *testing.T
 			if string(tampered.Sections[name]) == string(raw) {
 				tampered.Sections[name] = json.RawMessage(`[{"x":1}]`)
 			}
-			if err := evidence.Verify(pub, tampered); err == nil {
+			if err := verifyBundle(pub, tampered); err == nil {
 				t.Fatalf("%q: altered section %s verified", f, name)
 			}
 		}
 		other, _, _ := ed25519.GenerateKey(nil)
-		if err := evidence.Verify(other, b); err == nil {
+		if err := verifyBundle(other, b); err == nil {
 			t.Fatalf("%q: wrong key verified", f)
 		}
 	}
@@ -200,16 +199,13 @@ func TestKeelEvidenceV1BundleStillVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var b evidence.Bundle
-	if err := json.Unmarshal(raw, &b); err != nil {
-		t.Fatal(err)
-	}
 	pub := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32)).Public().(ed25519.PublicKey)
-	if b.Manifest.Format != "keel-evidence@1" || evidence.Verify(pub, b) != nil {
-		t.Fatalf("%s bundle does not verify: %v", b.Manifest.Format, evidence.Verify(pub, b))
+	b, err := evidence.Verify(pub, raw)
+	if err != nil || b.Manifest.Format != "keel-evidence@1" {
+		t.Fatalf("%s bundle does not verify: %v", b.Manifest.Format, err)
 	}
 	b.Sections["findings"] = json.RawMessage(`{"overdue": 0}`)
-	if evidence.Verify(pub, b) == nil {
+	if verifyBundle(pub, b) == nil {
 		t.Fatal("altered v1 section verified")
 	}
 }
@@ -283,5 +279,46 @@ func TestEvidenceCountsFindingsOnTheWritersClock(t *testing.T) {
 	}
 	if err := json.Unmarshal(b.Sections["findings"], &got); err != nil || got.Raised != 2 || got.Resolved != 2 || got.Within != 2 {
 		t.Fatalf("findings section %s %v", b.Sections["findings"], err)
+	}
+}
+
+// verify hands Verify the bundle bytes an auditor would receive.
+func verify(pub ed25519.PublicKey, raw []byte) error {
+	_, err := evidence.Verify(pub, raw)
+	return err
+}
+
+func verifyBundle(pub ed25519.PublicKey, b evidence.Bundle) error {
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	return verify(pub, raw)
+}
+
+// A lenient decoder resolves a repeated key silently (Go keeps the last one,
+// other readers the first), so the bytes would say one thing and the verified
+// value another.
+func TestAmbiguousJSONNeverVerifies(t *testing.T) {
+	s, tenant, _ := world(t)
+	b, pub, _ := export(t, s, tenant, "iso27001")
+	genuine, _ := json.Marshal(b)
+	if err := verify(pub, genuine); err != nil {
+		t.Fatalf("genuine bundle: %v", err)
+	}
+	sec := string(b.Sections["frameworks/ISO27001"])
+	for name, forged := range map[string]string{
+		"duplicate top-level section key": strings.Replace(string(genuine), sec, `{"services":999,`+sec[1:], 1),
+		"duplicate nested section key":    strings.Replace(string(genuine), sec, strings.Replace(sec, `"gap":true`, `"gap":false,"gap":true`, 1), 1),
+		"duplicate manifest tenant":       strings.Replace(string(genuine), `"manifest":{`, `"manifest":{"tenant":"forged-tenant",`, 1),
+		"case-variant manifest tenant":    strings.Replace(string(genuine), `"manifest":{`, `"manifest":{"Tenant":"forged-tenant",`, 1),
+		"unknown manifest field":          strings.Replace(string(genuine), `"manifest":{`, `"manifest":{"approved_by":"ciso",`, 1),
+	} {
+		if forged == string(genuine) {
+			t.Fatalf("%s: forgery not applied", name)
+		}
+		if err := verify(pub, []byte(forged)); err == nil {
+			t.Errorf("%s verified", name)
+		}
 	}
 }

@@ -20,9 +20,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -306,37 +309,114 @@ func canonical(v any) (json.RawMessage, error) {
 	return json.Marshal(generic)
 }
 
-// Verify checks a bundle offline: a known format, the signature over the
-// manifest and every section's hash. keel-evidence@1 bundles hashed sections
-// as Keel serialised them, so the raw bytes are compared too.
-func Verify(pub ed25519.PublicKey, b Bundle) error {
+// Verify checks bundle bytes offline and returns the bundle they hold: strict
+// JSON (see strictJSON), no fields beyond Bundle's and Manifest's, a known
+// format, the signature over the manifest and every section's hash.
+// keel-evidence@1 bundles hashed sections as Keel serialised them, so the raw
+// bytes are compared too.
+func Verify(pub ed25519.PublicKey, raw []byte) (Bundle, error) {
+	if err := strictJSON(raw); err != nil {
+		return Bundle{}, fmt.Errorf("bundle is ambiguous JSON: %w", err)
+	}
+	var b Bundle
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
+		return Bundle{}, err
+	}
 	if b.Manifest.Format != Format && b.Manifest.Format != FormatV1 {
-		return fmt.Errorf("unknown bundle format %q", b.Manifest.Format)
+		return Bundle{}, fmt.Errorf("unknown bundle format %q", b.Manifest.Format)
 	}
 	m, err := json.Marshal(b.Manifest)
 	if err != nil {
-		return err
+		return Bundle{}, err
 	}
 	sig, err := base64.StdEncoding.DecodeString(b.Signature)
 	if err != nil || !ed25519.Verify(pub, m, sig) {
-		return errors.New("manifest signature does not verify")
+		return Bundle{}, errors.New("manifest signature does not verify")
 	}
 	for name, want := range b.Manifest.Sections {
 		raw, ok := b.Sections[name]
 		if !ok {
-			return fmt.Errorf("section %s missing", name)
+			return Bundle{}, fmt.Errorf("section %s missing", name)
 		}
 		canon, err := canonical(raw)
 		if err != nil {
-			return fmt.Errorf("section %s: %w", name, err)
+			return Bundle{}, fmt.Errorf("section %s: %w", name, err)
 		}
 		sum, rawSum := sha256.Sum256(canon), sha256.Sum256(raw)
 		if hex.EncodeToString(sum[:]) != want && hex.EncodeToString(rawSum[:]) != want {
-			return fmt.Errorf("section %s was altered", name)
+			return Bundle{}, fmt.Errorf("section %s was altered", name)
 		}
 	}
 	if len(b.Sections) != len(b.Manifest.Sections) {
-		return errors.New("bundle has sections the manifest does not list")
+		return Bundle{}, errors.New("bundle has sections the manifest does not list")
+	}
+	return b, nil
+}
+
+// strictJSON rejects what a lenient reader resolves silently, so the bytes
+// mean one thing to every reader: invalid UTF-8, data after the value, and an
+// object key that repeats at any depth. Keys compare case-insensitively
+// because Go fills a struct field from any case of its name.
+func strictJSON(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errors.New("invalid UTF-8")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := strictValue(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("data after the JSON value")
 	}
 	return nil
+}
+
+func strictValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch tok {
+	case json.Delim('{'):
+		keys := map[string]bool{}
+		for dec.More() {
+			k, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			folded := foldCase(k.(string))
+			if keys[folded] {
+				return fmt.Errorf("duplicate key %q", k)
+			}
+			keys[folded] = true
+			if err := strictValue(dec); err != nil {
+				return err
+			}
+		}
+	case json.Delim('['):
+		for dec.More() {
+			if err := strictValue(dec); err != nil {
+				return err
+			}
+		}
+	default:
+		return nil
+	}
+	_, err = dec.Token()
+	return err
+}
+
+// foldCase maps each rune to the smallest rune in its Unicode case-folding
+// orbit, so two keys fold equal exactly when strings.EqualFold holds.
+func foldCase(s string) string {
+	return strings.Map(func(r rune) rune {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+		return least
+	}, s)
 }

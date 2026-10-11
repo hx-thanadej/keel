@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hx-thanadej/keel/internal/auth"
@@ -42,7 +43,11 @@ func mountEvidence(mux Mux, a auth.Authenticator, d EvidenceDeps) {
 		if err != nil {
 			return err
 		}
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="keel-evidence-%s-%s.json"`, q.Get("from"), q.Get("to")))
+		name := "keel-evidence-"
+		if f := q.Get("framework"); f != "" {
+			name += strings.ToLower(f) + "-"
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s-%s.json"`, name, q.Get("from"), q.Get("to")))
 		writeJSON(w, http.StatusOK, b)
 		return nil
 	}))
