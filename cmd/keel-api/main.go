@@ -32,6 +32,7 @@
 //	KEEL_AWS_BILL_PREFIX      export prefix
 //	KEEL_AWS_PAYER_ACCOUNT    management account id (FOCUS BillingAccountId)
 //	KEEL_AWS_REGION           bucket region; credentials: AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE
+//	                          client management accounts (ADR-0018) are data: client_payers rows, read through each client's role
 //	KEEL_TENCENT_BUDGETS=1    mirror opted-in Budgets to Tencent Cloud budgets (payer credentials)
 //	KEEL_AWS_BUDGET_ACCOUNT   mirror opted-in Budgets to AWS Budgets in this management account
 //	KEEL_AWS_BUDGET_EMAIL     optional subscriber so AWS budgets also carry the thresholds
@@ -433,7 +434,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	go clientBillSyncLoop(ctx, st, evaluator)
+	go clientBillSyncLoop(ctx, evaluator, clientBillSyncs(ctx, st))
 	if err := startAWSBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
@@ -1087,28 +1088,53 @@ func billCredentials(base common.Provider, payer, role, region string) common.Pr
 	return &tencent.MemberRole{Base: base, Account: payer, Role: role, Region: region}
 }
 
-// clientBillSyncLoop loads client payers' Tencent bills hourly, each through
-// its client's read-only role and into its own Tenant (ADR-0018, #182).
-// Client payers are data: client_payers rows on client-owned Cloud Accounts.
-func clientBillSyncLoop(ctx context.Context, st *store.Store, ev budget.Evaluator) {
-	var own []string
-	if payer := os.Getenv("KEEL_TENCENT_PAYER_UIN"); payer != "" {
-		own = append(own, payer)
+// clientBillSyncs reads client payers' bills on each provider, each through
+// its client's read-only role and into its own Tenant (ADR-0018): Tencent
+// payers (#182) and AWS management accounts (#183). Client payers are data:
+// client_payers rows on client-owned Cloud Accounts. A broken AWS identity
+// (unloadable config, or access keys instead of a keyless source) fails the
+// AWS sync's Ready check once per run with payers, as Keel's fault, and
+// never stops the Tencent sync.
+func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSync {
+	own := func(env string) []string {
+		if v := os.Getenv(env); v != "" {
+			return []string{v}
+		}
+		return nil
 	}
-	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: st}, Provider: "tencent", OwnPayers: own,
-		Connect: clientPayerConnect(tencent.Credentials(), "")}
+	in := &cost.Ingester{Store: st}
+	aws := &cost.ClientBillSync{Ingester: in, Provider: "aws", OwnPayers: own("KEEL_AWS_PAYER_ACCOUNT")}
+	if base, err := awsadapter.Keyless(ctx); err != nil {
+		aws.Ready = func(context.Context) error { return fmt.Errorf("loading Keel's AWS identity: %w", err) }
+	} else {
+		aws.Connect = awsClientPayerConnect(base, "", "")
+		aws.Ready = func(ctx context.Context) error {
+			_, err := base.Retrieve(ctx)
+			return err
+		}
+	}
+	return []*cost.ClientBillSync{
+		{Ingester: in, Provider: "tencent", OwnPayers: own("KEEL_TENCENT_PAYER_UIN"), Connect: clientPayerConnect(tencent.Credentials(), "")},
+		aws,
+	}
+}
+
+// clientBillSyncLoop runs every client payer sync hourly.
+func clientBillSyncLoop(ctx context.Context, ev budget.Evaluator, syncs []*cost.ClientBillSync) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
-		runs, err := cs.Run(ctx)
-		if err != nil {
-			slog.Error("ALERT tencent client bill sync failed", "err", err)
-		}
 		loaded := false
-		for _, r := range runs {
-			slog.Info("tencent client bill sync", "tenant", r.Payer.TenantID, "payer", r.Payer.UIN, "no_delivery", r.NoDelivery,
-				"new_files", r.Report.NewFiles, "loads", len(r.Report.Loads), "not_focus", r.Report.NotFOCUS, "blocked", r.Report.Blocked)
-			loaded = loaded || len(r.Report.Loads) > 0
+		for _, cs := range syncs {
+			runs, err := cs.Run(ctx)
+			if err != nil {
+				slog.Error("ALERT client bill sync failed", "provider", cs.Provider, "err", err)
+			}
+			for _, r := range runs {
+				slog.Info("client bill sync", "provider", cs.Provider, "tenant", r.Payer.TenantID, "payer", r.Payer.PayerID, "no_delivery", r.NoDelivery,
+					"new_files", r.Report.NewFiles, "loads", len(r.Report.Loads), "not_focus", r.Report.NotFOCUS, "blocked", r.Report.Blocked)
+				loaded = loaded || len(r.Report.Loads) > 0
+			}
 		}
 		if loaded {
 			evaluate(ctx, ev)
@@ -1127,7 +1153,7 @@ func clientBillSyncLoop(ctx context.Context, st *store.Store, ev budget.Evaluato
 // here and not mid-sync. stsEndpoint overrides the STS host in tests.
 func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.UIN, p.RoleExternalID, p.Region)
+		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Region)
 		if err != nil {
 			return nil, nil, &cost.RoleError{Err: err}
 		}
@@ -1141,6 +1167,35 @@ func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.Clie
 			return nil, nil, err
 		}
 		return billObjects{objs}, tencent.Invoices{Region: p.Region, Creds: role}, nil
+	}
+}
+
+// awsClientPayerConnect gives read-only access to a client management
+// account's Data Exports, as that client's read-only role assumed from
+// Keel's keyless identity with the payer's ExternalId. It assumes the role
+// up front, so a role that refuses Keel fails here and not mid-sync. AWS
+// has no invoice source, as for Keel's own AWS payer. stsEndpoint and
+// s3Endpoint (scheme://host) override the AWS endpoints in tests.
+func awsClientPayerConnect(base awsadapter.Identity, stsEndpoint, s3Endpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+		role, err := awsadapter.ReadOnlyRole(base, p.RoleARN, p.PayerID, p.RoleExternalID,
+			awsadapter.Export{Bucket: p.Bucket, Prefix: p.Prefix, Region: p.Region, KMSKeyARN: p.KMSKeyARN}, stsEndpoint)
+		if err != nil {
+			return nil, nil, &cost.RoleError{Err: err}
+		}
+		if _, _, _, err := role.Get(); err != nil {
+			return nil, nil, &cost.RoleError{Err: err}
+		}
+		endpoint, insecure := "s3."+p.Region+".amazonaws.com", false
+		if scheme, host, ok := strings.Cut(s3Endpoint, "://"); ok {
+			endpoint, insecure = host, scheme == "http"
+		}
+		objs, err := archive.NewS3(archive.S3Config{Endpoint: endpoint, Insecure: insecure, Region: p.Region, Bucket: p.Bucket,
+			Creds: archive.Refreshing(role, 10*time.Minute)})
+		if err != nil {
+			return nil, nil, err
+		}
+		return billObjects{objs}, nil, nil
 	}
 }
 

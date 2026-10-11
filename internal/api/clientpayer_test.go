@@ -7,9 +7,9 @@ import (
 	"github.com/hx-thanadej/keel/internal/auth"
 )
 
-// TestClientPayer: only a client-owned Tencent Cloud Account can be marked
-// as its client's payer, delivery fields are checked, and an empty bucket
-// records a payer whose delivery is not set up yet.
+// TestClientPayer: only a client-owned Tencent or AWS Cloud Account can be
+// marked as its client's payer, delivery fields are checked per provider,
+// and an empty bucket records a payer whose delivery is not set up yet.
 func TestClientPayer(t *testing.T) {
 	c, home := setup(t)
 	admin := c.as(homeAdmin(home))
@@ -29,6 +29,7 @@ func TestClientPayer(t *testing.T) {
 	payer := create("tencent", "100000000001", "client")
 	ours := create("tencent", "200000000001", "platform")
 	aws := create("aws", "123456789012", "client")
+	azure := create("azure", "00000000-0000-0000-0000-000000000001", "client")
 
 	st, body := inTAT.do("PUT", accounts+"/"+payer+"/client-payer", map[string]any{"why": "TAT pays its own bill"})
 	mustStatus(t, st, 200, body)
@@ -54,15 +55,32 @@ func TestClientPayer(t *testing.T) {
 		t.Errorf("two payers share role_external_id %s", ext)
 	}
 
+	st, body = inTAT.do("PUT", accounts+"/"+aws+"/client-payer", map[string]any{"why": "TAT pays its own AWS bill"})
+	mustStatus(t, st, 200, body)
+	if body["bucket"] != "" || body["mode"] != "export-folder" || body["region"] != "us-east-1" || body["role_external_id"] == ext {
+		t.Errorf("aws payer without delivery = %v, want export-folder in us-east-1 with its own ExternalId", body)
+	}
+	st, body = inTAT.do("PUT", accounts+"/"+aws+"/client-payer", map[string]any{"bucket": "tat-cur.exports", "prefix": "focus", "region": "us-gov-west-1",
+		"kms_key_arn": "arn:aws-us-gov:kms:us-gov-west-1:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab", "why": "export set up"})
+	mustStatus(t, st, 200, body)
+	if body["bucket"] != "tat-cur.exports" || body["region"] != "us-gov-west-1" || body["mode"] != "export-folder" || body["kms_key_arn"] != "arn:aws-us-gov:kms:us-gov-west-1:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab" {
+		t.Errorf("aws payer with delivery = %v", body)
+	}
+
 	for name, tc := range map[string]struct {
 		account string
 		in      map[string]any
 	}{
-		"platform-owned account": {ours, map[string]any{}},
-		"aws account":            {aws, map[string]any{}},
-		"bucket without appid":   {payer, map[string]any{"bucket": "tat-bills"}},
-		"unknown mode":           {payer, map[string]any{"mode": "hourly"}},
-		"malformed region":       {payer, map[string]any{"region": "Bangkok"}},
+		"platform-owned account":  {ours, map[string]any{}},
+		"azure account":           {azure, map[string]any{}},
+		"aws with a tencent mode": {aws, map[string]any{"mode": "cumulative"}},
+		"aws bucket uppercase":    {aws, map[string]any{"bucket": "TAT-Bills"}},
+		"bucket without appid":    {payer, map[string]any{"bucket": "tat-bills"}},
+		"unknown mode":            {payer, map[string]any{"mode": "hourly"}},
+		"malformed region":        {payer, map[string]any{"region": "Bangkok"}},
+		"tencent with a kms key":  {payer, map[string]any{"kms_key_arn": "arn:aws:kms:ap-bangkok:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab"}},
+		"aws kms key elsewhere":   {aws, map[string]any{"bucket": "tat-cur.exports", "kms_key_arn": "arn:aws:kms:us-west-2:100000000003:key/1234abcd-12ab-34cd-56ef-1234567890ab"}},
+		"aws wildcard prefix":     {aws, map[string]any{"bucket": "tat-cur.exports", "prefix": "focus/*"}},
 	} {
 		tc.in["why"] = "x"
 		if st, body := inTAT.do("PUT", accounts+"/"+tc.account+"/client-payer", tc.in); st != 400 {
