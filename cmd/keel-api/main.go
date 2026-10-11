@@ -917,39 +917,26 @@ func verifyLog(args []string) error {
 // KEEL_ARCHIVE_BUCKET is unset. An aws bucket must have Object Lock and
 // versioning enabled; Keel refuses to archive into it otherwise (ADR-0019).
 func archiveStore(ctx context.Context) (*archive.S3, string, error) {
-	bucket := os.Getenv("KEEL_ARCHIVE_BUCKET")
-	if bucket == "" {
+	sel, err := archive.Select(os.Getenv)
+	if err != nil {
+		return nil, "", err
+	}
+	if sel.Bucket == "" {
 		return nil, "", nil
 	}
-	region := os.Getenv("KEEL_ARCHIVE_REGION")
-	switch provider := envOr("KEEL_ARCHIVE_PROVIDER", "aws"); provider {
-	case "tencent":
+	if sel.Provider == "tencent" {
 		creds := archive.Refreshing(tencent.STS{Creds: tencent.Credentials()}, 10*time.Minute)
-		s3, err := archive.NewS3(archive.S3Config{Endpoint: os.Getenv("KEEL_ARCHIVE_ENDPOINT"), Region: region, Bucket: bucket, Creds: creds})
-		return s3, provider, err
-	case "aws":
-		if region == "" {
-			return nil, "", errors.New("KEEL_ARCHIVE_REGION is required with KEEL_ARCHIVE_BUCKET")
-		}
-		endpoint := envOr("KEEL_ARCHIVE_ENDPOINT", "s3."+region+".amazonaws.com")
-		if strings.HasSuffix(endpoint, ".myqcloud.com") {
-			return nil, "", errors.New("KEEL_ARCHIVE_ENDPOINT is a Tencent COS endpoint; set KEEL_ARCHIVE_PROVIDER=tencent for an existing COS archive")
-		}
-		days, err := archive.ParseRetentionDays(os.Getenv("KEEL_ARCHIVE_RETENTION_DAYS"))
-		if err != nil {
-			return nil, "", err
-		}
-		s3, err := archive.NewS3(archive.S3Config{Endpoint: endpoint, Region: region, Bucket: bucket, Creds: awscreds.NewIAM(""), RetentionDays: days})
-		if err != nil {
-			return nil, "", err
-		}
-		if err := s3.RequireObjectLock(ctx); err != nil {
-			return nil, "", fmt.Errorf("refusing to archive: %w", err)
-		}
-		return s3, provider, nil
-	default:
-		return nil, "", fmt.Errorf("KEEL_ARCHIVE_PROVIDER must be aws or tencent, got %q", provider)
+		s3, err := archive.NewS3(archive.S3Config{Endpoint: sel.Endpoint, Region: sel.Region, Bucket: sel.Bucket, Creds: creds})
+		return s3, sel.Provider, err
 	}
+	s3, err := archive.NewS3(archive.S3Config{Endpoint: sel.Endpoint, Region: sel.Region, Bucket: sel.Bucket, Creds: awscreds.NewIAM(""), RetentionDays: sel.RetentionDays})
+	if err != nil {
+		return nil, "", err
+	}
+	if err := s3.RequireObjectLock(ctx); err != nil {
+		return nil, "", fmt.Errorf("refusing to archive: %w", err)
+	}
+	return s3, sel.Provider, nil
 }
 
 func verifyArchive(args []string) error {
@@ -980,16 +967,11 @@ func verifyArchive(args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, o := range rs {
-			if o.Mode == "" {
-				fmt.Printf("RETENTION %s none\n", o.Key)
-			} else {
-				fmt.Printf("RETENTION %s %s until %s\n", o.Key, o.Mode, o.Until.Format(time.RFC3339))
-			}
-			if o.Mode != "COMPLIANCE" {
-				r.Problems = append(r.Problems, o.Key+": not under COMPLIANCE Object Lock retention")
-			}
+		lines, problems := archive.RetentionReport(rs)
+		for _, l := range lines {
+			fmt.Println(l)
 		}
+		r.Problems = append(r.Problems, problems...)
 	}
 	return printReport(r)
 }
