@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -314,6 +315,17 @@ func TestRetentionDryRunThenDeletesExactlyTheExpiredRowsAndKeepsTheLogVerifiable
 		t.Fatal(err)
 	}
 	verify("before retention")
+	lastRun := func() *pdpa.LastRun {
+		t.Helper()
+		o, err := svc.Overview(ctx, tat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o.LastRetention
+	}
+	if r := lastRun(); r != nil {
+		t.Fatalf("last retention run before any ran: %+v", r)
+	}
 	before := rows(t, s, tat, expTAT)
 	activitiesBefore := scalar[int](t, s, tat, `SELECT count(*) FROM activities`)
 
@@ -332,6 +344,9 @@ func TestRetentionDryRunThenDeletesExactlyTheExpiredRowsAndKeepsTheLogVerifiable
 	}
 	if n := activities(t, s, tat, "keel.pdpa.retention.dry_run"); n != 1 {
 		t.Fatalf("%d dry-run Activities", n)
+	}
+	if r := lastRun(); r == nil || r.Mode != pdpa.DryRun || r.RanAt.Location() != time.UTC || r.RanAt.Before(storetest.Epoch) || r.RanAt.After(c.now()) || !strings.Contains(r.Detail, "would delete") || !strings.Contains(r.Detail, "findings 1 (3 retained because referenced)") {
+		t.Fatalf("last retention run after the dry run: %+v", r)
 	}
 
 	// Enabling deletion is itself an Activity; the next run deletes exactly
@@ -352,6 +367,9 @@ func TestRetentionDryRunThenDeletesExactlyTheExpiredRowsAndKeepsTheLogVerifiable
 		t.Fatalf("modes tat %s acme %s", del.Mode, byTenant(runs, acme).Mode)
 	}
 	eachClassCounts(t, del, 1)
+	if r := lastRun(); r == nil || r.Mode != pdpa.Deleted || !strings.HasPrefix(r.Detail, "deleted (deletion enabled): ") {
+		t.Fatalf("last retention run after deleting: %+v", r)
+	}
 	after := rows(t, s, tat, expTAT)
 	for class, b := range before {
 		if a := after[class]; a[0] != b[0]-1 || b[1] != 1 || a[1] != 0 {
