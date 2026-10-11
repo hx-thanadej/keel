@@ -309,12 +309,24 @@ func canonical(v any) (json.RawMessage, error) {
 	return json.Marshal(generic)
 }
 
+const (
+	// MaxBundleBytes bounds the input Verify accepts, so an offline check
+	// never holds an unbounded file in memory.
+	MaxBundleBytes = 64 << 20
+	// MaxJSONDepth bounds nesting in the strict parser, which recurses once
+	// per level. Genuine bundles nest under 10 levels deep.
+	MaxJSONDepth = 128
+)
+
 // Verify checks bundle bytes offline and returns the bundle they hold: strict
 // JSON (see strictJSON), no fields beyond Bundle's and Manifest's, a known
 // format, the signature over the manifest and every section's hash.
 // keel-evidence@1 bundles hashed sections as Keel serialised them, so the raw
 // bytes are compared too.
 func Verify(pub ed25519.PublicKey, raw []byte) (Bundle, error) {
+	if len(raw) > MaxBundleBytes {
+		return Bundle{}, fmt.Errorf("bundle is larger than %d bytes", MaxBundleBytes)
+	}
 	if err := strictJSON(raw); err != nil {
 		return Bundle{}, fmt.Errorf("bundle is ambiguous JSON: %w", err)
 	}
@@ -365,7 +377,7 @@ func strictJSON(raw []byte) error {
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	if err := strictValue(dec); err != nil {
+	if err := strictValue(dec, 1); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); err != io.EOF {
@@ -374,10 +386,13 @@ func strictJSON(raw []byte) error {
 	return nil
 }
 
-func strictValue(dec *json.Decoder) error {
+func strictValue(dec *json.Decoder, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
+	}
+	if d, ok := tok.(json.Delim); ok && (d == '{' || d == '[') && depth > MaxJSONDepth {
+		return fmt.Errorf("nesting deeper than %d levels", MaxJSONDepth)
 	}
 	switch tok {
 	case json.Delim('{'):
@@ -392,13 +407,13 @@ func strictValue(dec *json.Decoder) error {
 				return fmt.Errorf("duplicate key %q", k)
 			}
 			keys[folded] = true
-			if err := strictValue(dec); err != nil {
+			if err := strictValue(dec, depth+1); err != nil {
 				return err
 			}
 		}
 	case json.Delim('['):
 		for dec.More() {
-			if err := strictValue(dec); err != nil {
+			if err := strictValue(dec, depth+1); err != nil {
 				return err
 			}
 		}

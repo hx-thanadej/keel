@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -320,5 +321,78 @@ func TestAmbiguousJSONNeverVerifies(t *testing.T) {
 		if err := verify(pub, []byte(forged)); err == nil {
 			t.Errorf("%s verified", name)
 		}
+	}
+}
+
+func depth(raw []byte) int {
+	d, deepest := 0, 0
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; {
+		case inString && c == '\\':
+			i++
+		case c == '"':
+			inString = !inString
+		case inString:
+		case c == '{' || c == '[':
+			d++
+			deepest = max(deepest, d)
+		case c == '}' || c == ']':
+			d--
+		}
+	}
+	return deepest
+}
+
+func TestDeeplyNestedBundleFailsFastAndGenuineBundlesVerify(t *testing.T) {
+	s, tenant, _ := world(t)
+	b, pub, _ := export(t, s, tenant, "iso27001")
+	genuine, _ := json.Marshal(b)
+	v1, err := os.ReadFile("testdata/keel-evidence-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubV1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32)).Public().(ed25519.PublicKey)
+	for name, c := range map[string]struct {
+		pub ed25519.PublicKey
+		raw []byte
+	}{"@2": {pub, genuine}, "@1": {pubV1, v1}} {
+		got := depth(c.raw)
+		t.Logf("genuine %s bundle depth %d, cap %d", name, got, evidence.MaxJSONDepth)
+		if got > evidence.MaxJSONDepth/4 {
+			t.Errorf("genuine %s bundle nests %d deep, too close to the cap", name, got)
+		}
+		if err := verify(c.pub, c.raw); err != nil {
+			t.Errorf("genuine %s: %v", name, err)
+		}
+	}
+
+	const levels = 10000
+	for name, deep := range map[string]string{
+		"arrays":  strings.Repeat("[", levels) + strings.Repeat("]", levels),
+		"objects": strings.Repeat(`{"a":`, levels) + "1" + strings.Repeat("}", levels),
+	} {
+		forged := strings.Replace(string(genuine), `"manifest":{`, `"x":`+deep+`,"manifest":{`, 1)
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		start := time.Now()
+		err := verify(pub, []byte(forged))
+		runtime.ReadMemStats(&after)
+		if err == nil || !strings.Contains(err.Error(), "nesting deeper than") {
+			t.Errorf("%s: want the depth error, got %v", name, err)
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("%s: took %v", name, took)
+		}
+		if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 8<<20 {
+			t.Errorf("%s: allocated %d bytes", name, alloc)
+		}
+	}
+}
+
+func TestOversizedBundleIsRejected(t *testing.T) {
+	_, err := evidence.Verify(nil, make([]byte, evidence.MaxBundleBytes+1))
+	if err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("want the size error, got %v", err)
 	}
 }

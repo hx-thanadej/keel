@@ -67,6 +67,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -854,7 +855,12 @@ func verifyEvidence(args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: keel-api verify-evidence <bundle.json> <base64 ed25519 public key>")
 	}
-	raw, err := os.ReadFile(args[0])
+	f, err := os.Open(args[0])
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(f, evidence.MaxBundleBytes+1))
 	if err != nil {
 		return err
 	}
