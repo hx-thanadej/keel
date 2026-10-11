@@ -50,19 +50,15 @@ func mountPDPA(mux Mux, a auth.Authenticator, d PDPADeps) {
 		writeJSON(w, http.StatusOK, out)
 		return nil
 	}))
-	mux.Handle("PUT /v1/tenants/{tenant}/pdpa/settings", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	mux.Handle("PATCH /v1/tenants/{tenant}/pdpa/settings", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		if err := allow(r, p, "pdpa.configure"); err != nil {
 			return err
 		}
-		var in struct {
-			DataRegions     []string `json:"data_regions"`
-			DeletionEnabled bool     `json:"deletion_enabled"`
-			LegalHold       string   `json:"legal_hold"`
-		}
+		var in pdpa.Change
 		if err := decode(r, &in); err != nil {
 			return err
 		}
-		out, err := d.Service.Configure(r.Context(), r.PathValue("tenant"), pdpa.Settings{DataRegions: in.DataRegions, DeletionEnabled: in.DeletionEnabled, LegalHold: in.LegalHold}, actor(p))
+		out, err := d.Service.Configure(r.Context(), r.PathValue("tenant"), in, actor(p))
 		if err != nil {
 			return pdpaErr(err)
 		}

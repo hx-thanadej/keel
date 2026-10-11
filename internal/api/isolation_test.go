@@ -183,7 +183,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/reject":                   {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/exceptions/{exception}/revoke":                   {"note": "pwn"},
 		"POST /v1/tenants/{tenant}/reports/{period}/regenerate":                     {},
-		"PUT /v1/tenants/{tenant}/pdpa/settings":                                    {"data_regions": []string{"us-east-1"}, "deletion_enabled": true},
+		"PATCH /v1/tenants/{tenant}/pdpa/settings":                                  {"data_regions": []string{"us-east-1"}, "deletion_enabled": true, "legal_hold": "", "lift_reason": "pwn"},
 		"POST /v1/tenants/{tenant}/pdpa/breaches":                                   {"title": "pwn breach"},
 		"POST /v1/tenants/{tenant}/pdpa/breaches/{breach}/notify":                   {"reference": "pwn"},
 		"POST /v1/tenants/{tenant}/pdpa/breaches/{breach}/close":                    {"reason": "pwn"},

@@ -21,6 +21,9 @@ type Class struct {
 	Reason   string `json:"reason"`
 	// expired selects the Class's rows older than the cutoff $1.
 	expired string
+	// referenced selects rows other records still point at. They are kept
+	// past the cutoff so those records stay joinable.
+	referenced string
 }
 
 // Schedule is the retention schedule, the same for every Tenant.
@@ -28,8 +31,12 @@ var Schedule = []Class{
 	{Name: "activity_log", Tables: "activities, activity_digests, activity_exports", Reason: "Append-only and hash-chained (ADR-0005): deleting rows would break verify-log. " +
 		"The WORM archive keeps the log under COMPLIANCE retention (KEEL_ARCHIVE_RETENTION_DAYS, default 7 years) and Keel never deletes from it."},
 	{Name: "evidence_exports", Reason: "Built on demand and downloaded; Keel stores no copy, only the export Activity."},
-	{Name: "findings", Tables: "findings", KeepDays: 3 * 365, From: "resolved_at", Reason: "Resolved Findings stay three years, a full audit cycle. Open Findings are never deleted.",
-		expired: `status = 'resolved' AND resolved_at < $1 AND NOT EXISTS (SELECT 1 FROM recommendations r WHERE r.finding_id = findings.id)`},
+	{Name: "findings", Tables: "findings", KeepDays: 3 * 365, From: "resolved_at",
+		Reason:  "Resolved Findings stay three years, a full audit cycle. Open Findings, and Findings a Recommendation, Exception or break-glass use names, are never deleted.",
+		expired: `status = 'resolved' AND resolved_at < $1`,
+		referenced: `EXISTS (SELECT 1 FROM recommendations r WHERE r.finding_id = findings.id)
+			OR EXISTS (SELECT 1 FROM exceptions e WHERE findings.id = ANY (e.finding_ids))
+			OR EXISTS (SELECT 1 FROM breakglass_uses b WHERE b.finding_id = findings.id)`},
 	{Name: "cost_facts", Tables: "cost_facts", KeepDays: 5 * 365, From: "billing_period", Reason: "Billing lines stay five years, as accounting records.",
 		expired: `billing_period < ($1::timestamptz AT TIME ZONE 'UTC')::date`},
 	{Name: "tenant_reports", Tables: "tenant_reports", KeepDays: 5 * 365, From: "period", Reason: "Monthly reports carry cost figures; kept as long as the billing lines.",
@@ -55,11 +62,13 @@ const (
 )
 
 // ClassRun is one Class in one run. Rows counts the expired rows, deleted
-// only when the run's Mode is Deleted.
+// only when the run's Mode is Deleted. Referenced counts expired rows kept
+// because other records still point at them.
 type ClassRun struct {
-	Class  string    `json:"class"`
-	Before time.Time `json:"before"`
-	Rows   int64     `json:"rows"`
+	Class      string    `json:"class"`
+	Before     time.Time `json:"before"`
+	Rows       int64     `json:"rows"`
+	Referenced int64     `json:"retained_referenced,omitempty"`
 }
 
 // RetentionRun is one Tenant's run.
@@ -117,17 +126,28 @@ func (s Service) Retain(ctx context.Context, tenant string) (RetentionRun, error
 				continue
 			}
 			cr := ClassRun{Class: c.Name, Before: now.AddDate(0, 0, -c.KeepDays)}
+			where := c.expired
+			if c.referenced != "" {
+				where = `(` + c.expired + `) AND NOT (` + c.referenced + `)`
+				if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+c.Tables+` WHERE (`+c.expired+`) AND (`+c.referenced+`)`, cr.Before).Scan(&cr.Referenced); err != nil {
+					return fmt.Errorf("%s: %w", c.Name, err)
+				}
+			}
 			if run.Mode == Deleted {
-				tag, err := tx.Exec(ctx, `DELETE FROM `+c.Tables+` WHERE `+c.expired, cr.Before)
+				tag, err := tx.Exec(ctx, `DELETE FROM `+c.Tables+` WHERE `+where, cr.Before)
 				if err != nil {
 					return fmt.Errorf("%s: %w", c.Name, err)
 				}
 				cr.Rows = tag.RowsAffected()
-			} else if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+c.Tables+` WHERE `+c.expired, cr.Before).Scan(&cr.Rows); err != nil {
+			} else if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+c.Tables+` WHERE `+where, cr.Before).Scan(&cr.Rows); err != nil {
 				return fmt.Errorf("%s: %w", c.Name, err)
 			}
 			run.Classes = append(run.Classes, cr)
-			parts = append(parts, fmt.Sprintf("%s %d", c.Name, cr.Rows))
+			part := fmt.Sprintf("%s %d", c.Name, cr.Rows)
+			if cr.Referenced > 0 {
+				part += fmt.Sprintf(" (%d retained because referenced)", cr.Referenced)
+			}
+			parts = append(parts, part)
 		}
 		kind, verb := activity.Read, "would delete"
 		if run.Mode == Deleted {

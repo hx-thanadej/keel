@@ -76,51 +76,106 @@ func (s Service) settings(ctx context.Context, tx pgx.Tx) (Settings, error) {
 
 var regionRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,39}$`)
 
-// Configure replaces a Tenant's settings. Turning deletion on or off is
-// recorded as its own Activity type.
-func (s Service) Configure(ctx context.Context, tenant string, in Settings, by activity.Actor) (Settings, error) {
-	if len(in.DataRegions) == 0 {
-		in.DataRegions = s.defaults()
-	}
-	for _, r := range in.DataRegions {
-		if !regionRE.MatchString(r) {
-			return Settings{}, fmt.Errorf("%w: region %q", ErrInvalid, r)
+// Change is a partial settings update: a nil field keeps its stored value,
+// so omitting legal_hold never lifts a hold. Lifting one means sending
+// legal_hold "" with a LiftReason.
+type Change struct {
+	DataRegions     *[]string `json:"data_regions"`
+	DeletionEnabled *bool     `json:"deletion_enabled"`
+	LegalHold       *string   `json:"legal_hold"`
+	LiftReason      string    `json:"lift_reason"`
+}
+
+// Configure applies a Change to a Tenant's settings. Turning deletion on or
+// off, and placing or lifting a legal hold, are each their own Activity type.
+func (s Service) Configure(ctx context.Context, tenant string, ch Change, by activity.Actor) (Settings, error) {
+	if ch.DataRegions != nil {
+		for _, r := range *ch.DataRegions {
+			if !regionRE.MatchString(r) {
+				return Settings{}, fmt.Errorf("%w: region %q", ErrInvalid, r)
+			}
 		}
 	}
-	in.LegalHold = strings.TrimSpace(in.LegalHold)
-	if len(in.LegalHold) > 500 {
-		return Settings{}, fmt.Errorf("%w: legal hold reason over 500 characters", ErrInvalid)
+	if ch.LegalHold != nil {
+		if *ch.LegalHold = strings.TrimSpace(*ch.LegalHold); len(*ch.LegalHold) > 500 {
+			return Settings{}, fmt.Errorf("%w: legal hold reason over 500 characters", ErrInvalid)
+		}
 	}
-	slices.Sort(in.DataRegions)
-	in.DataRegions = slices.Compact(in.DataRegions)
+	ch.LiftReason = strings.TrimSpace(ch.LiftReason)
+	if len(ch.LiftReason) > 500 {
+		return Settings{}, fmt.Errorf("%w: lift reason over 500 characters", ErrInvalid)
+	}
 	now := s.now()
-	in.UpdatedAt, in.UpdatedBy = &now, by.UID
-	return in, s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+	var out Settings
+	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		was, err := s.settings(ctx, tx)
 		if err != nil {
 			return err
 		}
+		out = was
+		if ch.DataRegions != nil {
+			out.DataRegions = slices.Clone(*ch.DataRegions)
+			if len(out.DataRegions) == 0 {
+				out.DataRegions = s.defaults()
+			}
+			slices.Sort(out.DataRegions)
+			out.DataRegions = slices.Compact(out.DataRegions)
+		}
+		if ch.DeletionEnabled != nil {
+			out.DeletionEnabled = *ch.DeletionEnabled
+		}
+		if ch.LegalHold != nil {
+			out.LegalHold = *ch.LegalHold
+		}
+		lifted := was.LegalHold != "" && out.LegalHold == ""
+		if lifted && ch.LiftReason == "" {
+			return fmt.Errorf("%w: lifting the legal hold needs lift_reason", ErrInvalid)
+		}
+		out.UpdatedAt, out.UpdatedBy = &now, by.UID
 		if _, err := tx.Exec(ctx, `INSERT INTO pdpa_settings (tenant_id, data_regions, deletion_enabled, legal_hold, updated_at, updated_by) VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (tenant_id) DO UPDATE SET data_regions = $2, deletion_enabled = $3, legal_hold = $4, updated_at = $5, updated_by = $6`,
-			tenant, in.DataRegions, in.DeletionEnabled, in.LegalHold, now, by.UID); err != nil {
+			tenant, out.DataRegions, out.DeletionEnabled, out.LegalHold, now, by.UID); err != nil {
 			return err
 		}
-		typ := "keel.pdpa.settings.updated"
+		var types []string
 		switch {
-		case in.DeletionEnabled && !was.DeletionEnabled:
-			typ = "keel.pdpa.deletion.enabled"
-		case !in.DeletionEnabled && was.DeletionEnabled:
-			typ = "keel.pdpa.deletion.disabled"
+		case out.DeletionEnabled && !was.DeletionEnabled:
+			types = append(types, "keel.pdpa.deletion.enabled")
+		case !out.DeletionEnabled && was.DeletionEnabled:
+			types = append(types, "keel.pdpa.deletion.disabled")
 		}
-		hold := "none"
-		if in.LegalHold != "" {
-			hold = in.LegalHold
+		switch {
+		case lifted:
+			types = append(types, "keel.pdpa.legal_hold.lifted")
+		case out.LegalHold != was.LegalHold:
+			types = append(types, "keel.pdpa.legal_hold.placed")
 		}
-		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/pdpa", Type: typ, Subject: "tenant/" + tenant,
-			Operation: "ConfigurePDPA", Kind: activity.Update, Actor: by, Outcome: activity.Success, Time: now,
-			StatusDetail: fmt.Sprintf("data regions %s; deletion enabled %t (was %t); legal hold: %s", strings.Join(in.DataRegions, ","), in.DeletionEnabled, was.DeletionEnabled, hold)})
-		return err
+		if len(types) == 0 {
+			types = append(types, "keel.pdpa.settings.updated")
+		}
+		hold := func(h string) string {
+			if h == "" {
+				return "none"
+			}
+			return h
+		}
+		detail := fmt.Sprintf("data regions %s; deletion enabled %t (was %t); legal hold: %s (was %s)",
+			strings.Join(out.DataRegions, ","), out.DeletionEnabled, was.DeletionEnabled, hold(out.LegalHold), hold(was.LegalHold))
+		if lifted {
+			detail += "; lifted because: " + ch.LiftReason
+		}
+		for _, typ := range types {
+			if _, err := activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/pdpa", Type: typ, Subject: "tenant/" + tenant,
+				Operation: "ConfigurePDPA", Kind: activity.Update, Actor: by, Outcome: activity.Success, Time: now, StatusDetail: detail}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
+	if err != nil {
+		return Settings{}, err
+	}
+	return out, nil
 }
 
 // Overview is what the API shows: settings, the retention schedule and every

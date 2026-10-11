@@ -55,6 +55,8 @@ func scalar[T any](t *testing.T, s *store.Store, tenant, sql string, args ...any
 	return v
 }
 
+func ptr[T any](v T) *T { return &v }
+
 func activities(t *testing.T, s *store.Store, tenant, typ string) int {
 	t.Helper()
 	return scalar[int](t, s, tenant, `SELECT count(*) FROM activities WHERE type = $1`, typ)
@@ -171,7 +173,7 @@ func TestResidencyRaisesOneFindingPerLocationOutsideTheRegionSet(t *testing.T) {
 
 	// A platform admin agrees Singapore for TAT: that Finding resolves, the
 	// archive's stays open.
-	if _, err := svc.Configure(ctx, tat, pdpa.Settings{DataRegions: []string{"ap-bangkok", "ap-singapore"}}, admin); err != nil {
+	if _, err := svc.Configure(ctx, tat, pdpa.Change{DataRegions: &[]string{"ap-bangkok", "ap-singapore"}}, admin); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.RunResidency(ctx); err != nil {
@@ -202,9 +204,16 @@ func expirable(t *testing.T, s *store.Store, tenant, slug string, n int, now tim
 	}
 	expired["findings"] = f(3*365*day+day, slug+"-old")
 	f(3*365*day-day, slug+"-recent")
-	referenced := f(4*365*day, slug+"-recommended")
+	// Expired but still referenced: by a Recommendation (FK), an Exception and
+	// a break-glass use (uuid columns without an FK).
 	exec(t, s, tenant, `INSERT INTO recommendations (tenant_id, fingerprint, source, provider, resource_id, resource_type, action, monthly_savings, currency, confidence, finding_id)
-		VALUES ($1, $2, 'test', 'tencent', 'r', 'vm', 'resize', 1, 'USD', 0.5, $3)`, tenant, slug+"-rec", referenced)
+		VALUES ($1, $2, 'test', 'tencent', 'r', 'vm', 'resize', 1, 'USD', 0.5, $3)`, tenant, slug+"-rec", f(4*365*day, slug+"-ref-recommendation"))
+	exec(t, s, tenant, `INSERT INTO exceptions (tenant_id, finding_ids, reason, requested_by, expires_at) VALUES ($1, ARRAY[$2::uuid], 'accepted risk for the audit', 'user:x', $3)`,
+		tenant, f(4*365*day, slug+"-ref-exception"), now.AddDate(-3, 0, 0))
+	exec(t, s, tenant, `WITH i AS (INSERT INTO breakglass_identities (tenant_id, provider, account, principal_id, name, holder, hardware_mfa, created_by)
+		VALUES ($1, 'tencent', $2, $2, 'bg', 'ops', true, 'user:x') RETURNING id)
+		INSERT INTO breakglass_uses (tenant_id, identity_id, event_id, event_name, used_at, finding_id) SELECT $1, i.id, $2, 'ConsoleLogin', $3, $4::uuid FROM i`,
+		tenant, slug+"-bg", now.AddDate(-4, 0, 0), f(4*365*day, slug+"-ref-breakglass"))
 	exec(t, s, tenant, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, first_seen_at, last_seen_at) VALUES ($1, 'test', $2, 'low', 'still open', $3, $3)`,
 		tenant, slug+"-open", now.AddDate(-10, 0, 0))
 
@@ -268,6 +277,9 @@ func eachClassCounts(t *testing.T, r pdpa.RetentionRun, want int64) {
 		if c.Rows != want {
 			t.Errorf("%s %s: %d rows, want %d", r.Mode, c.Class, c.Rows, want)
 		}
+		if wantRef := map[string]int64{"findings": 3}[c.Class]; c.Referenced != wantRef {
+			t.Errorf("%s %s: %d retained because referenced, want %d", r.Mode, c.Class, c.Referenced, wantRef)
+		}
 	}
 }
 
@@ -298,7 +310,7 @@ func TestRetentionDryRunThenDeletesExactlyTheExpiredRowsAndKeepsTheLogVerifiable
 			t.Fatalf("verify-log %s: %+v", when, r)
 		}
 	}
-	if _, err := svc.Configure(ctx, tat, pdpa.Settings{}, admin); err != nil {
+	if _, err := svc.Configure(ctx, tat, pdpa.Change{}, admin); err != nil {
 		t.Fatal(err)
 	}
 	verify("before retention")
@@ -324,7 +336,7 @@ func TestRetentionDryRunThenDeletesExactlyTheExpiredRowsAndKeepsTheLogVerifiable
 
 	// Enabling deletion is itself an Activity; the next run deletes exactly
 	// the expired rows, in TAT only.
-	if _, err := svc.Configure(ctx, tat, pdpa.Settings{DeletionEnabled: true}, admin); err != nil {
+	if _, err := svc.Configure(ctx, tat, pdpa.Change{DeletionEnabled: ptr(true)}, admin); err != nil {
 		t.Fatal(err)
 	}
 	if n := activities(t, s, tat, "keel.pdpa.deletion.enabled"); n != 1 {
@@ -355,11 +367,14 @@ func TestRetentionDryRunThenDeletesExactlyTheExpiredRowsAndKeepsTheLogVerifiable
 	if n := scalar[int](t, s, tat, `SELECT count(*) FROM activities`); n != activitiesBefore+3 {
 		t.Fatalf("activities %d → %d; retention must only add its own (dry run, enable, delete)", activitiesBefore, n)
 	}
+	if n := scalar[int](t, s, tat, `SELECT count(*) FROM findings WHERE fingerprint LIKE 'tat-ref-%'`); n != 3 {
+		t.Fatalf("%d referenced Findings left, want all 3 kept", n)
+	}
 	verify("after retention")
 
 	// A legal hold, then an open breach, each hold everything.
 	exp2 := expirable(t, s, tat, "tat2", 1, c.now())
-	if _, err := svc.Configure(ctx, tat, pdpa.Settings{DeletionEnabled: true, LegalHold: "litigation 2031-17"}, admin); err != nil {
+	if _, err := svc.Configure(ctx, tat, pdpa.Change{LegalHold: ptr("litigation 2031-17")}, admin); err != nil {
 		t.Fatal(err)
 	}
 	held := rows(t, s, tat, exp2)
@@ -370,8 +385,29 @@ func TestRetentionDryRunThenDeletesExactlyTheExpiredRowsAndKeepsTheLogVerifiable
 	if r.Mode != pdpa.Held || fmt.Sprint(rows(t, s, tat, exp2)) != fmt.Sprint(held) {
 		t.Fatalf("legal hold: mode %s, rows %v → %v", r.Mode, held, rows(t, s, tat, exp2))
 	}
-	if _, err := svc.Configure(ctx, tat, pdpa.Settings{DeletionEnabled: true}, admin); err != nil {
+	// A settings change that omits legal_hold leaves the hold in place.
+	if _, err := svc.Configure(ctx, tat, pdpa.Change{DataRegions: &[]string{"ap-bangkok"}, DeletionEnabled: ptr(true)}, admin); err != nil {
 		t.Fatal(err)
+	}
+	if r, err = svc.Retain(ctx, tat); err != nil || r.Mode != pdpa.Held || fmt.Sprint(rows(t, s, tat, exp2)) != fmt.Sprint(held) {
+		t.Fatalf("hold after a change omitting legal_hold: mode %s err %v", r.Mode, err)
+	}
+	// Lifting is explicit: legal_hold "" with a reason, recorded as its own
+	// Activity.
+	if _, err := svc.Configure(ctx, tat, pdpa.Change{LegalHold: ptr("")}, admin); !errors.Is(err, pdpa.ErrInvalid) {
+		t.Fatalf("lift without a reason: %v, want ErrInvalid", err)
+	}
+	if r, err = svc.Retain(ctx, tat); err != nil || r.Mode != pdpa.Held {
+		t.Fatalf("hold after a refused lift: mode %s err %v", r.Mode, err)
+	}
+	if activities(t, s, tat, "keel.pdpa.legal_hold.placed") != 1 || activities(t, s, tat, "keel.pdpa.legal_hold.lifted") != 0 {
+		t.Fatalf("legal hold Activities before lifting: placed %d lifted %d", activities(t, s, tat, "keel.pdpa.legal_hold.placed"), activities(t, s, tat, "keel.pdpa.legal_hold.lifted"))
+	}
+	if _, err := svc.Configure(ctx, tat, pdpa.Change{LegalHold: ptr(""), LiftReason: "case 2031-17 settled"}, admin); err != nil {
+		t.Fatal(err)
+	}
+	if n := activities(t, s, tat, "keel.pdpa.legal_hold.lifted"); n != 1 {
+		t.Fatalf("%d legal_hold.lifted Activities", n)
 	}
 	if _, err := svc.Declare(ctx, tat, pdpa.Declaration{Title: "laptop lost"}, admin); err != nil {
 		t.Fatal(err)
