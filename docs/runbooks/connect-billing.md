@@ -202,8 +202,8 @@ for provider `aws` and tries no client role, so no client gets a Finding for
 Keel's fault. The Tencent client sync carries on.
 Every session also carries a session policy built from the payer's record
 in Keel. It allows `s3:ListBucket` on the bucket only with the condition
-`StringLike` `s3:prefix` `<prefix>*`, and `s3:GetObject` only on
-`arn:aws:s3:::<bucket>/<prefix>*`. When the payer records an SSE-KMS key, it
+`StringLike` `s3:prefix` `<prefix>/*`, and `s3:GetObject` only on
+`arn:aws:s3:::<bucket>/<prefix>/*`. When the payer records an SSE-KMS key, it
 also allows `kms:Decrypt` on that key ARN only, with the condition
 `StringEquals` `kms:ViaService` `s3.<region>.amazonaws.com`, so the key
 decrypts only for S3 in the bucket's region and never for a direct KMS call
@@ -211,7 +211,7 @@ decrypts only for S3 in the bucket's region and never for a direct KMS call
 AWS grants the intersection of the role's policy and the session policy, so
 even an over-broad role lists and reads only the export prefix through Keel.
 A payer recorded with an empty prefix gets the whole bucket: `ListBucket`
-without a condition and `GetObject` on `<bucket>/*`. Record the prefix.
+without a condition and `GetObject` on `<bucket>/*`. Record the export's folder as the prefix.
 
 The role needs exactly these actions:
 
@@ -295,9 +295,14 @@ when Keel reads them, not before.
    {"provider": "aws", "external_id": "<management account id>", "name": "management", "ownership": "client",
     "read_only_role": {"role_arn": "arn:aws:iam::<management account id>:role/KeelReadOnly"}, "why": "..."}
    PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer
-   {"bucket": "<bucket>", "prefix": "<S3 path prefix>/<export name>", "region": "<bucket region>",
+   {"bucket": "<bucket>", "prefix": "<S3 path prefix>/<export name>/", "region": "<bucket region>",
     "kms_key_arn": "<the bucket's SSE-KMS key ARN, or omit for SSE-S3>", "why": "..."}
    ```
+   The prefix is the export's folder: Keel treats a non-empty prefix as ending
+   in `/`, so `reports/export` and `reports/export/` both read only
+   `reports/export/...` and never a sibling such as `reports/export2/`. An
+   empty prefix means the whole bucket, so leave it empty only when the bucket
+   holds nothing but this export.
    `kms_key_arn` must be a key ARN (`arn:aws:kms:<bucket region>:<account>:key/<id>`),
    not an alias. The prefix may not contain `*`, `?` or `$`, since it becomes
    part of the session policy.

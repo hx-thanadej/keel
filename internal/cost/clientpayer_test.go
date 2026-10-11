@@ -54,9 +54,9 @@ func addClient(t *testing.T, w world, provider, slug, payer, member, bucket stri
 			c.id, env, provider, member, role(member)); err != nil {
 			return err
 		}
-		delivery := map[string][2]string{"tencent": {"ap-bangkok", "per-day"}, "aws": {"us-east-1", "export-folder"}}[provider]
-		_, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, prefix, region, mode) VALUES ($1, $2, $3, $4, 'focus/', $5, $6)`,
-			c.payerAccount, c.id, provider, bucket, delivery[0], delivery[1])
+		delivery := map[string][3]string{"tencent": {"ap-bangkok", "per-day", "focus/"}, "aws": {"us-east-1", "export-folder", "focus"}}[provider]
+		_, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, prefix, region, mode) VALUES ($1, $2, $3, $4, $7, $5, $6)`,
+			c.payerAccount, c.id, provider, bucket, delivery[0], delivery[1], delivery[2])
 		return err
 	}))
 	return c

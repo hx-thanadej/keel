@@ -15,8 +15,16 @@ func TestSessionPolicyReadsOnlyTheExport(t *testing.T) {
 	}{
 		"prefix": {"aws", Export{Bucket: "c1-bills", Prefix: "exports/focus", Region: "us-east-1"},
 			`{"Version":"2012-10-17","Statement":[` +
-				`{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::c1-bills","Condition":{"StringLike":{"s3:prefix":"exports/focus*"}}},` +
-				`{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::c1-bills/exports/focus*"}]}`},
+				`{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::c1-bills","Condition":{"StringLike":{"s3:prefix":"exports/focus/*"}}},` +
+				`{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::c1-bills/exports/focus/*"}]}`},
+		"prefix without a slash is a folder": {"aws", Export{Bucket: "c1-bills", Prefix: "reports/export", Region: "us-east-1"},
+			`{"Version":"2012-10-17","Statement":[` +
+				`{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::c1-bills","Condition":{"StringLike":{"s3:prefix":"reports/export/*"}}},` +
+				`{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::c1-bills/reports/export/*"}]}`},
+		"prefix with a slash is the same folder": {"aws", Export{Bucket: "c1-bills", Prefix: "reports/export/", Region: "us-east-1"},
+			`{"Version":"2012-10-17","Statement":[` +
+				`{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::c1-bills","Condition":{"StringLike":{"s3:prefix":"reports/export/*"}}},` +
+				`{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::c1-bills/reports/export/*"}]}`},
 		"no prefix is the whole bucket": {"aws", Export{Bucket: "c1-bills", Region: "us-east-1"},
 			`{"Version":"2012-10-17","Statement":[` +
 				`{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::c1-bills"},` +

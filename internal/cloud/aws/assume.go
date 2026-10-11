@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/endpointcreds"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+
+	"github.com/hx-thanadej/keel/internal/cost"
 )
 
 // Identity is Keel's own AWS identity, the principal a client's trust policy
@@ -59,8 +61,9 @@ type ClientRole struct {
 }
 
 // Export is where a client management account's Data Exports land: the S3
-// bucket and its region, the export's key prefix (empty means the whole
-// bucket), and the bucket's SSE-KMS key ARN when it has one.
+// bucket and its region, the export's folder (a key prefix; one without a
+// trailing "/" is given one, and empty means the whole bucket), and the
+// bucket's SSE-KMS key ARN when it has one.
 type Export struct {
 	Bucket, Prefix, Region, KMSKeyARN string
 }
@@ -86,10 +89,11 @@ func sessionPolicy(partition string, e Export) (string, error) {
 	if strings.ContainsAny(e.Bucket+e.Prefix, "*?$") {
 		return "", fmt.Errorf("export bucket %q or prefix %q holds an IAM wildcard or policy variable", e.Bucket, e.Prefix)
 	}
+	prefix := cost.FolderPrefix(e.Prefix)
 	list := statement{Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:" + partition + ":s3:::" + e.Bucket}
-	get := statement{Effect: "Allow", Action: "s3:GetObject", Resource: "arn:" + partition + ":s3:::" + e.Bucket + "/" + e.Prefix + "*"}
-	if e.Prefix != "" {
-		list.Condition = map[string]map[string]string{"StringLike": {"s3:prefix": e.Prefix + "*"}}
+	get := statement{Effect: "Allow", Action: "s3:GetObject", Resource: "arn:" + partition + ":s3:::" + e.Bucket + "/" + prefix + "*"}
+	if prefix != "" {
+		list.Condition = map[string]map[string]string{"StringLike": {"s3:prefix": prefix + "*"}}
 	}
 	statements := []statement{list, get}
 	if e.KMSKeyARN != "" {

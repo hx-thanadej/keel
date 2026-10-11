@@ -83,17 +83,24 @@ func TestAWSClientPayersLandOnlyInTheirTenant(t *testing.T) {
 		),
 		c2.payer: exportBucket(awsExport(t, c2.payer, billRow{sub: c2.member, cost: "20.00"})),
 	}
+	sibling := "focus2/data/BILLING_PERIOD=2026-09/part-0.csv.gz"
+	buckets[c1.payer].objs[sibling], buckets[c1.payer].etags[sibling] = awsExport(t, c1.payer, billRow{sub: c1.member, cost: "99.00"}), "v1"
 	var connected []string
+	var prefixes []string
 	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "aws", OwnPayers: []string{"111111111111"},
 		Now: func() time.Time { return now },
 		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 			connected = append(connected, p.PayerID+"@"+p.RoleARN+"@"+p.Bucket+"@"+p.Region)
+			prefixes = append(prefixes, p.Prefix)
 			return buckets[p.PayerID], nil, nil
 		}}
 	runs, err := cs.Run(ctx)
 	must(t, err)
 	if want := []string{c1.payer + "@arn:aws:iam::" + c1.payer + ":role/KeelReadOnly@c1-bills@us-east-1", c2.payer + "@arn:aws:iam::" + c2.payer + ":role/KeelReadOnly@c2-bills@us-east-1"}; !slices.Equal(connected, want) {
 		t.Fatalf("connected %v, want each management account through its own role %v", connected, want)
+	}
+	if want := []string{"focus/", "focus/"}; !slices.Equal(prefixes, want) {
+		t.Fatalf("connected with prefixes %q, want the stored folder prefix %q given a trailing slash", prefixes, want)
 	}
 	if len(runs) != 2 || len(runs[0].Report.Loads) != 1 || runs[0].Report.Loads[0].Dropped != 3 || len(runs[1].Report.Loads) != 1 {
 		t.Fatalf("runs %+v, want one load each and c1's three foreign lines dropped", runs)

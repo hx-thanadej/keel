@@ -182,8 +182,13 @@ func TestAWSClientPayerConnectReadsEachExportAsItsClient(t *testing.T) {
 			return
 		}
 		if key == "" {
-			_, _ = io.WriteString(w, `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>`+bucket+`</Name><Prefix>exports/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>`+
-				`<Contents><Key>exports/focus/data/BILLING_PERIOD=2026-09/part-0.csv.gz</Key><ETag>"e-`+bucket+`"</ETag><Size>3</Size><LastModified>2026-09-02T00:00:00.000Z</LastModified></Contents></ListBucketResult>`)
+			var contents string
+			for _, k := range []string{"exports/focus/data/BILLING_PERIOD=2026-09/part-0.csv.gz", "exports2/x.csv.gz"} {
+				if strings.HasPrefix(k, r.URL.Query().Get("prefix")) {
+					contents += `<Contents><Key>` + k + `</Key><ETag>"e-` + bucket + `"</ETag><Size>3</Size><LastModified>2026-09-02T00:00:00.000Z</LastModified></Contents>`
+				}
+			}
+			_, _ = io.WriteString(w, `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>`+bucket+`</Name><Prefix>exports/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>`+contents+`</ListBucketResult>`)
 			return
 		}
 		w.Header().Set("Last-Modified", "Wed, 02 Sep 2026 00:00:00 GMT")
@@ -215,8 +220,8 @@ func TestAWSClientPayerConnectReadsEachExportAsItsClient(t *testing.T) {
 		if inv != nil {
 			t.Errorf("payer %s has an invoice source; AWS client payers have none", p.PayerID)
 		}
-		listed, err := objs.(cost.ETagLister).ListWithETag(context.Background(), "exports/")
-		if err != nil || len(listed) != 1 {
+		listed, err := objs.(cost.ETagLister).ListWithETag(context.Background(), cost.FolderPrefix("exports"))
+		if err != nil || len(listed) != 1 || strings.HasPrefix(listed[0].Key, "exports2/") {
 			t.Fatalf("payer %s listed %v, %v", p.PayerID, listed, err)
 		}
 		if _, err := objs.Get(context.Background(), listed[0].Key); err != nil {

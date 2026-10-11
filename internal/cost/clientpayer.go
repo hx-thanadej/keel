@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -86,6 +87,16 @@ func (c *ClientBillSync) Run(ctx context.Context) ([]ClientSync, error) {
 		out = append(out, cs)
 	}
 	return out, errors.Join(failed...)
+}
+
+// FolderPrefix scopes an AWS export prefix to a folder: a non-empty prefix
+// ends in "/", so reports/export cannot also match reports/export2/. The
+// empty prefix stays empty and means the whole bucket.
+func FolderPrefix(prefix string) string {
+	if prefix == "" || strings.HasSuffix(prefix, "/") {
+		return prefix
+	}
+	return prefix + "/"
 }
 
 func (c *ClientBillSync) one(ctx context.Context, p ClientPayer) (ClientSync, error) {
@@ -211,6 +222,9 @@ func (c *ClientBillSync) payers(ctx context.Context) ([]ClientPayer, error) {
 		var mode string
 		err := r.Scan(&p.TenantID, &p.CloudAccountID, &p.PayerID, &p.RoleARN, &p.RoleExternalID, &p.Bucket, &p.Prefix, &p.Region, &mode, &p.KMSKeyARN)
 		p.Mode = payerModes[mode]
+		if c.Provider == "aws" {
+			p.Prefix = FolderPrefix(p.Prefix)
+		}
 		return p, err
 	})
 }
