@@ -45,6 +45,7 @@ var (
 	CRAReport             = kind("cra_report")
 	GitHubGovernance      = kind("github_governance")
 	IaC                   = kind("iac")
+	KeelIdentityUnusable  = kind("keel_identity_unusable")
 	LandingZoneDrift      = kind("landing_zone_drift")
 	LeakedKey             = kind("leaked_key")
 	MaturityAssessmentDue = kind("maturity_assessment_due")

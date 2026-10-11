@@ -293,6 +293,9 @@ func TestBrokenAWSIdentityLeavesTencentSyncing(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+			t.Setenv("KEEL_ENV", "dev")
+			t.Setenv("TENCENTCLOUD_SECRET_ID", "keel-dev-id")
+			t.Setenv("TENCENTCLOUD_SECRET_KEY", "keel-dev-key")
 			for k, v := range env {
 				t.Setenv(k, v)
 			}
@@ -304,8 +307,8 @@ func TestBrokenAWSIdentityLeavesTencentSyncing(t *testing.T) {
 			if !slices.Equal(providers, []string{"tencent", "aws"}) {
 				t.Fatalf("client syncs %v, want tencent and aws", providers)
 			}
-			if syncs[0].Ready != nil || syncs[0].Connect == nil {
-				t.Error("the Tencent sync depends on Keel's AWS identity")
+			if err := syncs[0].Ready(context.Background()); err != nil || syncs[0].Connect == nil {
+				t.Errorf("the Tencent sync is not ready with Keel's Tencent credentials and a broken AWS identity: %v", err)
 			}
 			if err := syncs[1].Ready(context.Background()); err == nil {
 				t.Error("the AWS sync is ready with a broken Keel identity")
