@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { finops, ApiError, type Finding } from './api'
+import { api, finops, ApiError, type CloudAccount, type Finding, type Recommendation } from './api'
+import { manualSteps, opensPullRequest, ownershipOf, readOnlyReason, recommendationAccounts } from './ownership'
 
 const sev = {
   critical: { cls: 'critical', icon: '✕', text: 'Critical' },
@@ -24,12 +25,17 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
     }
   }, [tenantId, reload])
 
-  const [recs, setRecs] = useState<Record<string, { id: string; pr_url: string | null }>>({})
+  const [recs, setRecs] = useState<Record<string, Recommendation>>({})
+  const [accounts, setAccounts] = useState<CloudAccount[]>([])
   useEffect(() => {
     finops
       .recommendations(tenantId)
-      .then((rs) => setRecs(Object.fromEntries(rs.map((r) => [r.finding_id, { id: r.id, pr_url: r.pr_url }]))))
+      .then((rs) => setRecs(Object.fromEntries(rs.map((r) => [r.finding_id, r]))))
       .catch(() => setRecs({}))
+    api
+      .cloudAccounts(tenantId)
+      .then(setAccounts)
+      .catch(() => setAccounts([]))
   }, [tenantId, reload])
 
   const openPR = async (f: Finding) => {
@@ -66,6 +72,8 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
         const cur = f.detail.current as Record<string, string> | undefined
         const rec = f.detail.recommended as Record<string, string> | undefined
         const ev = f.detail.evidence as Record<string, unknown> | undefined
+        const r = recs[f.id]
+        const readOnly = r ? readOnlyReason(ownershipOf(recommendationAccounts(r, accounts))) : null
         return (
           <article key={f.id} className="card finding">
             <span className={`status ${s.cls}`}>
@@ -90,13 +98,19 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
               </span>
             )}
             <span className="meta">First seen {new Date(f.first_seen_at).toLocaleString()}</span>
+            {r && !opensPullRequest(r) && (
+              <span className="meta">
+                Manual steps: {manualSteps(r)} {readOnly ?? 'Keel opens pull requests only for Kubernetes request changes and off-hours schedules.'}
+              </span>
+            )}
+            {r && opensPullRequest(r) && readOnly && <span className="meta">The pull request goes to your Git repository; Keel does not change the client-owned account.</span>}
             <div className="toolbar">
-              {f.kind === 'rightsizing' && recs[f.id]?.pr_url && (
-                <a href={recs[f.id].pr_url ?? '#'} target="_blank" rel="noopener noreferrer">
+              {r && opensPullRequest(r) && r.pr_url && (
+                <a href={r.pr_url} target="_blank" rel="noopener noreferrer">
                   View pull request
                 </a>
               )}
-              {f.kind === 'rightsizing' && recs[f.id] && !recs[f.id].pr_url && (
+              {r && opensPullRequest(r) && !r.pr_url && (
                 <button className="primary" onClick={() => openPR(f)}>
                   Open pull request
                 </button>

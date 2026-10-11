@@ -93,7 +93,17 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
             {tab === 'compliance' && <ComplianceView key={current.id} tenantId={current.id} canConfigure={me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin')} />}
             {tab === 'access' && <AccessView key={current.id} tenantId={current.id} />}
             {tab === 'insights' && <InsightsView key={current.id} tenantId={current.id} canSubmit={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'tenant_approver'))} canGenerate={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'finops_lead'))} />}
-            {tab === 'catalog' && <TenantView key={current.id} tenant={current} />}
+            {tab === 'catalog' && (
+              <TenantView
+                key={current.id}
+                tenant={current}
+                rights={{
+                  vend: me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin'),
+                  wasteCleanup: me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'team_lead')),
+                  ownership: me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin'),
+                }}
+              />
+            )}
             {tab === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
           </>
         )}

@@ -152,3 +152,15 @@ button.primary, a.button.primary { text-decoration: none; display: inline-block;
 .delivery input { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); max-width: 100%; }
 .data-table.controls th, .data-table.controls td { text-align: left; vertical-align: top; overflow-wrap: break-word; }
 .delivery select { font: inherit; display: block; margin-top: 6px; max-width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); }
+
+/* ---- Ownership (ADR-0018): the badge text carries the meaning; the border only reinforces it. ---- */
+.badge.own-client { color: var(--text); background: var(--surface); border: 1px dashed var(--text); }
+.badge.own-mixed { color: var(--text); background: var(--surface); border: 1px dotted var(--muted); }
+.reason { font-size: 0.85em; color: var(--muted); }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+.accounts { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; flex-basis: 100%; }
+.role-health { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 6px 0 0; font-size: 0.85em; }
+.role-health dt { color: var(--muted); }
+.role-health dd { margin: 0; overflow-wrap: anywhere; }
+.role-health ul { margin: 0; padding-left: 16px; }
+@media (max-width: 640px) { .role-health { grid-template-columns: minmax(0, 1fr); } }

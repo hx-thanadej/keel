@@ -177,7 +177,8 @@ describe('finops screens', () => {
       title: 'Right-size requests of prod-tke/tat-crm-prod/api/app: save about 21516.00 THB/month',
       detail: { current: { cpu: '2000m', memory: '4096Mi' }, recommended: { cpu: '410m', memory: '1531Mi' }, evidence: { lookback_days: 21, replicas: 2 } },
       first_seen_at: '2026-09-30T03:00:00Z', resolution: null }] },
-      [`/v1/tenants/${tat}/recommendations`]: { items: [{ id: 'r2', finding_id: 'f2', pr_url: null, state: 'open' }] } })
+      [`/v1/tenants/${tat}/recommendations`]: { items: [{ id: 'r2', finding_id: 'f2', pr_url: null, state: 'open', provider: 'k8s', account_id: '', environment_id: 'e1',
+        resource_id: 'prod-tke/tat-crm-prod/api/app', resource_type: 'k8s_workload', action: 'resize_requests', current: {}, recommended: {} }] } })
     render(<App />)
     await userEvent.click(await screen.findByRole('tab', { name: 'Findings' }))
     expect(await screen.findByText(/cpu: 2000m → 410m · memory: 4096Mi → 1531Mi · based on 21 days, 2 replica/)).toBeTruthy()
@@ -590,6 +591,163 @@ describe('finops screens', () => {
     expect(await screen.findByText(/Critical · cost anomaly/)).toBeTruthy()
     expect(screen.getByText(/Overdue since 18 Sept 2026|Overdue since 18 Sep 2026/)).toBeTruthy()
     expect(screen.getByText(/nat-2 \(\+300.00\)/)).toBeTruthy()
+  })
+})
+
+describe('client-owned accounts (ADR-0018)', () => {
+  const role = { role_arn: 'qcs::cam::uin/200048351622:roleName/keel-readonly' }
+  // e1 holds a client- and a platform-owned account (mixed), e2 only a client-owned one, e3 none.
+  const routes: Routes = {
+    ...tenantRoutes,
+    [`/v1/tenants/${tat}/projects/p1/environments`]: { items: [{ id: 'e1', project_id: 'p1', name: 'prod' }, { id: 'e2', project_id: 'p1', name: 'dev' }, { id: 'e3', project_id: 'p1', name: 'sandbox' }] },
+    [`/v1/tenants/${tat}/cloud-accounts`]: { items: [
+      { id: 'a1', environment_id: 'e1', provider: 'tencent', external_id: '200048351622', name: 'tat-crm-prod', ownership: 'client', read_only_role: role },
+      { id: 'a2', environment_id: 'e1', provider: 'aws', external_id: '123456789012', name: 'tat-crm-prod-aws', ownership: 'platform', read_only_role: null },
+      { id: 'a3', environment_id: 'e2', provider: 'tencent', external_id: '200048351623', name: 'tat-crm-dev', ownership: 'client', read_only_role: role },
+    ] },
+    [`/v1/tenants/${tat}/cloud-accounts/role-health`]: { items: [
+      { cloud_account_id: 'a1', client_payer: true, last_assume_at: '2026-10-10T01:00:00Z', last_ingest_at: '2026-10-10T02:00:00Z',
+        findings: [{ id: 'f1', kind: 'client_role_unusable', severity: 'high', title: 'Keel cannot assume tencent read-only role keel-readonly for payer 200048351622' }] },
+      { cloud_account_id: 'a3', client_payer: false, last_assume_at: null, last_ingest_at: null, findings: [] },
+    ] },
+  }
+  const description = (el: HTMLElement) => document.getElementById(el.getAttribute('aria-describedby') ?? '')?.textContent ?? ''
+  const envRow = async (name: string) => (await screen.findByText(name, { selector: '.env' })).closest('li') as HTMLElement
+  const openProjects = async () => {
+    await userEvent.click(await screen.findByRole('button', { name: 'TAT' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Projects' }))
+  }
+
+  it('badges Cloud Accounts, Environments and the Project in words, and says mixed when both', async () => {
+    mockFetch({ '/auth/me': operator, ...routes })
+    render(<App />)
+    await openProjects()
+    expect((await screen.findByRole('heading', { name: /TAT CRM/ })).textContent).toMatch(/Mixed ownership/)
+    const prod = await envRow('prod')
+    expect(within(prod).getAllByText('Mixed ownership')).toHaveLength(1)
+    expect(within(prod).getAllByText('Client-owned')).toHaveLength(1) // a1
+    expect(within(prod).getAllByText('Platform-owned')).toHaveLength(1) // a2
+    expect(within(await envRow('dev')).getAllByText('Client-owned')).toHaveLength(2) // the Environment and a3
+    expect(within(await envRow('sandbox')).queryByText(/owned|ownership/)).toBeNull()
+  })
+
+  it('disables vending and waste cleanup with the reason on client-owned Environments, and vends where Keel may', async () => {
+    const calls = mockFetch({ '/auth/me': operator, ...routes, [`/v1/tenants/${tat}/projects/p1/environments/e3/vend`]: { id: 'fl1', state: 'running' } })
+    render(<App />)
+    await openProjects()
+    for (const name of ['prod', 'dev']) {
+      const row = await envRow(name)
+      const vend = within(row).getByRole('button', { name: 'Vend Tencent account' }) as HTMLButtonElement
+      expect(vend.disabled).toBe(true)
+      expect(description(vend)).toMatch(/read-only role .* never changes it/)
+      const cleanup = within(row).getByRole('checkbox', { name: /Automatic waste cleanup/ }) as HTMLInputElement
+      expect(cleanup.disabled).toBe(true)
+      expect(description(cleanup)).toMatch(/never changes it/)
+    }
+    const sandbox = await envRow('sandbox')
+    const vend = within(sandbox).getByRole('button', { name: 'Vend Tencent account' }) as HTMLButtonElement
+    expect(vend.disabled).toBe(false)
+    expect(vend.getAttribute('aria-describedby')).toBeNull()
+    expect((within(sandbox).getByRole('checkbox', { name: /Automatic waste cleanup/ }) as HTMLInputElement).disabled).toBe(false)
+    await userEvent.click(vend)
+    expect(calls).toContain(`/v1/tenants/${tat}/projects/p1/environments/e3/vend`)
+  })
+
+  it('shows read-only role health: last assume, last bill ingested and open role Findings', async () => {
+    mockFetch({ '/auth/me': operator, ...routes })
+    render(<App />)
+    await openProjects()
+    await waitFor(() => expect(screen.getAllByLabelText('Read-only role health')[0].textContent).toMatch(/Last successful assume10 Oct 2026/))
+    const [prodHealth, devHealth] = screen.getAllByLabelText('Read-only role health')
+    expect(prodHealth.textContent).toMatch(/qcs::cam::uin\/200048351622:roleName\/keel-readonly/)
+    expect(prodHealth.textContent).toMatch(/Last bill ingested10 Oct 2026/)
+    expect(within(prodHealth).getByText(/! High/).closest('li')?.textContent).toMatch(/Keel cannot assume tencent read-only role/)
+    expect(devHealth.textContent).toMatch(/Last successful assumenever \(Keel assumes this role only to read a client payer’s bills\)/)
+    expect(devHealth.textContent).toMatch(/Last bill ingestednever/)
+    expect(devHealth.textContent).toMatch(/Open role and delivery Findingsnone/)
+  })
+
+  it('lists a client-owned account with no Environment as unassigned client-owned, never as a platform account', async () => {
+    mockFetch({
+      '/auth/me': operator,
+      ...routes,
+      [`/v1/tenants/${tat}/cloud-accounts`]: { items: [
+        { id: 'a4', environment_id: null, provider: 'tencent', external_id: '200048351699', name: 'tat-payer', ownership: 'client', read_only_role: role },
+        { id: 'a5', environment_id: null, provider: 'tencent', external_id: '200046202634', name: 'keel-shared', ownership: 'platform', read_only_role: null },
+      ] },
+      [`/v1/tenants/${tat}/cloud-accounts/role-health`]: { items: [{ cloud_account_id: 'a4', client_payer: true, last_assume_at: null, last_ingest_at: null, findings: [] }] },
+    })
+    render(<App />)
+    await openProjects()
+    const unassigned = (await screen.findByRole('heading', { name: 'Unassigned client-owned accounts' })).closest('article') as HTMLElement
+    expect(within(unassigned).getByText(/tat-payer/)).toBeTruthy()
+    expect(within(unassigned).queryByText(/keel-shared/)).toBeNull()
+    await waitFor(() => expect(within(unassigned).getByLabelText('Read-only role health').textContent).toMatch(/Last successful assumenever.*Last bill ingestednever/))
+    const platform = screen.getByRole('heading', { name: 'Platform accounts' }).closest('article') as HTMLElement
+    expect(within(platform).getByText(/keel-shared/)).toBeTruthy()
+    expect(within(platform).queryByText(/tat-payer/)).toBeNull()
+  })
+
+  it('shows a Tenant Member the same status, with no controls', async () => {
+    mockFetch({ '/auth/me': member, ...routes })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Projects' }))
+    await waitFor(() => expect(screen.getAllByLabelText('Read-only role health')[0].textContent).toMatch(/Last bill ingested10 Oct 2026/))
+    expect(screen.getAllByLabelText('Read-only role health')).toHaveLength(2)
+    expect(screen.getByRole('heading', { name: /TAT CRM/ }).textContent).toMatch(/Mixed ownership/)
+    expect(screen.queryByRole('button', { name: /Vend|Make client-owned|Make platform-owned/ })).toBeNull()
+    expect(screen.queryByRole('checkbox')).toBeNull()
+  })
+
+  it('lets a platform admin switch ownership and lists the Access Grants a 409 says to end', async () => {
+    const bodies: Record<string, unknown> = {}
+    const refusal = 'access grants are open in this account: reject or revoke them first: access_grant/0192a5b0-1111-7000-8000-000000000001 (user:ops@harmonyx.co, operator), access_grant/0192a5b0-1111-7000-8000-000000000002 (user:eng@harmonyx.co, read-only)'
+    mockFetch({ '/auth/me': operator, ...routes, [`/v1/tenants/${tat}/cloud-accounts/a2`]: new Response(JSON.stringify({ error: refusal }), { status: 409 }) }, bodies)
+    render(<App />)
+    await openProjects()
+    await userEvent.click(await screen.findByRole('button', { name: 'Make client-owned…' }))
+    const form = screen.getByRole('form', { name: 'Change ownership of tat-crm-prod-aws' })
+    await userEvent.type(within(form).getByLabelText('Role ARN'), 'arn:aws:iam::123456789012:role/keel-readonly')
+    await userEvent.type(within(form).getByLabelText('Why'), 'client took the account back')
+    await userEvent.click(within(form).getByRole('button', { name: 'Make client-owned' }))
+    const alert = await within(form).findByRole('alert')
+    expect(alert.textContent).toMatch(/cannot make tat-crm-prod-aws client-owned while these Access Grants are open/)
+    expect(within(alert).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'access_grant/0192a5b0-1111-7000-8000-000000000001 (user:ops@harmonyx.co, operator)',
+      'access_grant/0192a5b0-1111-7000-8000-000000000002 (user:eng@harmonyx.co, read-only)',
+    ])
+    expect(bodies[`/v1/tenants/${tat}/cloud-accounts/a2`]).toEqual({ ownership: 'client', read_only_role: { role_arn: 'arn:aws:iam::123456789012:role/keel-readonly' }, why: 'client took the account back' })
+  })
+
+  it('disables an Access Grant request in a client-owned Environment with the reason', async () => {
+    mockFetch({
+      '/auth/me': operator, ...routes,
+      [`/v1/tenants/${tat}/teams`]: { items: [{ id: 't1', slug: 'crm', name: 'CRM' }] },
+      [`/v1/tenants/${tat}/access/templates`]: { items: [{ name: 'operator', description: '', write: true, max_hours: 2 }] },
+      [`/v1/tenants/${tat}/access/roles`]: { items: [{ id: 'r1', environment_id: 'e2', team_id: 't1', template: 'operator', state: 'active', requested_by: 'u' }] },
+      [`/v1/tenants/${tat}/access/grants`]: { items: [] },
+      [`/v1/tenants/${tat}/findings`]: { items: [] },
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'TAT' }))
+    await userEvent.click(await screen.findByRole('tab', { name: 'Access' }))
+    const request = (await screen.findByRole('button', { name: 'Request access' })) as HTMLButtonElement
+    await waitFor(() => expect(request.disabled).toBe(true))
+    expect(description(request)).toMatch(/^Client-owned: .* never changes it/)
+  })
+
+  it('offers manual steps, not apply, for a recommendation in a client-owned account', async () => {
+    mockFetch({
+      '/auth/me': member, ...routes,
+      [`/v1/tenants/${tat}/findings`]: { items: [{ id: 'f4', kind: 'rightsizing', severity: 'medium', status: 'open', title: 'Right-size ins-dev', detail: {}, first_seen_at: '2026-10-01T00:00:00Z', resolution: null }] },
+      [`/v1/tenants/${tat}/recommendations`]: { items: [{ id: 'r4', finding_id: 'f4', pr_url: null, state: 'open', provider: 'tencent', account_id: '200048351623', environment_id: 'e2',
+        resource_id: 'ins-dev', resource_type: 'vm', action: 'resize', current: { instance_type: 'S5.2XLARGE16' }, recommended: { instance_type: 'S5.LARGE8' } }] },
+    })
+    render(<App />)
+    await userEvent.click(await screen.findByRole('tab', { name: 'Findings' }))
+    const steps = await screen.findByText(/^Manual steps:/)
+    expect(steps.textContent).toMatch(/resize on vm ins-dev in account 200048351623: change instance_type from S5.2XLARGE16 to S5.LARGE8\. Client-owned: .* never changes it/)
+    expect(screen.queryByRole('button', { name: /Open pull request|Apply/ })).toBeNull()
   })
 })
 

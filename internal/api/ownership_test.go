@@ -321,3 +321,30 @@ func TestOwnershipSwitchDuringGrantActivation(t *testing.T) {
 		}
 	})
 }
+
+func TestRoleHealthRouteForTenantMembers(t *testing.T) {
+	c, home := setup(t)
+	_, body := c.as(homeAdmin(home)).do("POST", "/v1/tenants", map[string]any{"slug": "tat", "name": "TAT"})
+	tat := body["id"].(string)
+	inTAT := c.as(homeAdmin(home, auth.Binding{Role: auth.RolePlatformAdmin, TenantID: tat}))
+	accounts := "/v1/tenants/" + tat + "/cloud-accounts"
+	st, body := inTAT.do("POST", accounts, map[string]any{"provider": "tencent", "external_id": "200000000001", "name": "theirs", "ownership": "client", "read_only_role": clientRoles["tencent"]})
+	mustStatus(t, st, 201, body)
+	theirs := body["id"].(string)
+	st, body = inTAT.do("POST", accounts, map[string]any{"provider": "tencent", "external_id": "200000000002", "name": "ours"})
+	mustStatus(t, st, 201, body)
+
+	viewer := c.as(auth.Principal{Subject: "user:somchai@tat.or.th", Kind: auth.KindHuman, TenantID: tat, Bindings: []auth.Binding{{Role: auth.RoleTenantViewer, TenantID: tat}}})
+	st, body = viewer.do("GET", accounts+"/role-health", nil)
+	mustStatus(t, st, 200, body)
+	got := items(t, body)
+	if len(got) != 1 {
+		t.Fatalf("viewer role health = %v, want one client-owned account", got)
+	}
+	if got[0]["cloud_account_id"] != theirs || got[0]["client_payer"] != false || got[0]["last_assume_at"] != nil || got[0]["last_ingest_at"] != nil {
+		t.Errorf("viewer role health = %v, want only the client-owned account, never assumed or ingested", got)
+	}
+	if f, ok := got[0]["findings"].([]any); !ok || len(f) != 0 {
+		t.Errorf("findings = %v, want an empty list", got[0]["findings"])
+	}
+}

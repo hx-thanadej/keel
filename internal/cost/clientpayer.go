@@ -113,7 +113,7 @@ func (c *ClientBillSync) one(ctx context.Context, p ClientPayer) (ClientSync, er
 	if errors.As(err, &roleErr) {
 		return cs, errors.Join(err, c.roleUnusable(ctx, p, err))
 	}
-	if err := c.resolve(ctx, p, roleUnusable, "role assumed"); err != nil {
+	if err := c.assumed(ctx, p); err != nil {
 		return cs, err
 	}
 	if err != nil {
@@ -198,6 +198,19 @@ func (c *ClientBillSync) raise(ctx context.Context, p ClientPayer, kind, severit
 			p.TenantID, kind, c.fingerprint(kind, p), severity, title, c.Provider, p.PayerID, p.CloudAccountID, why, todo, c.now())
 		return err
 	})
+}
+
+// assumed records that Keel just assumed the payer's role and resolves the
+// role Finding. Connect assumes the role up front, so any Connect result
+// other than a RoleError proves it.
+func (c *ClientBillSync) assumed(ctx context.Context, p ClientPayer) error {
+	if err := c.Ingester.Store.InTenant(ctx, p.TenantID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE client_payers SET last_assumed_at = $2 WHERE cloud_account_id = $1`, p.CloudAccountID, c.now())
+		return err
+	}); err != nil {
+		return err
+	}
+	return c.resolve(ctx, p, roleUnusable, "role assumed")
 }
 
 func (c *ClientBillSync) resolve(ctx context.Context, p ClientPayer, kind, resolution string) error {

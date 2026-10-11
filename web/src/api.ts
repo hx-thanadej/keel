@@ -5,7 +5,7 @@ export type Binding = { role: string; tenant_id: string; team_ids?: string[] }
 export type Principal = { subject: string; kind: string; tenant_id: string; home: boolean; mfa?: boolean; bindings: Binding[] }
 export type Tenant = { id: string; slug: string; name: string; is_home: boolean }
 export type Project = { id: string; tenant_id: string; team_id: string; slug: string; name: string }
-export type Environment = { id: string; project_id: string; name: string }
+export type Environment = { id: string; project_id: string; name: string; waste_cleanup?: boolean }
 // The read-only role a client granted Keel (ADR-0018): a reference, never a credential.
 export type ReadOnlyRole =
   | { role_arn: string } // tencent, aws, alibaba
@@ -15,6 +15,15 @@ export type CloudAccount = { id: string; environment_id: string | null; provider
   | { ownership: 'platform'; read_only_role: null }
   | { ownership: 'client'; read_only_role: ReadOnlyRole }
 )
+/** How well Keel reads a client-owned Cloud Account through its read-only role, derived from bill sync. */
+export type RoleHealth = {
+  cloud_account_id: string
+  client_payer: boolean
+  last_assume_at: string | null
+  last_ingest_at: string | null
+  findings: { id: string; kind: string; severity: 'low' | 'medium' | 'high' | 'critical'; title: string }[]
+}
+export type OwnershipChange = { ownership: 'platform'; why: string } | { ownership: 'client'; read_only_role: ReadOnlyRole; why: string }
 export type Activity = {
   id: string
   seq: number
@@ -95,6 +104,13 @@ export const api = {
   projects: (t: string) => list<Project>(`/v1/tenants/${t}/projects`),
   environments: (t: string, p: string) => list<Environment>(`/v1/tenants/${t}/projects/${p}/environments`),
   cloudAccounts: (t: string) => list<CloudAccount>(`/v1/tenants/${t}/cloud-accounts`),
+  roleHealth: (t: string) => list<RoleHealth>(`/v1/tenants/${t}/cloud-accounts/role-health`),
+  setOwnership: (t: string, account: string, change: OwnershipChange) =>
+    request<CloudAccount>(`/v1/tenants/${t}/cloud-accounts/${account}`, { method: 'PATCH', body: JSON.stringify(change) }),
+  setWasteCleanup: (t: string, p: string, e: string, on: boolean, why: string) =>
+    request<Environment>(`/v1/tenants/${t}/projects/${p}/environments/${e}`, { method: 'PATCH', body: JSON.stringify({ waste_cleanup: on, why }) }),
+  vend: (t: string, p: string, e: string, provider: string) =>
+    request<Flow>(`/v1/tenants/${t}/projects/${p}/environments/${e}/vend`, { method: 'POST', body: JSON.stringify({ provider }) }),
   activities: (t: string, f: { actor?: string; type?: string; since?: string; before?: number; limit?: number }) => {
     const q = new URLSearchParams()
     if (f.actor) q.set('actor', f.actor)
@@ -169,6 +185,21 @@ export type Finding = {
   overdue_at?: string | null
 }
 
+export type Recommendation = {
+  id: string
+  finding_id: string
+  pr_url: string | null
+  state: string
+  provider: string
+  account_id: string
+  environment_id: string | null
+  resource_id: string
+  resource_type: string
+  action: string
+  current: Record<string, unknown> | null
+  recommended: Record<string, unknown> | null
+}
+
 export type Savings = {
   currency: string
   open: string
@@ -207,7 +238,7 @@ export const finops = {
   dailyCsvUrl: (t: string, from: string, to: string) => `/v1/tenants/${t}/costs/daily?from=${from}&to=${to}&format=csv`,
   findings: (t: string) => list<Finding>(`/v1/tenants/${t}/findings`),
   resolve: (t: string, id: string, resolution: string) => send<Finding>(`/v1/tenants/${t}/findings/${id}/resolve`, 'POST', { resolution }),
-  recommendations: (t: string) => list<{ id: string; finding_id: string; pr_url: string | null; state: string }>(`/v1/tenants/${t}/recommendations`),
+  recommendations: (t: string) => list<Recommendation>(`/v1/tenants/${t}/recommendations`),
   savings: (t: string, project?: string) => request<Savings>(`/v1/tenants/${t}/savings${project ? `?project=${project}` : ''}`),
   applyRecommendation: (t: string, id: string) => send<{ pr_url: string }>(`/v1/tenants/${t}/recommendations/${id}/apply`, 'POST', {}),
 }

@@ -100,6 +100,11 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	if err != nil {
 		return rep, err
 	}
+	// A client payer's blocked periods are its client's to see and fix.
+	blockedIn := home
+	if b.Tenant != "" {
+		blockedIn = b.Tenant
+	}
 	var objects []ObjectInfo
 	if el, ok := b.Objects.(ETagLister); ok {
 		objects, err = el.ListWithETag(ctx, b.Prefix)
@@ -314,7 +319,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 			}
 		}
 		if overlap != nil {
-			changed, err := b.block(ctx, home, p, files, pair, overlap, now())
+			changed, err := b.block(ctx, blockedIn, p, files, pair, overlap, now())
 			if err != nil {
 				return rep, err
 			}
@@ -333,7 +338,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		if err != nil {
 			return rep, fmt.Errorf("load %s: %w", p.Format("2006-01"), err)
 		}
-		if err := b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
+		if err := b.Ingester.Store.InTenant(ctx, blockedIn, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'period loaded'
 				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, b.blockedFingerprint(p), now())
 			return err
@@ -361,10 +366,10 @@ func (b *BillSync) blockedFingerprint(period time.Time) string {
 // the period's next load. It records an Activity and reports changed only
 // when the Finding is new or the period's files differ from those it last
 // saw, so a period retried every hour after finality alerts once.
-func (b *BillSync) block(ctx context.Context, home string, period time.Time, files []string, pair [2]string, cause error, now time.Time) (changed bool, err error) {
+func (b *BillSync) block(ctx context.Context, tenant string, period time.Time, files []string, pair [2]string, cause error, now time.Time) (changed bool, err error) {
 	fp := b.blockedFingerprint(period)
 	month := period.Format("2006-01")
-	err = b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
+	err = b.Ingester.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var seen []string
 		err := tx.QueryRow(ctx, `SELECT detail->'files' FROM findings WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp).Scan(&seen)
 		switch {
@@ -378,14 +383,14 @@ func (b *BillSync) block(ctx context.Context, home string, period time.Time, fil
 		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
 			VALUES ($1, 'bill_sync_blocked', $2, 'high', $3, jsonb_build_object('provider', $4::text, 'billing_account', $5::text, 'period', $6::text, 'files', to_jsonb($7::text[]), 'error', $8::text), $9)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = excluded.first_seen_at, detail = excluded.detail`,
-			home, fp, fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, month, pair[0], pair[1], overlapHint),
+			tenant, fp, fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, month, pair[0], pair[1], overlapHint),
 			b.Provider, b.BillingAccountID, month, files, cause.Error(), now); err != nil {
 			return err
 		}
 		if !changed {
 			return nil
 		}
-		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: home, Source: "keel/cost", Type: "keel.cost.bill_files_overlap",
+		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/cost", Type: "keel.cost.bill_files_overlap",
 			Subject: "cost_period/" + b.Provider + "/" + b.BillingAccountID + "/" + month, Operation: "LoadBill",
 			Kind: activity.Read, Actor: actor, Outcome: activity.Failure, StatusDetail: cause.Error()})
 		return err
