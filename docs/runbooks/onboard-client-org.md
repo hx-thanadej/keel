@@ -209,13 +209,6 @@ environment variable; client payers are data.
    lists a Finding while Keel cannot assume the role (missing role, wrong
    principal, wrong or missing ExternalId). Its `detail.configure` says what
    to fix. It resolves on the next successful AssumeRole.
-
-   **Known gap (#217).** Tencent has no readiness check for Keel's own
-   identity like the AWS one. If Keel's Tencent credentials fail (for
-   example `no credential found in every providers`), the same
-   `client_role_unusable` Finding appears in the **client's** Tenant even
-   though the client's role is fine. Check keel-api's own Tencent identity
-   before sending the client to fix their role.
 3. **Delivery.** `GET /v1/tenants/{tenant}/findings?kind=bill_delivery_missing`
    lists a Finding while no bucket is recorded, the bucket cannot be opened
    after the role was assumed, or it holds no bill files under the prefix. It
@@ -226,9 +219,15 @@ environment variable; client payers are data.
    with `dropped_lines`, `dropped_billed` and `reconcile_status`, at
    `GET /v1/tenants/{home}/cost-loads`. AWS has no invoice source, so AWS
    client loads are not reconciled against an invoice.
-5. **Keel's own side.** If Keel's AWS identity cannot load or is not
-   keyless, keel-api logs `ALERT client bill sync failed` for provider `aws`
-   once per run and raises no client Finding. Tencent sync carries on.
+5. **Keel's own side.** Before trying any client role, each run checks
+   Keel's own identity for that provider: on AWS it must load and be
+   keyless, on Tencent its credentials must load. If that fails, keel-api
+   logs `ALERT client bill sync failed` for the provider once per run and
+   raises `keel_identity_unusable` in Keel's **home** Tenant
+   (`GET /v1/tenants/{home}/findings?kind=keel_identity_unusable`). No client
+   Finding is raised and no client's "Last successful assume" moves. The
+   Finding resolves on the next run whose identity check passes. The other
+   provider's sync carries on.
 
 `bill_sync_blocked` means Keel refused to load a month because two bill
 files charge the same sub-account for the same hours. That happens only in
@@ -238,10 +237,9 @@ client payer's `mode` with `PUT .../client-payer` (resend `bucket`,
 `prefix`, `region` and the new `mode`; the PUT replaces the whole record and
 a bare `{"mode": ...}` clears the bucket), or have the client clean
 the prefix; the next load resolves it. For a client payer this Finding is
-raised in the **client's** Tenant and shows in its role health panel. Its
-hint text still says to check `KEEL_TENCENT_BILL_MODE`. Ignore that for a
-client payer: the variable sets only Keel's own payer's mode, and a client
-payer's mode is the `mode` field above (#216).
+raised in the **client's** Tenant and shows in its role health panel, and
+its hint names `client_payers.mode` and the `PUT .../client-payer` route.
+`KEEL_TENCENT_BILL_MODE` sets only Keel's own payer's mode.
 
 ## 5. Offboard
 

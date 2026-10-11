@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/store"
 )
 
 // FileMode says how a provider's bill files make up a billing period. Which
@@ -311,7 +312,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 					} else if first != key {
 						pair = [2]string{first, key}
 						overlap = fmt.Errorf("%s and %s both charge sub-account %s for %s to %s: %s", first, key, k.sub,
-							l.ChargePeriodStart.UTC().Format(time.RFC3339), l.ChargePeriodEnd.UTC().Format(time.RFC3339), overlapHint)
+							l.ChargePeriodStart.UTC().Format(time.RFC3339), l.ChargePeriodEnd.UTC().Format(time.RFC3339), b.overlapHint())
 					}
 				}
 				lines = append(lines, l)
@@ -356,7 +357,15 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	return rep, errors.Join(failed...)
 }
 
-const overlapHint = "files overlap; check KEEL_TENCENT_BILL_MODE or the bill types delivered to the prefix"
+// overlapHint names where the payer's mode is set: Keel's env var for its
+// own payer, the client payer record for a client's.
+func (b *BillSync) overlapHint() string {
+	if b.Tenant != "" {
+		return "files overlap; check the client payer's mode (client_payers.mode, set with PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer " +
+			"resending bucket, prefix and region) or the bill types delivered to the prefix"
+	}
+	return "files overlap; check KEEL_TENCENT_BILL_MODE or the bill types delivered to the prefix"
+}
 
 func (b *BillSync) blockedFingerprint(period time.Time) string {
 	return "bill_sync_blocked:" + b.Provider + "/" + b.BillingAccountID + "/" + period.Format("2006-01")
@@ -383,7 +392,7 @@ func (b *BillSync) block(ctx context.Context, tenant string, period time.Time, f
 		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
 			VALUES ($1, 'bill_sync_blocked', $2, 'high', $3, jsonb_build_object('provider', $4::text, 'billing_account', $5::text, 'period', $6::text, 'files', to_jsonb($7::text[]), 'error', $8::text), $9)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = excluded.first_seen_at, detail = excluded.detail`,
-			tenant, fp, fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, month, pair[0], pair[1], overlapHint),
+			tenant, fp, fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, month, pair[0], pair[1], b.overlapHint()),
 			b.Provider, b.BillingAccountID, month, files, cause.Error(), now); err != nil {
 			return err
 		}
@@ -417,8 +426,12 @@ func monthOf(t time.Time) time.Time {
 }
 
 func (b *BillSync) home(ctx context.Context) (string, error) {
+	return homeTenant(ctx, b.Ingester.Store)
+}
+
+func homeTenant(ctx context.Context, st *store.Store) (string, error) {
 	var home *string
-	if err := b.Ingester.Store.AppPool().QueryRow(ctx, `SELECT home_tenant_id()::text`).Scan(&home); err != nil || home == nil {
+	if err := st.AppPool().QueryRow(ctx, `SELECT home_tenant_id()::text`).Scan(&home); err != nil || home == nil {
 		return "", errors.New("bill sync needs a home tenant")
 	}
 	return *home, nil

@@ -199,8 +199,9 @@ func TestAWSClientPayerFindingsSayWhatToConfigureInAWS(t *testing.T) {
 
 // TestKeelIdentityFailureRaisesNoClientFinding: when Keel's own identity is
 // unusable (static keys instead of web identity), the run fails once with
-// that error. No client is told to fix its trust policy, and no role is
-// tried. With no payers the identity is not checked at all.
+// that error and raises keel_identity_unusable in Keel's home Tenant. No
+// client is told to fix its trust policy, and no role is tried. With no
+// payers the identity is not checked at all.
 func TestKeelIdentityFailureRaisesNoClientFinding(t *testing.T) {
 	w := awsWorld(t)
 	ctx := context.Background()
@@ -227,5 +228,8 @@ func TestKeelIdentityFailureRaisesNoClientFinding(t *testing.T) {
 		if got := openFinding(t, w, c.id, "client_role_unusable:aws/"+c.payer); got != "" {
 			t.Errorf("client %s got a role Finding for Keel's own fault: %s", c.payer, got)
 		}
+	}
+	if openFinding(t, w, w.home, "keel_identity_unusable:aws") == "" {
+		t.Error("Keel's home Tenant has no Finding for its unusable AWS identity")
 	}
 }

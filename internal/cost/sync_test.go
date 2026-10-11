@@ -442,7 +442,7 @@ func TestBillSyncBlockedPeriodRaisesOneFindingThenResolves(t *testing.T) {
 	}
 	f := fs[0]
 	if f.kind != "bill_sync_blocked" || f.severity != "high" || f.status != "open" || f.team != nil || !f.firstSeen.Equal(now) ||
-		!strings.Contains(f.title, day1) || !strings.Contains(f.title, mtd) || !strings.Contains(f.title, "KEEL_TENCENT_BILL_MODE") {
+		!strings.Contains(f.title, day1) || !strings.Contains(f.title, mtd) || !strings.Contains(f.title, "KEEL_TENCENT_BILL_MODE") || strings.Contains(f.title, "client_payers.mode") {
 		t.Fatalf("finding = %+v", f)
 	}
 

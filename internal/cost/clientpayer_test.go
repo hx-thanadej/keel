@@ -421,7 +421,8 @@ func TestClientPayerRecordsEachSuccessfulAssume(t *testing.T) {
 
 // TestClientPayerBlockedSyncRaisedInItsTenant: a client payer's period whose
 // files overlap is blocked by a Finding in the client's Tenant, where its
-// role health reads it, not in Keel's home Tenant; the next load resolves it.
+// role health reads it, not in Keel's home Tenant, and its hint names the
+// client payer's mode and route; the next load resolves it.
 func TestClientPayerBlockedSyncRaisedInItsTenant(t *testing.T) {
 	w := setup(t)
 	ctx := context.Background()
@@ -440,8 +441,16 @@ func TestClientPayerBlockedSyncRaisedInItsTenant(t *testing.T) {
 		t.Fatalf("runs %+v err %v, want 2026-09 blocked", runs, err)
 	}
 	fp := "bill_sync_blocked:tencent/" + c1.payer + "/2026-09"
-	if openFinding(t, w, c1.id, fp) == "" {
+	title := openFinding(t, w, c1.id, fp)
+	if title == "" {
 		t.Error("the client's Tenant has no bill_sync_blocked Finding for its payer")
+	}
+	// The client fixes its own payer's mode; Keel's env var is not theirs.
+	for _, hint := range []string{title, err.Error()} {
+		if !strings.Contains(hint, "client_payers.mode") || !strings.Contains(hint, "PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer") ||
+			strings.Contains(hint, "KEEL_TENCENT_BILL_MODE") {
+			t.Errorf("client payer blocked hint %q, want client_payers.mode and the client-payer PUT, not KEEL_TENCENT_BILL_MODE", hint)
+		}
 	}
 	if title := openFinding(t, w, w.home, fp); title != "" {
 		t.Errorf("the client payer's blocked Finding landed in the home Tenant: %s", title)

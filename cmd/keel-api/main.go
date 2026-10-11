@@ -1096,9 +1096,27 @@ func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSyn
 		}
 	}
 	return []*cost.ClientBillSync{
-		{Ingester: in, Provider: "tencent", OwnPayers: own("KEEL_TENCENT_PAYER_UIN"), Connect: clientPayerConnect(tencent.Credentials(), "")},
+		tencentClientBillSync(in, tencent.Credentials(), ""),
 		aws,
 	}
+}
+
+// tencentClientBillSync reads Tencent client payers as their read-only roles,
+// assumed from Keel's base identity. Ready loads that identity first, so
+// Keel's own missing credentials are never blamed on a client's role.
+// stsEndpoint overrides the STS host in tests.
+func tencentClientBillSync(in *cost.Ingester, base common.Provider, stsEndpoint string) *cost.ClientBillSync {
+	var own []string
+	if v := os.Getenv("KEEL_TENCENT_PAYER_UIN"); v != "" {
+		own = []string{v}
+	}
+	return &cost.ClientBillSync{Ingester: in, Provider: "tencent", OwnPayers: own, Connect: clientPayerConnect(base, stsEndpoint),
+		Ready: func(context.Context) error {
+			if _, err := base.GetCredential(); err != nil {
+				return fmt.Errorf("loading Keel's Tencent identity: %w", err)
+			}
+			return nil
+		}}
 }
 
 // clientBillSyncLoop runs every client payer sync hourly.
