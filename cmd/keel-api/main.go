@@ -1025,19 +1025,22 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {
+			// A blocked period (overlapping per-day files) still leaves the
+			// other periods' loads to reconcile and evaluate. Run errors on a
+			// block only when it is new or its files changed; its Finding
+			// stays open until the period loads.
 			rep, err := bs.Run(ctx)
 			if err != nil {
 				slog.Error("ALERT tencent bill sync failed", "err", err)
-			} else {
-				slog.Info("tencent bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads), "skipped", len(rep.Skipped), "not_focus", rep.NotFOCUS)
-				for _, l := range rep.Loads {
-					if l.Reconcile == "mismatch" {
-						slog.Error("ALERT tencent bill does not reconcile with invoice", "period", l.Period.Format("2006-01"), "load", l.LoadID)
-					}
+			}
+			slog.Info("tencent bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads), "skipped", len(rep.Skipped), "not_focus", rep.NotFOCUS, "blocked", rep.Blocked)
+			for _, l := range rep.Loads {
+				if l.Reconcile == "mismatch" {
+					slog.Error("ALERT tencent bill does not reconcile with invoice", "period", l.Period.Format("2006-01"), "load", l.LoadID)
 				}
-				if len(rep.Loads) > 0 {
-					evaluate(ctx, ev)
-				}
+			}
+			if len(rep.Loads) > 0 {
+				evaluate(ctx, ev)
 			}
 			select {
 			case <-ctx.Done():
