@@ -120,7 +120,8 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	project := body["id"].(string)
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/projects/"+project+"/environments", map[string]any{"name": "prod"})
 	env := body["id"].(string)
-	_, body = inA.do("POST", "/v1/tenants/"+a+"/cloud-accounts", map[string]any{"environment_id": env, "provider": "tencent", "external_id": "victim-uin-123", "name": "victim-prod"})
+	_, body = inA.do("POST", "/v1/tenants/"+a+"/cloud-accounts", map[string]any{"environment_id": env, "provider": "tencent", "external_id": "victim-uin-123", "name": "victim-prod",
+		"ownership": "client", "read_only_role": map[string]any{"role_arn": "qcs::cam::uin/100000000123:roleName/victim-readonly"}})
 	account := body["id"].(string)
 	_, body = inA.do("POST", "/v1/tenants/"+a+"/identity-providers", map[string]any{"issuer": "https://idp.victim.example", "client_id": "victim-client", "client_secret_ref": "VICTIM_SECRET"})
 	idp := body["id"].(string)
@@ -136,6 +137,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/projects/{project}/environments/{env}/archive":   {"why": "pwn"},
 		"POST /v1/tenants/{tenant}/cloud-accounts":                                  {"provider": "aws", "external_id": "pwn-1", "name": "pwn"},
 		"POST /v1/tenants/{tenant}/cloud-accounts/{account}/archive":                {"why": "pwn"},
+		"PATCH /v1/tenants/{tenant}/cloud-accounts/{account}":                       {"ownership": "platform", "why": "pwn"},
 		"POST /v1/tenants/{tenant}/identity-providers":                              {"issuer": "https://pwn.example", "client_id": "pwn", "client_secret_ref": "PWN"},
 		"POST /v1/tenants/{tenant}/identity-providers/{idp}/group-roles":            {"group": "pwn", "role": "platform_admin", "target_tenant_id": a},
 		"POST /v1/tenants/{tenant}/discoveries/{provider}":                          {},
@@ -230,7 +232,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 	bodies["POST /v1/tenants/{tenant}/access/grants"]["role_id"] = victimRole
 	v := victim{
 		ids:     map[string]string{"tenant": a, "project": project, "env": env, "account": account, "idp": idp, "provider": "tencent", "budget": victimBudget, "finding": victimFinding, "rule": victimFinding, "cluster": "victim-cluster", "namespace": "victim-ns", "recommendation": victimRec.ID, "flow": victimFlow, "service": victimService, "release": victimRelease, "promotion": victimPromotion, "exception": victimException, "role": victimRole, "grant": victimGrant, "period": "2026-09", "quarter": "2026-Q3"},
-		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole, victimGrant, "victim grant reason", "victim-report-data", "victim-report-page", "victim-maturity-note"},
+		secrets: []string{a, team, project, env, account, idp, "Victim Co", "victim-project", "victim-uin-123", "victim-readonly", "idp.victim.example", "victim-client", victimBudget, "Victim Budget", "123456", victimFinding, "Victim Finding", victimRec.ID, "victim-workload", victimFlow, "victim-flow-subject", "victim-flow-input", victimService, victimRelease, victimPromotion, "victim-1.0", "victim/img", victimException, "victim exception reason", victimRole, victimGrant, "victim grant reason", "victim-report-data", "victim-report-page", "victim-maturity-note"},
 	}
 
 	attackers := map[string]auth.Principal{

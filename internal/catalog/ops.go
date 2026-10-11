@@ -411,12 +411,17 @@ func derefBool(p *bool) any {
 
 // ---------- Cloud Accounts ----------
 
-const accountCols = `id::text, tenant_id::text, environment_id::text, provider, external_id, name, archived_at`
+const accountCols = `id::text, tenant_id::text, environment_id::text, provider, external_id, name, ownership, read_only_role, archived_at`
 
-// CreateCloudAccount registers a provider account; environmentID nil means platform-owned.
-func (s *Service) CreateCloudAccount(ctx context.Context, p auth.Principal, tenantID string, environmentID *string, provider, externalID, name, why string) (CloudAccount, error) {
+// CreateCloudAccount registers a provider account; environmentID nil means
+// it serves no single Environment (shared tooling, logging, billing ingest).
+// A client-owned account needs the read-only role its client granted.
+func (s *Service) CreateCloudAccount(ctx context.Context, p auth.Principal, tenantID string, environmentID *string, provider, externalID, name string, o Ownership, role *ReadOnlyRole, why string) (CloudAccount, error) {
 	if externalID == "" || name == "" {
 		return CloudAccount{}, invalid("external_id and name are required")
+	}
+	if err := checkOwnership(provider, o, role); err != nil {
+		return CloudAccount{}, err
 	}
 	if environmentID != nil && !ValidID(*environmentID) {
 		return CloudAccount{}, invalid("environment_id must be a uuid")
@@ -425,8 +430,8 @@ func (s *Service) CreateCloudAccount(ctx context.Context, p auth.Principal, tena
 	err := s.do(ctx, p, write{action: "cloud_account.create", res: authz.Resource{Type: "cloud_account", TenantID: tenantID},
 		actType: "keel.cloud_account.created", operation: "CreateCloudAccount", kind: activity.Create, why: why},
 		func(tx pgx.Tx) (string, error) {
-			err := tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, environment_id, provider, external_id, name) VALUES ($1, $2, $3, $4, $5) RETURNING `+accountCols,
-				tenantID, environmentID, provider, externalID, name).Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.ArchivedAt)
+			err := tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, environment_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING `+accountCols,
+				tenantID, environmentID, provider, externalID, name, o, role).Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.Ownership, &a.ReadOnlyRole, &a.ArchivedAt)
 			return a.ID, err
 		})
 	return a, mapErr(err)
@@ -453,7 +458,7 @@ func (s *Service) ArchiveCloudAccount(ctx context.Context, p auth.Principal, ten
 		actType: "keel.cloud_account.archived", operation: "ArchiveCloudAccount", kind: activity.Update, why: why},
 		func(tx pgx.Tx) (string, error) {
 			err := tx.QueryRow(ctx, `UPDATE cloud_accounts SET archived_at = coalesce(archived_at, now()) WHERE id = $1 RETURNING `+accountCols, id).
-				Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.ArchivedAt)
+				Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.Ownership, &a.ReadOnlyRole, &a.ArchivedAt)
 			return id, err
 		})
 	return a, mapErr(err)

@@ -6,7 +6,15 @@ export type Principal = { subject: string; kind: string; tenant_id: string; home
 export type Tenant = { id: string; slug: string; name: string; is_home: boolean }
 export type Project = { id: string; tenant_id: string; team_id: string; slug: string; name: string }
 export type Environment = { id: string; project_id: string; name: string }
-export type CloudAccount = { id: string; environment_id: string | null; provider: string; external_id: string; name: string }
+// The read-only role a client granted Keel (ADR-0018): a reference, never a credential.
+export type ReadOnlyRole =
+  | { role_arn: string } // tencent, aws, alibaba
+  | { tenant_id: string; client_id: string } // azure
+  | { workload_identity_provider: string; service_account: string } // gcp
+export type CloudAccount = { id: string; environment_id: string | null; provider: string; external_id: string; name: string } & (
+  | { ownership: 'platform'; read_only_role: null }
+  | { ownership: 'client'; read_only_role: ReadOnlyRole }
+)
 export type Activity = {
   id: string
   seq: number
