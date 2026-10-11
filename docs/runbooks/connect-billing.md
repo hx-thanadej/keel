@@ -93,11 +93,22 @@ writes there: it does not set up Bill Storage, touch the bucket or change the
 role. Each client payer is data, not an environment variable, so one Keel runs
 any number of them.
 
-1. **The client creates a read-only CAM role in its payer account.** Its trust
-   policy allows `sts:AssumeRole` from Keel's base role ARN and nothing else,
-   and requires Keel's ExternalId for this payer (step 3 returns it).
-   Keel's base role needs `sts:AssumeRole` on the client's role ARN. The role
-   carries only read actions.
+1. **The client creates a read-only CAM role in its payer account.** The
+   trust policy allows `sts:AssumeRole` from Keel's base role ARN and nothing
+   else, and requires Keel's ExternalId for this payer (step 3 returns it as
+   `role_external_id`). Keel's base role needs `sts:AssumeRole` on the
+   client's role ARN. The role carries only read actions.
+
+   Set the ExternalId in the Tencent console. When creating or editing the
+   role, turn on its "external ID" option and enter the `role_external_id`
+   value ([Creating a Role](https://www.tencentcloud.com/document/product/598/19381)).
+   Keel generates it per payer and sends it on every AssumeRole
+   ([STS AssumeRole `ExternalId`](https://www.tencentcloud.com/document/api/1150/49456)).
+   Nobody can choose or change it, so a payer and role registered again in
+   another Tenant gets a different ExternalId and cannot assume this role.
+
+   Fallback, if the console has no such option: write the condition into the
+   trust policy by hand.
 
    ```json
    {
@@ -105,19 +116,16 @@ any number of them.
      "statement": [
        {"effect": "allow", "action": "name/sts:AssumeRole",
         "principal": {"qcs": ["<Keel's base role ARN>"]},
-        "condition": {"string_equal": {"sts:external_id": "<external_id from step 3>"}}}
+        "condition": {"string_equal": {"sts:external_id": "<role_external_id from step 3>"}}}
      ]
    }
    ```
 
-   Keel generates the ExternalId per payer and sends it on every AssumeRole
-   ([STS AssumeRole `ExternalId`](https://www.tencentcloud.com/document/api/1150/49456)).
-   Nobody can choose or change it, so a payer and role registered again in
-   another Tenant gets a different ExternalId and cannot assume this role.
-   The CAM console's "external ID" option on role creation
-   ([Creating a Role](https://www.tencentcloud.com/document/product/598/19381))
-   sets the same check. Tencent's docs do not print the condition key; confirm
-   `sts:external_id` in the role's trust policy after saving.
+   Tencent's docs do not print the condition key, so `sts:external_id` is
+   unverified. Check it: after saving, open the role's trust policy and compare
+   it with what the console's external ID option writes for a test role. A
+   wrong key fails closed. AssumeRole is refused and Keel raises
+   `client_role_unusable`.
    The role's permissions:
 
    ```json
@@ -154,12 +162,14 @@ any number of them.
    PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer
    {"bucket": "<bucket>-<appid>", "prefix": "<folder>", "region": "ap-bangkok", "mode": "cumulative", "why": "..."}
    ```
-   The first PUT returns `external_id`, once. Later PUTs do not show it. The
+   The first PUT returns `role_external_id`, once. It is not the Cloud
+   Account's `external_id`, which is the payer UIN. Later PUTs do not show it. The
    client adds it to the trust-policy condition from step 1. Until then, or
    whenever Keel cannot assume the role, the hourly sync raises a
    `client_role_unusable` Finding in the Tenant naming the role and the
    ExternalId the condition needs, and resolves it on the next successful
-   AssumeRole.
+   AssumeRole. Only role and trust-policy failures raise it. A bucket error
+   after a successful AssumeRole raises `bill_delivery_missing` instead.
    A payer recorded with no bucket is allowed. The hourly sync then raises a
    `bill_delivery_missing` Finding in the Tenant that says what to configure.
    It also raises it when the bucket holds no bill files under the prefix, and

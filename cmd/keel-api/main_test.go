@@ -92,8 +92,8 @@ func TestClientPayerConnectAssumesEachClientsRole(t *testing.T) {
 	connect := clientPayerConnect(staticCreds{id: "base-id"}, sts.URL)
 
 	payers := []cost.ClientPayer{
-		{TenantID: "t1", UIN: "300000000001", RoleARN: "qcs::cam::uin/300000000001:roleName/KeelReadOnly", ExternalID: "ext-c1", Bucket: "c1-bills-1250000001", Region: "ap-bangkok"},
-		{TenantID: "t2", UIN: "300000000002", RoleARN: "qcs::cam::uin/300000000002:roleName/AcmeKeelRead", ExternalID: "ext-c2", Bucket: "c2-bills-1250000002", Region: "ap-singapore"},
+		{TenantID: "t1", UIN: "300000000001", RoleARN: "qcs::cam::uin/300000000001:roleName/KeelReadOnly", RoleExternalID: "ext-c1", Bucket: "c1-bills-1250000001", Region: "ap-bangkok"},
+		{TenantID: "t2", UIN: "300000000002", RoleARN: "qcs::cam::uin/300000000002:roleName/AcmeKeelRead", RoleExternalID: "ext-c2", Bucket: "c2-bills-1250000002", Region: "ap-singapore"},
 	}
 	for _, p := range payers {
 		_, inv, err := connect(p)

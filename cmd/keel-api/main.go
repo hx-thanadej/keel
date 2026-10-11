@@ -1127,13 +1127,13 @@ func clientBillSyncLoop(ctx context.Context, st *store.Store, ev budget.Evaluato
 // here and not mid-sync. stsEndpoint overrides the STS host in tests.
 func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.UIN, p.ExternalID, p.Region)
+		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.UIN, p.RoleExternalID, p.Region)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, &cost.RoleError{Err: err}
 		}
 		role.Endpoint = stsEndpoint
 		if _, err := role.GetCredential(); err != nil {
-			return nil, nil, err
+			return nil, nil, &cost.RoleError{Err: err}
 		}
 		objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + p.Region + ".myqcloud.com", Region: p.Region, Bucket: p.Bucket,
 			Creds: archive.Refreshing(tencent.STS{Creds: role}, 10*time.Minute)})

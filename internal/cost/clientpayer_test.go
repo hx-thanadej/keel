@@ -283,9 +283,9 @@ func TestClientPayerAssumeFailureRaisesFinding(t *testing.T) {
 	externalIDs := map[string]string{}
 	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent",
 		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-			externalIDs[p.UIN] = p.ExternalID
+			externalIDs[p.UIN] = p.RoleExternalID
 			if p.UIN == c1.payer && broken {
-				return nil, nil, errors.New("AssumeRole: role trust policy does not allow this principal")
+				return nil, nil, &cost.RoleError{Err: errors.New("AssumeRole: role trust policy does not allow this principal")}
 			}
 			return &memObjects{objs: map[string][]byte{"focus/2026-09-01.csv": bill(t, p.UIN, billRow{sub: p.UIN, cost: "1.00"})}}, nil, nil
 		}}
@@ -316,5 +316,40 @@ func TestClientPayerAssumeFailureRaisesFinding(t *testing.T) {
 	must(t, err)
 	if title := openFinding(t, w, c1.id, fp); title != "" {
 		t.Errorf("Finding still open after the role worked: %s", title)
+	}
+}
+
+// TestClientPayerBucketErrorIsDeliveryNotRole: a Connect failure after the
+// role was assumed raises bill_delivery_missing, not client_role_unusable,
+// and clears a role Finding the earlier runs left open.
+func TestClientPayerBucketErrorIsDeliveryNotRole(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	c1 := addClient(t, w, "c1", "300000000001", "300000000011", "c1-bills-1250000001")
+	mode := "role"
+	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent",
+		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+			if mode == "role" {
+				return nil, nil, &cost.RoleError{Err: errors.New("AssumeRole refused")}
+			}
+			return nil, nil, errors.New("bucket endpoint is not valid")
+		}}
+	if _, err := cs.Run(ctx); err == nil {
+		t.Fatal("a refused role was not reported")
+	}
+	roleFP, deliveryFP := "client_role_unusable:tencent/"+c1.payer, "bill_delivery_missing:tencent/"+c1.payer
+	if openFinding(t, w, c1.id, roleFP) == "" || openFinding(t, w, c1.id, deliveryFP) != "" {
+		t.Fatal("a role failure must raise only client_role_unusable")
+	}
+
+	mode = "bucket"
+	if _, err := cs.Run(ctx); err == nil {
+		t.Fatal("a bucket error was not reported")
+	}
+	if title := openFinding(t, w, c1.id, roleFP); title != "" {
+		t.Errorf("role Finding still open after the role assumed: %s", title)
+	}
+	if openFinding(t, w, c1.id, deliveryFP) == "" {
+		t.Error("a bucket error after AssumeRole raised no bill_delivery_missing Finding")
 	}
 }

@@ -18,12 +18,20 @@ type ClientPayer struct {
 	CloudAccountID string
 	UIN            string // the payer's external id, its billing account
 	RoleARN        string // read_only_role.role_arn
-	ExternalID     string // Keel's ExternalId for this payer; the role's trust policy requires it
+	RoleExternalID string // Keel's ExternalId for this payer; the role's trust policy requires it
 	Bucket         string
 	Prefix         string
 	Region         string
 	Mode           FileMode
 }
+
+// RoleError marks a Connect failure in assuming the payer's role (missing
+// role, refused trust policy, wrong ExternalId). Any other Connect error
+// happened after the role was assumed and is a bucket or delivery problem.
+type RoleError struct{ Err error }
+
+func (e *RoleError) Error() string { return e.Err.Error() }
+func (e *RoleError) Unwrap() error { return e.Err }
 
 // ClientBillSync runs one BillSync per client payer, each confined to its
 // payer's Tenant. It only lists and reads: Connect hands back read-only
@@ -35,7 +43,8 @@ type ClientBillSync struct {
 	// OwnPayers are Keel's payer ids. A client account registered under one
 	// is refused, so a client payer never re-owns Keel's loads.
 	OwnPayers []string
-	// Connect returns bill access through the payer's read-only role.
+	// Connect returns bill access through the payer's read-only role. It
+	// wraps a failure to assume the role in *RoleError.
 	Connect func(ClientPayer) (Objects, InvoiceSource, error)
 	Now     func() time.Time
 }
@@ -76,11 +85,16 @@ func (c *ClientBillSync) one(ctx context.Context, p ClientPayer) (ClientSync, er
 		return cs, c.noDelivery(ctx, p, "no Bill Storage bucket is recorded for this payer")
 	}
 	objs, inv, err := c.Connect(p)
-	if err != nil {
+	var roleErr *RoleError
+	if errors.As(err, &roleErr) {
 		return cs, errors.Join(err, c.roleUnusable(ctx, p, err))
 	}
 	if err := c.resolve(ctx, p, roleUnusable, "role assumed"); err != nil {
 		return cs, err
+	}
+	if err != nil {
+		cs.NoDelivery = true
+		return cs, errors.Join(err, c.noDelivery(ctx, p, "Keel assumed the role but cannot open the bucket: "+err.Error()))
 	}
 	bs := &BillSync{Ingester: c.Ingester, Objects: objs, Provider: c.Provider, BillingAccountID: p.UIN,
 		Prefix: p.Prefix, Mode: p.Mode, Invoices: inv, Now: c.Now, Tenant: p.TenantID}
@@ -116,7 +130,7 @@ func (c *ClientBillSync) fingerprint(kind string, p ClientPayer) string {
 // assume the payer's read-only role again.
 func (c *ClientBillSync) roleUnusable(ctx context.Context, p ClientPayer, cause error) error {
 	todo := fmt.Sprintf("In payer %s, check that role %s exists and that its trust policy allows sts:AssumeRole from Keel's base role "+
-		"with the condition string_equal sts:external_id %s. Keel retries every hour.", p.UIN, p.RoleARN, p.ExternalID)
+		"with the condition string_equal sts:external_id %s. Keel retries every hour.", p.UIN, p.RoleARN, p.RoleExternalID)
 	return c.raise(ctx, p, roleUnusable, "high", fmt.Sprintf("Keel cannot assume %s read-only role %s for payer %s", c.Provider, p.RoleARN, p.UIN), cause.Error(), todo)
 }
 
@@ -154,7 +168,7 @@ func (c *ClientBillSync) payers(ctx context.Context) ([]ClientPayer, error) {
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (ClientPayer, error) {
 		var p ClientPayer
 		var mode string
-		err := r.Scan(&p.TenantID, &p.CloudAccountID, &p.UIN, &p.RoleARN, &p.ExternalID, &p.Bucket, &p.Prefix, &p.Region, &mode)
+		err := r.Scan(&p.TenantID, &p.CloudAccountID, &p.UIN, &p.RoleARN, &p.RoleExternalID, &p.Bucket, &p.Prefix, &p.Region, &mode)
 		p.Mode = CumulativeFiles
 		if mode == "per-day" {
 			p.Mode = PerDayFiles

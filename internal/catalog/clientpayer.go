@@ -24,10 +24,10 @@ type ClientPayer struct {
 	Region         string    `json:"region"`
 	Mode           string    `json:"mode"` // per-day | cumulative
 	UpdatedAt      time.Time `json:"updated_at"`
-	// ExternalID is the ExternalId Keel sends when assuming the payer's
+	// RoleExternalID is the ExternalId Keel sends when assuming the payer's
 	// role. Keel generates it; it is returned only when the payer is first
 	// recorded, for the client's trust-policy condition.
-	ExternalID string `json:"external_id,omitempty"`
+	RoleExternalID string `json:"role_external_id,omitempty"`
 }
 
 // SetClientPayer records or updates a client payer. Migration 00050 checks
@@ -57,9 +57,9 @@ func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID
 				ON CONFLICT (cloud_account_id) DO UPDATE SET bucket = excluded.bucket, prefix = excluded.prefix, region = excluded.region, mode = excluded.mode, updated_at = now()
 				RETURNING cloud_account_id::text, tenant_id::text, bucket, prefix, region, mode, updated_at, role_external_id, xmax = 0`,
 				accountID, tenantID, in.Bucket, in.Prefix, in.Region, in.Mode).
-				Scan(&out.CloudAccountID, &out.TenantID, &out.Bucket, &out.Prefix, &out.Region, &out.Mode, &out.UpdatedAt, &out.ExternalID, &inserted)
+				Scan(&out.CloudAccountID, &out.TenantID, &out.Bucket, &out.Prefix, &out.Region, &out.Mode, &out.UpdatedAt, &out.RoleExternalID, &inserted)
 			if !inserted {
-				out.ExternalID = ""
+				out.RoleExternalID = ""
 			}
 			return accountID, err
 		})
