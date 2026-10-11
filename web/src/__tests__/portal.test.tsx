@@ -653,25 +653,46 @@ describe('client-owned accounts (ADR-0018)', () => {
     expect(calls).toContain(`/v1/tenants/${tat}/projects/p1/environments/e3/vend`)
   })
 
-  it('shows read-only role health: last assume, last ingest and open role Findings', async () => {
+  it('shows read-only role health: last assume, last bill ingested and open role Findings', async () => {
     mockFetch({ '/auth/me': operator, ...routes })
     render(<App />)
     await openProjects()
     await waitFor(() => expect(screen.getAllByLabelText('Read-only role health')[0].textContent).toMatch(/Last successful assume10 Oct 2026/))
     const [prodHealth, devHealth] = screen.getAllByLabelText('Read-only role health')
     expect(prodHealth.textContent).toMatch(/qcs::cam::uin\/200048351622:roleName\/keel-readonly/)
-    expect(prodHealth.textContent).toMatch(/Last ingest10 Oct 2026/)
+    expect(prodHealth.textContent).toMatch(/Last bill ingested10 Oct 2026/)
     expect(within(prodHealth).getByText(/! High/).closest('li')?.textContent).toMatch(/Keel cannot assume tencent read-only role/)
-    expect(devHealth.textContent).toMatch(/not used: Keel assumes this role only to read a client payer’s bills/)
-    expect(devHealth.textContent).toMatch(/no cost data yet/)
+    expect(devHealth.textContent).toMatch(/Last successful assumenever \(Keel assumes this role only to read a client payer’s bills\)/)
+    expect(devHealth.textContent).toMatch(/Last bill ingestednever/)
     expect(devHealth.textContent).toMatch(/Open role and delivery Findingsnone/)
+  })
+
+  it('lists a client-owned account with no Environment as unassigned client-owned, never as a platform account', async () => {
+    mockFetch({
+      '/auth/me': operator,
+      ...routes,
+      [`/v1/tenants/${tat}/cloud-accounts`]: { items: [
+        { id: 'a4', environment_id: null, provider: 'tencent', external_id: '200048351699', name: 'tat-payer', ownership: 'client', read_only_role: role },
+        { id: 'a5', environment_id: null, provider: 'tencent', external_id: '200046202634', name: 'keel-shared', ownership: 'platform', read_only_role: null },
+      ] },
+      [`/v1/tenants/${tat}/cloud-accounts/role-health`]: { items: [{ cloud_account_id: 'a4', client_payer: true, last_assume_at: null, last_ingest_at: null, findings: [] }] },
+    })
+    render(<App />)
+    await openProjects()
+    const unassigned = (await screen.findByRole('heading', { name: 'Unassigned client-owned accounts' })).closest('article') as HTMLElement
+    expect(within(unassigned).getByText(/tat-payer/)).toBeTruthy()
+    expect(within(unassigned).queryByText(/keel-shared/)).toBeNull()
+    await waitFor(() => expect(within(unassigned).getByLabelText('Read-only role health').textContent).toMatch(/Last successful assumenever.*Last bill ingestednever/))
+    const platform = screen.getByRole('heading', { name: 'Platform accounts' }).closest('article') as HTMLElement
+    expect(within(platform).getByText(/keel-shared/)).toBeTruthy()
+    expect(within(platform).queryByText(/tat-payer/)).toBeNull()
   })
 
   it('shows a Tenant Member the same status, with no controls', async () => {
     mockFetch({ '/auth/me': member, ...routes })
     render(<App />)
     await userEvent.click(await screen.findByRole('tab', { name: 'Projects' }))
-    await waitFor(() => expect(screen.getAllByLabelText('Read-only role health')[0].textContent).toMatch(/Last ingest10 Oct 2026/))
+    await waitFor(() => expect(screen.getAllByLabelText('Read-only role health')[0].textContent).toMatch(/Last bill ingested10 Oct 2026/))
     expect(screen.getAllByLabelText('Read-only role health')).toHaveLength(2)
     expect(screen.getByRole('heading', { name: /TAT CRM/ }).textContent).toMatch(/Mixed ownership/)
     expect(screen.queryByRole('button', { name: /Vend|Make client-owned|Make platform-owned/ })).toBeNull()

@@ -1,6 +1,10 @@
 package catalog_test
 
 import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +14,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
 	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
@@ -64,7 +69,7 @@ func TestRoleHealthDerivesFromBillSync(t *testing.T) {
 		if err := insert("200000000003", "ours", "platform", nil, &ours); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, region) VALUES ($1, $2, 'ap-bangkok')`, payer, tat); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, region) VALUES ($1, $2, 'tencent', 'ap-bangkok')`, payer, tat); err != nil {
 			return err
 		}
 		fact := `INSERT INTO cost_facts (load_id, tenant_id, provider, billing_account_id, sub_account_id, cloud_account_id, allocation_method, billing_period, charge_period_start, charge_period_end, charge_category, billed_cost, billing_currency)
@@ -81,13 +86,11 @@ func TestRoleHealthDerivesFromBillSync(t *testing.T) {
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, status, resolved_at, resolution)
-			VALUES ($1, 'client_role_unusable', 'role-old', 'high', 'old', jsonb_build_object('cloud_account_id', $2::text), 'resolved', $3, 'role assumed')`, tat, payer, assumedAt); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE client_payers SET last_assumed_at = $1`, assumedAt); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail) VALUES
 			($1, 'bill_delivery_missing', 'd', 'medium', 'bills not delivered', jsonb_build_object('cloud_account_id', $2::text)),
-			($1, 'bill_sync_blocked', 'b', 'high', 'sync blocked', jsonb_build_object('provider', 'tencent', 'billing_account', '200000000001')),
 			($1, 'cost_anomaly', 'x', 'high', 'unrelated', jsonb_build_object('cloud_account_id', $2::text))`, tat, payer)
 		return err
 	}); err != nil {
@@ -118,36 +121,15 @@ func TestRoleHealthDerivesFromBillSync(t *testing.T) {
 		t.Fatalf("role health covers %d accounts (platform-owned included: %v), want the 2 client-owned", len(got), byID[ours].CloudAccountID != "")
 	}
 	p := byID[payer]
-	if !p.ClientPayer || p.LastAssumeAt == nil || !p.LastAssumeAt.Equal(loadedAt) || p.LastIngestAt == nil || !p.LastIngestAt.Equal(loadedAt) {
-		t.Errorf("payer = %+v, want client payer assumed and ingested at %v", p, loadedAt)
+	if !p.ClientPayer || p.LastAssumeAt == nil || !p.LastAssumeAt.Equal(assumedAt) || p.LastIngestAt == nil || !p.LastIngestAt.Equal(loadedAt) {
+		t.Errorf("payer = %+v, want client payer assumed at %v and ingested at %v", p, assumedAt, loadedAt)
 	}
-	kinds := map[string]bool{}
-	for _, f := range p.Findings {
-		kinds[f.Kind] = true
-	}
-	if len(p.Findings) != 2 || !kinds["bill_delivery_missing"] || !kinds["bill_sync_blocked"] {
-		t.Errorf("payer findings = %+v, want the open delivery and blocked Findings only", p.Findings)
+	if len(p.Findings) != 1 || p.Findings[0].Kind != "bill_delivery_missing" {
+		t.Errorf("payer findings = %+v, want the open delivery Finding only", p.Findings)
 	}
 	m := byID[member]
 	if m.ClientPayer || m.LastAssumeAt != nil || m.LastIngestAt == nil || !m.LastIngestAt.Equal(memberLoadedAt) || len(m.Findings) != 0 {
 		t.Errorf("member = %+v, want no assume, ingest at %v, no Findings", m, memberLoadedAt)
-	}
-
-	// An AssumeRole that resolved the role Finding after the last load is the later proof.
-	reassumed := loadedAt.Add(5 * time.Hour)
-	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE findings SET resolved_at = $1 WHERE fingerprint = 'role-old'`, reassumed)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if got, err = c.ListRoleHealth(ctx, viewer, tat); err != nil {
-		t.Fatal(err)
-	}
-	for _, h := range got {
-		if h.CloudAccountID == payer && (h.LastAssumeAt == nil || !h.LastAssumeAt.Equal(reassumed)) {
-			t.Errorf("payer last_assume_at = %v, want the role Finding's resolution %v", h.LastAssumeAt, reassumed)
-		}
 	}
 
 	theirs, err := c.ListRoleHealth(ctx, auth.Principal{Subject: "user:x@other.example", Kind: auth.KindHuman, TenantID: other, Bindings: []auth.Binding{{Role: auth.RoleTenantViewer, TenantID: other}}}, other)
@@ -159,5 +141,121 @@ func TestRoleHealthDerivesFromBillSync(t *testing.T) {
 	}
 	if _, err := c.ListRoleHealth(ctx, auth.Principal{Subject: "user:x@other.example", Kind: auth.KindHuman, TenantID: other, Bindings: []auth.Binding{{Role: auth.RoleTenantViewer, TenantID: other}}}, tat); err == nil {
 		t.Error("another Tenant's viewer read TAT's role health")
+	}
+}
+
+type bucket map[string][]byte
+
+func (b bucket) List(_ context.Context, prefix string) ([]string, error) {
+	var out []string
+	for k := range b {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+func (b bucket) Get(_ context.Context, key string) ([]byte, error) { return b[key], nil }
+
+// TestRoleHealthFollowsClientBillSync drives the real client payer sync:
+// last_assume_at moves only when Keel assumes the role, never on a manual
+// resolve of the role Finding, and a blocked period shows in the client's
+// own role health.
+func TestRoleHealthFollowsClientBillSync(t *testing.T) {
+	s := storetest.New(t)
+	ctx := t.Context()
+	az, err := authz.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := catalog.New(s, az)
+	if _, err := s.CreateTenant(ctx, "harmonyx", "HarmonyX", true); err != nil {
+		t.Fatal(err)
+	}
+	tat, err := s.CreateTenant(ctx, "tat", "TAT", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const uin, member = "200000000001", "200000000002"
+	var payer string
+	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
+		role := `{"role_arn": "qcs::cam::uin/200000000001:roleName/keel-readonly"}`
+		if err := tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, 'tencent', $2, 'payer', 'client', $3) RETURNING id::text`,
+			tat, uin, role).Scan(&payer); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, 'tencent', $2, 'member', 'client', $3)`, tat, member, role); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, prefix, region, mode) VALUES ($1, $2, 'tencent', 'tat-bills-1250000001', 'focus/', 'ap-bangkok', 'per-day')`, payer, tat)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := func(cost string) []byte {
+		return []byte("BilledCost,EffectiveCost,BillingAccountId,BillingCurrency,BillingPeriodStart,BillingPeriodEnd,ChargeCategory,ChargePeriodStart,ChargePeriodEnd,ServiceName,SubAccountId,Tags\n" +
+			cost + "," + cost + "," + uin + ",USD,2026-09-01T00:00:00Z,2026-10-01T00:00:00Z,Usage,2026-09-01T00:00:00Z,2026-09-02T00:00:00Z,Cloud Virtual Machine," + member + ",{}\n")
+	}
+	now := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+	refused := true
+	sync := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: s}, Provider: "tencent", Now: func() time.Time { return now },
+		Connect: func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+			if refused {
+				return nil, nil, &cost.RoleError{Err: errors.New("AssumeRole refused")}
+			}
+			return bucket{"focus/2026-09-01.csv": line("1.00"), "focus/2026-09-01-b.csv": line("1.00")}, nil, nil
+		}}
+	viewer := auth.Principal{Subject: "user:somchai@tat.or.th", Kind: auth.KindHuman, TenantID: tat, Bindings: []auth.Binding{{Role: auth.RoleTenantViewer, TenantID: tat}}}
+	health := func() catalog.RoleHealth {
+		t.Helper()
+		got, err := c.ListRoleHealth(ctx, viewer, tat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range got {
+			if h.CloudAccountID == payer {
+				return h
+			}
+		}
+		t.Fatal("no role health for the payer")
+		return catalog.RoleHealth{}
+	}
+	kinds := func(h catalog.RoleHealth) []string {
+		var out []string
+		for _, f := range h.Findings {
+			out = append(out, f.Kind)
+		}
+		return out
+	}
+
+	if _, err := sync.Run(ctx); err == nil {
+		t.Fatal("a refused role was not reported")
+	}
+	if h := health(); h.LastAssumeAt != nil || !slices.Equal(kinds(h), []string{"client_role_unusable"}) {
+		t.Fatalf("after a refused role: last assume %v, findings %v; want never and the role Finding", h.LastAssumeAt, kinds(h))
+	}
+	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $1, resolution = 'duplicate, closing' WHERE kind = 'client_role_unusable'`, now.Add(time.Minute))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if h := health(); h.LastAssumeAt != nil {
+		t.Fatalf("a manual resolve set last assume to %v, want never", h.LastAssumeAt)
+	}
+
+	refused = false
+	now = now.Add(time.Hour)
+	if _, err := sync.Run(ctx); err == nil {
+		t.Fatal("overlapping files did not block the period")
+	}
+	h := health()
+	if h.LastAssumeAt == nil || !h.LastAssumeAt.Equal(now) || h.LastIngestAt != nil {
+		t.Errorf("after a blocked sync: last assume %v, last ingest %v; want %v and never", h.LastAssumeAt, h.LastIngestAt, now)
+	}
+	if !slices.Equal(kinds(h), []string{"bill_sync_blocked"}) {
+		t.Errorf("after a blocked sync the client sees findings %v, want bill_sync_blocked", kinds(h))
 	}
 }

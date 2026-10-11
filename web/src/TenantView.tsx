@@ -44,7 +44,11 @@ export function TenantView({ tenant, rights }: { tenant: Tenant; rights: Catalog
   if (!rows) return error ? <p className="notice error">{error}</p> : <p className="muted">Loading projects…</p>
   if (rows.length === 0) return <p className="muted">No projects yet.</p>
 
-  const platform = accounts.filter((a) => a.environment_id === null)
+  const unassigned = accounts.filter((a) => a.environment_id === null)
+  const groups: [string, CloudAccount[]][] = [
+    ['Unassigned client-owned accounts', unassigned.filter((a) => a.ownership === 'client')],
+    ['Platform accounts', unassigned.filter((a) => a.ownership !== 'client')],
+  ]
   const account = (a: CloudAccount) => (
     <AccountItem key={a.id} tenantId={tenant.id} account={a} health={health.find((h) => h.cloud_account_id === a.id)} canSwitch={rights.ownership} onChanged={() => setReload((n) => n + 1)} />
   )
@@ -93,11 +97,14 @@ export function TenantView({ tenant, rights }: { tenant: Tenant; rights: Catalog
           )}
         </article>
       ))}
-      {platform.length > 0 && (
-        <article className="card">
-          <h2>Platform accounts</h2>
-          <ul className="envs accounts">{platform.map(account)}</ul>
-        </article>
+      {groups.map(
+        ([title, accs]) =>
+          accs.length > 0 && (
+            <article key={title} className="card">
+              <h2>{title}</h2>
+              <ul className="envs accounts">{accs.map(account)}</ul>
+            </article>
+          ),
       )}
     </section>
   )
@@ -158,9 +165,9 @@ function RoleHealthPanel({ role, health }: { role: ReadOnlyRole; health?: RoleHe
       <dt>Read-only role</dt>
       <dd className="mono">{roleText(role)}</dd>
       <dt>Last successful assume</dt>
-      <dd>{when(health?.last_assume_at ?? null) ?? (health?.client_payer ? 'never' : 'not used: Keel assumes this role only to read a client payer’s bills')}</dd>
-      <dt>Last ingest</dt>
-      <dd>{when(health?.last_ingest_at ?? null) ?? 'no cost data yet'}</dd>
+      <dd>{when(health?.last_assume_at ?? null) ?? (health?.client_payer ? 'never' : 'never (Keel assumes this role only to read a client payer’s bills)')}</dd>
+      <dt>Last bill ingested</dt>
+      <dd>{when(health?.last_ingest_at ?? null) ?? 'never'}</dd>
       <dt>Open role and delivery Findings</dt>
       <dd>
         {findings.length === 0 ? (

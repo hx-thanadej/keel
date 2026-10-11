@@ -360,3 +360,98 @@ func TestClientPayerBucketErrorIsDeliveryNotRole(t *testing.T) {
 		t.Error("a bucket error after AssumeRole raised no bill_delivery_missing Finding")
 	}
 }
+
+func lastAssumed(t *testing.T, w world, c clientTenant) *time.Time {
+	t.Helper()
+	var at *time.Time
+	must(t, w.s.InTenant(context.Background(), c.id, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `SELECT last_assumed_at FROM client_payers WHERE cloud_account_id = $1`, c.payerAccount).Scan(&at)
+	}))
+	return at
+}
+
+// TestClientPayerRecordsEachSuccessfulAssume: every run that assumes the
+// role stamps client_payers.last_assumed_at from the sync's clock, on both
+// providers, even when no bill file is new; a refused role and a manual
+// resolve of the role Finding leave it alone.
+func TestClientPayerRecordsEachSuccessfulAssume(t *testing.T) {
+	for _, provider := range []string{"tencent", "aws"} {
+		t.Run(provider, func(t *testing.T) {
+			w := setup(t)
+			ctx := context.Background()
+			payer, member, bucket := "300000000001", "300000000011", "c1-bills-1250000001"
+			if provider == "aws" {
+				payer, member = "111122223333", "444455556666"
+			}
+			c1 := addClient(t, w, provider, "c1", payer, member, bucket)
+			now := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+			broken := true
+			cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: provider, Now: func() time.Time { return now },
+				Connect: func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+					if broken {
+						return nil, nil, &cost.RoleError{Err: errors.New("AssumeRole refused")}
+					}
+					return &memObjects{objs: map[string][]byte{}}, nil, nil
+				}}
+			if _, err := cs.Run(ctx); err == nil {
+				t.Fatal("a refused role was not reported")
+			}
+			if at := lastAssumed(t, w, c1); at != nil {
+				t.Fatalf("last_assumed_at = %v after a refused role, want never", at)
+			}
+			must(t, w.s.InTenant(ctx, c1.id, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $1, resolution = 'duplicate, closing' WHERE status = 'open'`, now.Add(time.Minute))
+				return err
+			}))
+			if at := lastAssumed(t, w, c1); at != nil {
+				t.Fatalf("last_assumed_at = %v after a manual resolve, want never", at)
+			}
+
+			broken = false
+			for _, at := range []time.Time{now.Add(time.Hour), now.Add(2 * time.Hour)} {
+				now = at
+				_, _ = cs.Run(ctx) // the empty bucket is a delivery error, not a role one
+				if got := lastAssumed(t, w, c1); got == nil || !got.Equal(at) {
+					t.Errorf("last_assumed_at = %v, want the successful assume at %v", got, at)
+				}
+			}
+		})
+	}
+}
+
+// TestClientPayerBlockedSyncRaisedInItsTenant: a client payer's period whose
+// files overlap is blocked by a Finding in the client's Tenant, where its
+// role health reads it, not in Keel's home Tenant; the next load resolves it.
+func TestClientPayerBlockedSyncRaisedInItsTenant(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	c1 := addClient(t, w, "tencent", "c1", "300000000001", "300000000011", "c1-bills-1250000001")
+	bucket := &memObjects{objs: map[string][]byte{
+		"focus/2026-09-01.csv":   bill(t, c1.payer, billRow{sub: c1.member, cost: "1.00"}),
+		"focus/2026-09-01-b.csv": bill(t, c1.payer, billRow{sub: c1.member, cost: "1.00"}),
+	}}
+	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent",
+		Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) },
+		Connect: func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+			return bucket, nil, nil
+		}}
+	runs, err := cs.Run(ctx)
+	if err == nil || len(runs) != 1 || !slices.Equal(runs[0].Report.Blocked, []string{"2026-09"}) {
+		t.Fatalf("runs %+v err %v, want 2026-09 blocked", runs, err)
+	}
+	fp := "bill_sync_blocked:tencent/" + c1.payer + "/2026-09"
+	if openFinding(t, w, c1.id, fp) == "" {
+		t.Error("the client's Tenant has no bill_sync_blocked Finding for its payer")
+	}
+	if title := openFinding(t, w, w.home, fp); title != "" {
+		t.Errorf("the client payer's blocked Finding landed in the home Tenant: %s", title)
+	}
+
+	delete(bucket.objs, "focus/2026-09-01-b.csv")
+	bucket.objs["focus/2026-09-01-c.csv"] = bill(t, c1.payer, billRow{sub: c1.payer, cost: "2.00"})
+	_, err = cs.Run(ctx)
+	must(t, err)
+	if title := openFinding(t, w, c1.id, fp); title != "" {
+		t.Errorf("blocked Finding still open after the period loaded: %s", title)
+	}
+}
