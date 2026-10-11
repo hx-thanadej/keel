@@ -26,6 +26,11 @@ type Load struct {
 	Source           string
 	Final            bool
 	Lines            []Line
+	// Tenant is set for a client payer (ADR-0018): only lines of that
+	// Tenant's client-owned Cloud Accounts are kept, and every fact lands in
+	// that Tenant. Empty for Keel's own payers, whose lines never attribute
+	// to a client-owned account.
+	Tenant string
 }
 
 // LoadResult summarises a load.
@@ -34,6 +39,7 @@ type LoadResult struct {
 	Lines       int
 	Allocated   int
 	Unallocated int
+	Dropped     int // lines of accounts outside the client payer's Tenant
 }
 
 // Ingester writes loads. It runs as Keel itself, not as a user.
@@ -43,6 +49,7 @@ type Ingester struct {
 
 type owner struct {
 	tenant, account, env, project *string
+	client                        bool
 }
 
 var actor = activity.Actor{Type: activity.ActorKeel, UID: "keel:cost-ingest"}
@@ -68,18 +75,22 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 		ids = append(ids, s)
 	}
 	owners := map[string]owner{}
-	rows, err := pool.Query(ctx, `SELECT external_id, tenant_id::text, cloud_account_id::text, environment_id::text, project_id::text FROM account_owners($1, $2)`, l.Provider, ids)
+	rows, err := pool.Query(ctx, `SELECT external_id, tenant_id::text, cloud_account_id::text, environment_id::text, project_id::text, ownership = 'client' FROM account_owners($1, $2)`, l.Provider, ids)
 	if err != nil {
 		return LoadResult{}, err
 	}
 	for rows.Next() {
 		var ext string
 		var o owner
-		if err := rows.Scan(&ext, &o.tenant, &o.account, &o.env, &o.project); err != nil {
+		if err := rows.Scan(&ext, &o.tenant, &o.account, &o.env, &o.project, &o.client); err != nil {
 			rows.Close()
 			return LoadResult{}, err
 		}
-		owners[ext] = o
+		// Keel's payers attribute only platform-owned accounts; a client
+		// payer only its own Tenant's client-owned ones.
+		if (l.Tenant == "" && !o.client) || (o.client && *o.tenant == l.Tenant) {
+			owners[ext] = o
+		}
 	}
 	rows.Close()
 
@@ -89,12 +100,31 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 		return LoadResult{}, err
 	}
 	var facts []fact
+	dropped := new(big.Rat)
+	var res LoadResult
 	for _, ln := range l.Lines {
-		facts = append(facts, al.allocate(ln, owners)...)
+		o, known := owners[ln.SubAccountID]
+		if l.Tenant == "" {
+			facts = append(facts, al.allocate(ln, owners)...)
+			continue
+		}
+		if !known {
+			amt, _ := new(big.Rat).SetString(ln.BilledCost)
+			dropped.Add(dropped, amt)
+			res.Dropped++
+			continue
+		}
+		// Tags and rules may split a line only within the payer's Tenant.
+		for _, f := range al.allocate(ln, owners) {
+			if f.tenant != l.Tenant {
+				f.tenant, f.owner, f.method = l.Tenant, o, "account"
+			}
+			facts = append(facts, f)
+		}
 	}
 	byTenant := map[string][]int{}
 	total, unalloc := new(big.Rat), new(big.Rat)
-	res := LoadResult{Lines: len(facts)} // includes derived amortization rows and split shares
+	res.Lines = len(facts) // includes derived amortization rows and split shares
 	currency := ""
 	for i, f := range facts {
 		amt, _ := new(big.Rat).SetString(f.line.BilledCost)
@@ -137,9 +167,10 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 		if err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `INSERT INTO cost_loads (tenant_id, provider, billing_account_id, billing_period, source, is_final, line_count, total_billed, unallocated_billed, currency, touched_tenants)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10, $11::uuid[]) RETURNING id::text`,
-			*home, l.Provider, l.BillingAccountID, period, l.Source, l.Final, len(l.Lines), total.FloatString(6), unalloc.FloatString(6), currency, touched).Scan(&res.LoadID)
+		return tx.QueryRow(ctx, `INSERT INTO cost_loads (tenant_id, provider, billing_account_id, billing_period, source, is_final, line_count, total_billed, unallocated_billed, currency, touched_tenants, dropped_lines, dropped_billed)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9::numeric, $10, $11::uuid[], $12, $13::numeric) RETURNING id::text`,
+			*home, l.Provider, l.BillingAccountID, period, l.Source, l.Final, len(l.Lines), total.FloatString(6), unalloc.FloatString(6), currency, touched,
+			res.Dropped, dropped.FloatString(6)).Scan(&res.LoadID)
 	})
 	if err != nil {
 		return LoadResult{}, err

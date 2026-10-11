@@ -563,6 +563,7 @@ var cloudMethods = map[string]string{
 	"tencent.PolicyAPI.ListPoliciesForTargetWithContext":                read,
 	"tencent.PolicyAPI.ListPoliciesWithContext":                         read,
 	"tencent.PolicyAPI.UpdatePolicyWithContext":                         "landing zone remediation",
+	"tencent.ReadOnlyRole":                                              read,
 	"tencent.Registry.EnsureImmutableTags":                              "not account-scoped: Keel's shared regional registry",
 	"tencent.Registry.EnsureNamespace":                                  "not account-scoped: Keel's shared regional registry",
 	"tencent.Registry.EnsureRetention":                                  "not account-scoped: Keel's shared regional registry",

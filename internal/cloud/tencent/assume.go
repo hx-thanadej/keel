@@ -3,6 +3,7 @@ package tencent
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,22 @@ type MemberRole struct {
 	mu      sync.Mutex
 	cached  common.CredentialIface
 	expires time.Time
+}
+
+var roleARN = regexp.MustCompile(`^qcs::cam::uin/(\d{1,20}):roleName/([\w+=,.@-]{1,128})$`)
+
+// ReadOnlyRole is a client's read-only role (ADR-0018), assumed from Keel's
+// base identity. The role must live in account, the client payer whose bills
+// it reads.
+func ReadOnlyRole(base common.Provider, arn, account, region string) (*MemberRole, error) {
+	m := roleARN.FindStringSubmatch(arn)
+	if m == nil {
+		return nil, fmt.Errorf("read-only role %q is not qcs::cam::uin/<uin>:roleName/<name>", arn)
+	}
+	if m[1] != account {
+		return nil, fmt.Errorf("read-only role %s is not in payer %s", arn, account)
+	}
+	return &MemberRole{Base: base, Account: account, Role: m[2], Region: region}, nil
 }
 
 // RoleArn is the member role's ARN.

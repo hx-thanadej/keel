@@ -85,6 +85,65 @@ the wizard.
 Until then, a FOCUS export downloaded from the console can be uploaded:
 `POST /v1/tenants/{home}/cost-loads?provider=tencent&billing_account=200045645249&period=YYYY-MM`.
 
+## Tencent Cloud client-owned payer (ADR-0018, #182)
+
+Some Tenants own their Tencent Cloud organisation and pay its bill. Keel reads
+that payer's bills through a read-only role the client creates. It never
+writes there: it does not set up Bill Storage, touch the bucket or change the
+role. Each client payer is data, not an environment variable, so one Keel runs
+any number of them.
+
+1. **The client creates a read-only CAM role in its payer account.** Its trust
+   policy allows `sts:AssumeRole` from Keel's base role ARN and nothing else.
+   Keel's base role needs `sts:AssumeRole` on the client's role ARN. The role
+   carries only read actions.
+
+   ```json
+   {
+     "version": "2.0",
+     "statement": [
+       {"effect": "allow", "action": ["finance:DescribeBill*"], "resource": ["*"]},
+       {"effect": "allow", "action": ["cos:GetBucket", "cos:HeadBucket", "cos:GetObject", "cos:HeadObject"],
+        "resource": ["qcs::cos:<region>:uid/<appid>:<bucket>/*", "qcs::cos:<region>:uid/<appid>:<bucket>"]},
+       {"effect": "allow", "action": ["monitor:Describe*", "monitor:GetMonitorData"], "resource": ["*"]},
+       {"effect": "allow", "action": ["advisor:Describe*"], "resource": ["*"]}
+     ]
+   }
+   ```
+
+   `finance:DescribeBill*` matches the `QcloudFinanceBillReadOnlyAccess`
+   preset and covers `DescribeBillSummaryByPayMode`, which Keel uses to
+   reconcile. The monitor and advisor statements are for Budget, Advisor and
+   rightsizing reads. Their namespaces are unverified, so take the exact names
+   from the CAM visual editor and keep only `Describe`, `Get` and `List`
+   actions. No statement may grant a `Create`, `Modify`, `Put`, `Delete` or
+   `Update` action.
+2. **The client sets up delivery.** In the payer, Billing Center, Bill
+   Overview, Bill Storage, deliver only the Standard bill (FOCUS) to a private
+   COS bucket in the payer account, under its own prefix, as in step 1 of the
+   section above.
+3. **Register the payer in Keel.** Register the payer as a client-owned Cloud
+   Account of the Tenant with the role from step 1. The role must be in the
+   payer account itself.
+   ```
+   POST /v1/tenants/{tenant}/cloud-accounts
+   {"provider": "tencent", "external_id": "<payer uin>", "name": "payer", "ownership": "client",
+    "read_only_role": {"role_arn": "qcs::cam::uin/<payer uin>:roleName/<role>"}, "why": "..."}
+   PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer
+   {"bucket": "<bucket>-<appid>", "prefix": "<folder>", "region": "ap-bangkok", "mode": "cumulative", "why": "..."}
+   ```
+   A payer recorded with no bucket is allowed. The hourly sync then raises a
+   `bill_delivery_missing` Finding in the Tenant that says what to configure.
+   It also raises it when the bucket holds no bill files under the prefix, and
+   resolves it once bills arrive.
+4. **Register the member accounts.** Keel keeps a client payer's lines only for
+   that Tenant's client-owned Cloud Accounts. Every other line is dropped, and
+   the load counts it in `dropped_lines` and `dropped_billed`
+   (`GET /v1/tenants/{home}/cost-loads`). Reconciliation adds the dropped
+   amount back, because the invoice covers the whole payer. Tags and
+   allocation rules cannot move a client payer's spend into another Tenant.
+   Keel's own payers never attribute spend to a client-owned account.
+
 ## AWS (optional, #44)
 
 1. Data Exports in the management account: **FOCUS 1.2 with AWS columns**,
