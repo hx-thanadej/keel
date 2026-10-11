@@ -240,7 +240,7 @@ function Pdpa({ tenantId, canConfigure }: { tenantId: string; canConfigure: bool
       <h3>Last retention run</h3>
       {run ? (
         <p className="meta">
-          {day(run.ran_at)}: {modeText[run.mode]}. {run.detail}
+          {day(run.ran_at)}: {modeText[run.mode] ?? run.mode}. {run.detail}
         </p>
       ) : (
         <p className="muted">Retention has not run yet.</p>

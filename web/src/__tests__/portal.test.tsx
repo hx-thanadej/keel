@@ -523,6 +523,15 @@ describe('finops screens', () => {
     }
   })
 
+  it('compliance PDPA panel falls back to the raw mode for an unknown retention mode', async () => {
+    mockFetch({ ...routes([]), [`/v1/tenants/${tat}/controls`]: controlReport, [`/v1/tenants/${tat}/pdpa`]: { ...pdpaOverview(), last_retention_run: { ran_at: '2026-10-10T02:00:00Z', mode: 'archived', detail: 'moved 3 rows' } } })
+    render(<App />)
+    await compliancePage()
+    await userEvent.selectOptions(screen.getByLabelText('Framework'), 'PDPA')
+    expect(await screen.findByText(/10 Oct 2026.*archived\. moved 3 rows/)).toBeTruthy()
+    expect(screen.queryByText(/undefined/)).toBeNull()
+  })
+
   it('compliance PDPA panel shows region, hold, open breaches with time left and the last retention run, read-only for a viewer', async () => {
     mockFetch({ ...routes([]), [`/v1/tenants/${tat}/controls`]: controlReport, [`/v1/tenants/${tat}/pdpa`]: pdpaOverview('Litigation TAT-2026-14') })
     render(<App />)

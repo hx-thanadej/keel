@@ -209,7 +209,7 @@ func (s Service) Overview(ctx context.Context, tenant string) (Overview, error) 
 		var run LastRun
 		var typ string
 		err = tx.QueryRow(ctx, `SELECT occurred_at, type, coalesce(event->'data'->>'status_detail', '') FROM activities
-			WHERE type IN ('keel.pdpa.retention.dry_run', 'keel.pdpa.retention.deleted', 'keel.pdpa.retention.held') ORDER BY seq DESC LIMIT 1`).
+			WHERE type = ANY ($1) ORDER BY seq DESC LIMIT 1`, []string{retentionType(DryRun), retentionType(Deleted), retentionType(Held)}).
 			Scan(&run.RanAt, &typ, &run.Detail)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -217,7 +217,7 @@ func (s Service) Overview(ctx context.Context, tenant string) (Overview, error) 
 		if err != nil {
 			return err
 		}
-		run.RanAt, run.Mode = run.RanAt.UTC(), Mode(strings.TrimPrefix(typ, "keel.pdpa.retention."))
+		run.RanAt, run.Mode = run.RanAt.UTC(), Mode(strings.TrimPrefix(typ, retentionType("")))
 		out.LastRetention = &run
 		return nil
 	})

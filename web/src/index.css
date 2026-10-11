@@ -48,6 +48,7 @@
 body { margin: 0; background: var(--bg); color: var(--text); }
 button { font: inherit; cursor: pointer; }
 input { font: inherit; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); width: 100%; }
+input[type=checkbox], input[type=radio] { width: auto; padding: 0; border: 0; }
 h1 { font-size: 1.4rem; margin: 0 0 12px; }
 h2 { font-size: 1.05rem; margin: 0; }
 .muted { color: var(--muted); }
@@ -149,5 +150,5 @@ button.primary, a.button.primary { text-decoration: none; display: inline-block;
 .delivery h2:first-child { margin-top: 0; }
 .delivery .finding > button, .delivery .finding > a { justify-self: start; }
 .delivery input { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); max-width: 100%; }
-.data-table.controls th, .data-table.controls td { text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.data-table.controls th, .data-table.controls td { text-align: left; vertical-align: top; overflow-wrap: break-word; }
 .delivery select { font: inherit; display: block; margin-top: 6px; max-width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); }

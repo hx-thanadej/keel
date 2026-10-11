@@ -42,7 +42,7 @@ func (s Service) Evidence(ctx context.Context, tx pgx.Tx, from, to time.Time) (E
 			FROM activities WHERE type = ANY ($3) AND occurred_at >= $1 AND occurred_at < $2`, from, to, types).Scan(&raw)
 		return raw, err
 	}
-	if out.RetentionRuns, err = activities("keel.pdpa.retention."+string(DryRun), "keel.pdpa.retention."+string(Deleted), "keel.pdpa.retention."+string(Held)); err != nil {
+	if out.RetentionRuns, err = activities(retentionType(DryRun), retentionType(Deleted), retentionType(Held)); err != nil {
 		return out, err
 	}
 	if out.SettingsChanges, err = activities("keel.pdpa.settings.updated", "keel.pdpa.deletion.enabled", "keel.pdpa.deletion.disabled"); err != nil {
