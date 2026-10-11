@@ -33,8 +33,10 @@ Keel never does these:
 - **No keys.** Keel assumes the role from its own keyless identity. On AWS
   that is web identity, an instance role or container credentials, and
   `aws.Keyless` refuses access keys. On Tencent it is TKE pod identity or the
-  CVM role. The client never hands Keel a secret; `read_only_role` stores
-  only a role ARN.
+  CVM role. This is the production configuration. With `KEEL_ENV=dev`,
+  Tencent also accepts environment and profile keys
+  (`tencent.Credentials()`), so a dev Keel may run on keys. The client never
+  hands Keel a secret; `read_only_role` stores only a role ARN.
 - **No reads outside the export on AWS.** Every AWS session carries a
   session policy built from the payer's record. It allows `s3:ListBucket` on
   the bucket only for the recorded prefix, `s3:GetObject` only under it, and
@@ -71,8 +73,22 @@ Keel never does these:
 
    ```
    PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer
-   {"bucket": "<bucket>", "prefix": "<folder>/", "region": "<bucket region>", "kms_key_arn": "<key ARN, AWS SSE-KMS only>", "why": "..."}
+   {"bucket": "<bucket>", "prefix": "<folder>/", "region": "<bucket region>", "mode": "<mode>", "kms_key_arn": "<key ARN, AWS SSE-KMS only>", "why": "..."}
    ```
+
+   **`PUT` replaces the whole record.** Every PUT, including one that
+   changes a single field, must resend `bucket`, `prefix`, `region`, `mode`
+   and (AWS SSE-KMS) `kms_key_arn`. A field you omit is cleared or reset to
+   its default, and an empty `bucket` makes the next sync raise
+   `bill_delivery_missing`. Drop `kms_key_arn` on Tencent (it is refused) and
+   `mode` on AWS unless you want the default.
+
+   `prefix` is a folder with **no leading slash and a trailing slash**,
+   `focus/` or `reports/export/`, or empty for the whole bucket. For AWS
+   Keel adds the trailing slash if you leave it off (`cost.FolderPrefix`), so
+   `reports/export` and `reports/export/` behave alike; Tencent uses the
+   value as sent, so send the slash. A leading slash names a different key
+   and matches nothing.
 
    Defaults: Tencent `region` `ap-bangkok`, `mode` `cumulative` (or
    `per-day`); AWS `region` `us-east-1`, `mode` `export-folder`. The
@@ -106,14 +122,17 @@ Keel never does these:
    }
    ```
 
-   Inline permissions policy, nothing else:
+   Inline permissions policy, nothing else. `<prefix>` is the same value as
+   the payer's `prefix`, trailing slash included (`focus/`), so the resource
+   reads `arn:aws:s3:::<bucket>/focus/*`. For an empty prefix write
+   `arn:aws:s3:::<bucket>/*`.
 
    ```json
    {
      "Version": "2012-10-17",
      "Statement": [
        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::<bucket>"},
-       {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::<bucket>/<prefix>/*"}
+       {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::<bucket>/<prefix>*"}
      ]
    }
    ```
@@ -155,7 +174,8 @@ Keel never does these:
    future reads. Nothing on main uses them, so leave them off until it does.
 
 The client then sends Keel the bucket, prefix, region and, on AWS, any KMS
-key ARN. The operator records them with the same `PUT .../client-payer`.
+key ARN. The operator records them with the same `PUT .../client-payer`,
+sending the full body (step 1.3), not only the new fields.
 
 ## 3. Keel operator: register member accounts
 
@@ -189,6 +209,13 @@ environment variable; client payers are data.
    lists a Finding while Keel cannot assume the role (missing role, wrong
    principal, wrong or missing ExternalId). Its `detail.configure` says what
    to fix. It resolves on the next successful AssumeRole.
+
+   **Known gap (#217).** Tencent has no readiness check for Keel's own
+   identity like the AWS one. If Keel's Tencent credentials fail (for
+   example `no credential found in every providers`), the same
+   `client_role_unusable` Finding appears in the **client's** Tenant even
+   though the client's role is fine. Check keel-api's own Tencent identity
+   before sending the client to fix their role.
 3. **Delivery.** `GET /v1/tenants/{tenant}/findings?kind=bill_delivery_missing`
    lists a Finding while no bucket is recorded, the bucket cannot be opened
    after the role was assumed, or it holds no bill files under the prefix. It
@@ -207,7 +234,9 @@ environment variable; client payers are data.
 files charge the same sub-account for the same hours. That happens only in
 Tencent `per-day` mode, usually because the month-to-date files need
 `cumulative` or a second bill type is delivered to the prefix. Fix the
-client payer's `mode` with `PUT .../client-payer`, or have the client clean
+client payer's `mode` with `PUT .../client-payer` (resend `bucket`,
+`prefix`, `region` and the new `mode`; the PUT replaces the whole record and
+a bare `{"mode": ...}` clears the bucket), or have the client clean
 the prefix; the next load resolves it. For a client payer this Finding is
 raised in the **client's** Tenant and shows in its role health panel. Its
 hint text still says to check `KEEL_TENCENT_BILL_MODE`. Ignore that for a
