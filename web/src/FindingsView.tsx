@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, finops, ApiError, type CloudAccount, type Finding, type Recommendation } from './api'
 import { manualSteps, opensPullRequest, ownershipOf, readOnlyReason, recommendationAccounts } from './ownership'
 
@@ -9,8 +9,31 @@ const sev = {
   low: { cls: 'good', icon: 'i', text: 'Low' },
 } as const
 
-export function FindingsView({ tenantId }: { tenantId: string }) {
+export function FindingsView({ tenantId, focus }: { tenantId: string; focus?: string }) {
   const [items, setItems] = useState<Finding[] | null>(null)
+  // A Finding linked from elsewhere that the inbox's first 200 do not include, fetched on its own.
+  const [fetched, setFetched] = useState<{ id: string; finding: Finding | 'missing' }>()
+  const outside = focus !== undefined && items !== null && !items.some((f) => f.id === focus)
+  const linked = outside && fetched?.id === focus ? fetched.finding : null
+  const focused = useRef<HTMLElement>(null)
+  const consumed = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (!focused.current || consumed.current === focus) return
+    consumed.current = focus
+    focused.current.scrollIntoView?.({ block: 'center' })
+    focused.current.focus()
+  }, [items, linked, focus])
+  useEffect(() => {
+    if (!outside) return
+    let stale = false
+    finops
+      .finding(tenantId, focus)
+      .then((f) => !stale && setFetched({ id: focus, finding: f }))
+      .catch(() => !stale && setFetched({ id: focus, finding: 'missing' }))
+    return () => {
+      stale = true
+    }
+  }, [tenantId, focus, outside])
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
 
@@ -63,10 +86,21 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
 
   if (error) return <p className="notice error">{error}</p>
   if (!items) return <p className="muted">Loading findings…</p>
-  if (items.length === 0) return <p className="muted">No open findings.</p>
+  const shown = linked && linked !== 'missing' ? [linked, ...items] : items
+  if (shown.length === 0 && linked !== 'missing') return <p className="muted">No open findings.</p>
   return (
     <section>
-      {items.map((f) => {
+      {linked === 'missing' && (
+        <p className="notice error" role="alert">
+          The linked Finding could not be loaded. It may have been removed.
+        </p>
+      )}
+      {linked && linked !== 'missing' && (
+        <p className="notice" role="status">
+          The linked Finding is not among the {items.length} Findings listed below, so it is shown first.
+        </p>
+      )}
+      {shown.map((f) => {
         const s = sev[f.severity]
         const top = (f.detail.top_resources as { resource_id: string; delta: string }[] | undefined) ?? []
         const cur = f.detail.current as Record<string, string> | undefined
@@ -75,7 +109,7 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
         const r = recs[f.id]
         const readOnly = r ? readOnlyReason(ownershipOf(recommendationAccounts(r, accounts))) : null
         return (
-          <article key={f.id} className="card finding">
+          <article key={f.id} id={`finding-${f.id}`} className="card finding" tabIndex={-1} ref={f.id === focus ? focused : undefined}>
             <span className={`status ${s.cls}`}>
               <span aria-hidden>{s.icon}</span> {s.text} · {f.kind.replace('_', ' ')}
             </span>

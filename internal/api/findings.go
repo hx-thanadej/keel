@@ -83,6 +83,29 @@ func mountFindings(mux Mux, a auth.Authenticator, c *catalog.Service, az catalog
 		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
+	mux.Handle("GET /v1/tenants/{tenant}/findings/{finding}", authed(a, []string{"tenant", "finding"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant, id := r.PathValue("tenant"), r.PathValue("finding")
+		if err := allow(r, p, "finding.read", tenant); err != nil {
+			return err
+		}
+		var f []Finding
+		err := c.Store().InTenant(r.Context(), tenant, func(tx pgx.Tx) error {
+			rows, err := tx.Query(r.Context(), `SELECT `+findingCols+` FROM findings WHERE id = $1`, id)
+			if err != nil {
+				return err
+			}
+			f, err = pgx.CollectRows(rows, pgx.RowToStructByPos[Finding])
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if len(f) == 0 {
+			return catalog.ErrNotFound
+		}
+		writeJSON(w, http.StatusOK, f[0])
+		return nil
+	}))
 	mux.Handle("POST /v1/tenants/{tenant}/findings/{finding}/resolve", authed(a, []string{"tenant", "finding"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tenant, id := r.PathValue("tenant"), r.PathValue("finding")
 		if err := allow(r, p, "finding.resolve", tenant); err != nil {

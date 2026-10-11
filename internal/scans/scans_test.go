@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/scans"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
@@ -120,7 +121,7 @@ func TestSeverityAndKinds(t *testing.T) {
 		"tool":    map[string]any{"driver": map[string]any{"name": "gitleaks"}},
 		"results": []any{res("aws-access-token", "config.env", 2, map[string]any{"level": "error"}), res("generic", "x", 1, map[string]any{"level": "note"})}}}})
 	_, rs, err := scans.ParseSARIF(raw, "svc")
-	if err != nil || len(rs) != 2 || rs[0].Kind != "secret" || rs[0].Severity != "high" || rs[1].Severity != "low" {
+	if err != nil || len(rs) != 2 || rs[0].Kind != findings.Secret || rs[0].Severity != "high" || rs[1].Severity != "low" {
 		t.Fatalf("%+v %v", rs, err)
 	}
 }

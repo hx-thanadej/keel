@@ -151,6 +151,8 @@ button.primary, a.button.primary { text-decoration: none; display: inline-block;
 .delivery .finding > button, .delivery .finding > a { justify-self: start; }
 .delivery input { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); max-width: 100%; }
 .data-table.controls th, .data-table.controls td { text-align: left; vertical-align: top; overflow-wrap: break-word; }
+.data-table.controls ul.plain { list-style: none; margin: 4px 0; padding: 0; }
+.finding:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .delivery select { font: inherit; display: block; margin-top: 6px; max-width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); }
 
 /* ---- Ownership (ADR-0018): the badge text carries the meaning; the border only reinforces it. ---- */

@@ -11,12 +11,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/hx-thanadej/keel/internal/findings"
 )
 
 // Result is one normalised scanner result.
 type Result struct {
 	Fingerprint string         `json:"fingerprint"`
-	Kind        string         `json:"kind"` // vulnerability | secret | iac | sast | code_scan
+	Kind        findings.Kind  `json:"kind"`
 	RuleID      string         `json:"rule_id"`
 	Title       string         `json:"title"`
 	Severity    string         `json:"severity"`
@@ -68,29 +70,29 @@ type sarifRule struct {
 
 var vulnID = regexp.MustCompile(`^(CVE-\d{4}-\d{4,}|GHSA(-[23456789cfghjmpqrvwx]{4}){3})$`)
 
-var toolKinds = map[string]string{
-	"gitleaks": "secret", "trufflehog": "secret", "betterleaks": "secret",
-	"checkov": "iac", "tfsec": "iac", "kics": "iac", "trivy-config": "iac",
-	"semgrep": "sast", "codeql": "sast", "gosec": "sast", "bandit": "sast",
-	"zizmor": "workflow",
+var toolKinds = map[string]findings.Kind{
+	"gitleaks": findings.Secret, "trufflehog": findings.Secret, "betterleaks": findings.Secret,
+	"checkov": findings.IaC, "tfsec": findings.IaC, "kics": findings.IaC, "trivy-config": findings.IaC,
+	"semgrep": findings.SAST, "codeql": findings.SAST, "gosec": findings.SAST, "bandit": findings.SAST,
+	"zizmor": findings.Workflow,
 }
 
 // Kind is the Finding kind of a result tool reports under rule: a
 // vulnerability for a CVE or GHSA id, else what the tool scans for.
-func Kind(tool, rule string) string {
+func Kind(tool, rule string) findings.Kind {
 	if vulnID.MatchString(rule) {
-		return "vulnerability"
+		return findings.Vulnerability
 	}
-	if k := toolKinds[tool]; k != "" {
+	if k, ok := toolKinds[tool]; ok {
 		return k
 	}
-	return "code_scan"
+	return findings.CodeScan
 }
 
 // CodeScanning reports whether a Finding kind is a code scanning kind, the
 // only kinds a Service's code scanning source governs. Vulnerabilities,
 // secrets, IaC and workflow results are not: other sources own them.
-func CodeScanning(kind string) bool { return kind == "sast" || kind == "code_scan" }
+func CodeScanning(kind findings.Kind) bool { return kind == findings.SAST || kind == findings.CodeScan }
 
 // ParseSARIF normalises every result of every run. service scopes the
 // fingerprints, so the same rule in two Services is two Findings.
@@ -129,7 +131,7 @@ func ParseSARIF(raw []byte, service string) (tools []string, out []Result, err e
 				r.Title = r.Title[:200]
 			}
 			r.Kind = Kind(tool, res.RuleID)
-			if r.Kind == "vulnerability" {
+			if r.Kind == findings.Vulnerability {
 				r.Fingerprint = "vuln:" + res.RuleID + ":" + service
 			} else {
 				r.Fingerprint = "scan:" + tool + ":" + res.RuleID + ":" + service + ":" + stable(res.PartialFingerprints, loc, res.Message.Text)

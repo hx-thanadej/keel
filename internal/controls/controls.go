@@ -11,11 +11,13 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/hx-thanadej/keel/internal/findings"
 	"github.com/hx-thanadej/keel/internal/store"
 )
 
@@ -27,6 +29,8 @@ type Policy struct {
 	Name        string `yaml:"name" json:"name"`
 	Point       string `yaml:"point" json:"point"` // api | pr | pipeline | promotion | admission | cloud | platform
 	Description string `yaml:"description" json:"description"`
+	// Findings are the Finding kinds the Policy raises.
+	Findings []string `yaml:"findings" json:"-"`
 }
 
 // Framework is a catalogue Controls come from.
@@ -43,6 +47,9 @@ type Control struct {
 	Title     string   `yaml:"title" json:"title"`
 	CoveredBy []string `yaml:"covered_by" json:"covered_by"`
 	GapReason string   `yaml:"gap_reason" json:"gap_reason,omitempty"`
+	// Findings are the Finding kinds, of those CoveredBy raises, whose open
+	// Findings count against this Control.
+	Findings []string `yaml:"findings" json:"-"`
 }
 
 // Registry is the versioned data.
@@ -71,12 +78,17 @@ func parse(data []byte) (Registry, error) {
 	for _, f := range r.Frameworks {
 		frameworks[f.ID] = true
 	}
-	known := map[string]bool{}
+	raises := map[string][]string{}
 	for _, p := range r.Policies {
 		if _, ok := coverage[p.Name]; !ok {
 			return r, fmt.Errorf("policy %s has no coverage query", p.Name)
 		}
-		known[p.Name] = true
+		for _, k := range p.Findings {
+			if !findings.KnownKind(k) {
+				return r, fmt.Errorf("policy %s names unknown Finding kind %s", p.Name, k)
+			}
+		}
+		raises[p.Name] = p.Findings
 	}
 	seen := map[string]bool{}
 	for _, c := range r.Controls {
@@ -91,9 +103,17 @@ func parse(data []byte) (Registry, error) {
 		if (len(c.CoveredBy) == 0) == (c.GapReason == "") {
 			return r, fmt.Errorf("control %s needs either covered_by or a gap_reason, not both", key)
 		}
+		var kinds []string
 		for _, p := range c.CoveredBy {
-			if !known[p] {
+			k, ok := raises[p]
+			if !ok {
 				return r, fmt.Errorf("control %s names unknown policy %s", key, p)
+			}
+			kinds = append(kinds, k...)
+		}
+		for i, k := range c.Findings {
+			if !slices.Contains(kinds, k) || slices.Contains(c.Findings[:i], k) {
+				return r, fmt.Errorf("control %s links Finding kind %s that none of its policies raise, or twice", key, k)
 			}
 		}
 	}
@@ -133,7 +153,25 @@ type ControlView struct {
 	Control
 	Coverage []PolicyCoverage `json:"coverage"`
 	Gap      bool             `json:"gap"` // no Policy, or no Service covered
+	// OpenFindings is set by WithFindings; evidence bundles leave it out.
+	OpenFindings *OpenFindings `json:"open_findings,omitempty"`
 }
+
+// OpenFindings are a Control's open Findings: those of the kinds its Policies
+// raise. Items holds the most severe findingsPerControl of Count.
+type OpenFindings struct {
+	Count int          `json:"count"`
+	Items []FindingRef `json:"items"`
+}
+
+// FindingRef names one open Finding.
+type FindingRef struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Severity string `json:"severity"`
+}
+
+const findingsPerControl = 20
 
 // FrameworkCoverage counts one framework's Controls. Mapped Controls have at
 // least one Policy; covered ones have a Policy that reached a Service. Every
@@ -235,3 +273,51 @@ func (s Service) Report(ctx context.Context, tenant string) (Report, error) {
 	}
 	return rep, nil
 }
+
+// WithFindings sets every Control's OpenFindings from the Tenant's open
+// Findings of the kinds it links. Controls with none get an empty list.
+func (s Service) WithFindings(ctx context.Context, tenant string, rep Report) (Report, error) {
+	byKind := map[string]*OpenFindings{}
+	err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT kind, id::text, title, severity, total FROM (
+				SELECT kind, id, title, severity,
+					row_number() OVER (PARTITION BY kind ORDER BY array_position($1::text[], severity), first_seen_at, id) AS rank,
+					count(*) OVER (PARTITION BY kind) AS total
+				FROM findings WHERE status = 'open') f
+			WHERE rank <= $2 ORDER BY kind, rank`, severities, findingsPerControl)
+		if err != nil {
+			return err
+		}
+		var kind string
+		var f FindingRef
+		var total int
+		_, err = pgx.ForEachRow(rows, []any{&kind, &f.ID, &f.Title, &f.Severity, &total}, func() error {
+			if byKind[kind] == nil {
+				byKind[kind] = &OpenFindings{Count: total}
+			}
+			byKind[kind].Items = append(byKind[kind].Items, f)
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		return rep, err
+	}
+	for i, c := range rep.Controls {
+		open := OpenFindings{Items: []FindingRef{}}
+		for _, kind := range c.Findings {
+			if k := byKind[kind]; k != nil {
+				open.Count += k.Count
+				open.Items = append(open.Items, k.Items...)
+			}
+		}
+		slices.SortStableFunc(open.Items, func(a, b FindingRef) int {
+			return slices.Index(severities, a.Severity) - slices.Index(severities, b.Severity)
+		})
+		open.Items = open.Items[:min(len(open.Items), findingsPerControl)]
+		rep.Controls[i].OpenFindings = &open
+	}
+	return rep, nil
+}
+
+var severities = []string{"critical", "high", "medium", "low"}

@@ -1,10 +1,16 @@
-# keel-controls@2: the Controls Keel is measured against, per framework, and
+# keel-controls@3: the Controls Keel is measured against, per framework, and
 # the Keel Policies (each at one Enforcement Point) that evidence them. One
 # Policy covers many Controls across frameworks. A Control no Policy evidences
 # has `covered_by: []` and a `gap_reason`, so the report shows the gap.
+# A Policy's `findings` are every Finding kind it raises. A Control's
+# `findings` are the kinds, among those its `covered_by` Policies raise, whose
+# open Findings are a failure of that Control; its open Findings are those
+# kinds only (#210). Link a kind only when an auditor reading the Control
+# would call that Finding a deficiency in it: a leaked secret is a credential
+# Control's Finding, not change management's, though one Policy raises both.
 # Versioned data: change by pull request, bump the version when the shape
 # changes. Titles only; never copy a framework's requirement text.
-version: keel-controls@2
+version: keel-controls@3
 frameworks:
   - {id: SSDF, name: "NIST SSDF 1.2 (SP 800-218r1)"}
   - {id: SLSA, name: "SLSA v1.2 build track"}
@@ -15,34 +21,34 @@ frameworks:
   - {id: PDPA, name: "Thailand Personal Data Protection Act B.E. 2562 (2019)"}
 policies:
   - {name: keel-authz@1, point: api, description: "Every API call decided by OPA; default deny; Tenant isolation"}
-  - {name: keel-access@1, point: cloud, description: "Just-in-time Access Grants: role eligibility per Team and Environment, time-boxed; write or production grants need approval by a Team Lead (plus a second approver for production write) who is not the requester; read-only non-production grants are self-served"}
-  - {name: keel-github@1, point: pr, description: "Rulesets (review, CODEOWNERS, checks), secret scanning + push protection, Actions SHA pinning, read-only token"}
-  - {name: keel-scans@1, point: pipeline, description: "SARIF from secrets/SAST/SCA/IaC scanners → owned Findings"}
+  - {name: keel-access@1, point: cloud, description: "Just-in-time Access Grants: role eligibility per Team and Environment, time-boxed; write or production grants need approval by a Team Lead (plus a second approver for production write) who is not the requester; read-only non-production grants are self-served", findings: [access_grant_orphaned, standing_access]}
+  - {name: keel-github@1, point: pr, description: "Rulesets (review, CODEOWNERS, checks), secret scanning + push protection, Actions SHA pinning, read-only token", findings: [github_governance, secret]}
+  - {name: keel-scans@1, point: pipeline, description: "SARIF from secrets/SAST/SCA/IaC scanners → owned Findings", findings: [vulnerability, secret, sast, iac, workflow, code_scan]}
   - {name: keel-release@1, point: pipeline, description: "Sigstore-verified SLSA provenance from Keel's builder; VSA per image"}
-  - {name: keel-sbom@1, point: pipeline, description: "SBOM per Release; CISA 2026 minimum elements; daily OSV re-match"}
+  - {name: keel-sbom@1, point: pipeline, description: "SBOM per Release; CISA 2026 minimum elements; daily OSV re-match", findings: [vulnerability]}
   - {name: keel-promotion@1, point: promotion, description: "Digests only, previous Environment first, VSA, no unexcepted critical Findings, budget, approval by someone other than the requester"}
   - {name: keel-admission@1, point: admission, description: "Kyverno IVP signature + provenance; digest-only VAP"}
-  - {name: keel-baseline@1, point: cloud, description: "Organisation SCPs: stay in org, protect CloudAudit, identities only via Keel"}
-  - {name: keel-ci-identity@1, point: cloud, description: "Keyless CI: OIDC role pinned to repository id + environment, no access keys"}
-  - {name: keel-findings@1, point: platform, description: "Owner, severity and SLA on every Finding; Exceptions time-boxed and approved by someone other than the requester"}
+  - {name: keel-baseline@1, point: cloud, description: "Organisation SCPs: stay in org, protect CloudAudit, identities only via Keel", findings: [landing_zone_drift, permission_boundary, breakglass]}
+  - {name: keel-ci-identity@1, point: cloud, description: "Keyless CI: OIDC role pinned to repository id + environment, no access keys", findings: [ci_identity, leaked_key]}
+  - {name: keel-findings@1, point: platform, description: "Owner, severity and SLA on every Finding; Exceptions time-boxed and approved by someone other than the requester", findings: [unowned_findings]}
   - {name: keel-vex@1, point: platform, description: "VEX statements with justification applied at gates"}
   - {name: keel-activity@1, point: platform, description: "Signed, chained, archived Activity Log"}
-  - {name: keel-pdpa-residency@1, point: platform, description: "Daily check that each Tenant's Cloud Account regions and the platform's archive and bill buckets sit in the Tenant's data region set; each one outside is a Finding"}
+  - {name: keel-pdpa-residency@1, point: platform, description: "Daily check that each Tenant's Cloud Account regions and the platform's archive and bill buckets sit in the Tenant's data region set; each one outside is a Finding", findings: [pdpa_residency]}
   - {name: keel-pdpa-retention@1, point: platform, description: "Daily retention run per data class; a dry run unless a platform admin enables deletion; nothing deleted under legal hold or while a breach is open; one Activity per run"}
-  - {name: keel-pdpa-breach@1, point: platform, description: "Declared personal data breaches run a 72-hour clock with Findings at 48h and at the deadline, ended by the recorded PDPC notification"}
+  - {name: keel-pdpa-breach@1, point: platform, description: "Declared personal data breaches run a 72-hour clock with Findings at 48h and at the deadline, ended by the recorded PDPC notification", findings: [pdpa_breach]}
 controls:
   # NIST SSDF 1.2 (SP 800-218r1)
   - {framework: SSDF, id: "PO.1.1", title: "Identify and document security requirements for software development", covered_by: [], gap_reason: "Security requirements are written by each Team; no Policy checks them"}
-  - {framework: SSDF, id: "PO.3.2", title: "Follow recommended security practices to deploy, operate and maintain toolchains", covered_by: [keel-github@1, keel-ci-identity@1]}
-  - {framework: SSDF, id: "PO.5.1", title: "Separate and protect each environment involved in software development", covered_by: [keel-baseline@1, keel-ci-identity@1]}
-  - {framework: SSDF, id: "PS.1.1", title: "Store all forms of code based on least privilege and protect from tampering", covered_by: [keel-github@1]}
+  - {framework: SSDF, id: "PO.3.2", title: "Follow recommended security practices to deploy, operate and maintain toolchains", covered_by: [keel-github@1, keel-ci-identity@1], findings: [github_governance, ci_identity]}
+  - {framework: SSDF, id: "PO.5.1", title: "Separate and protect each environment involved in software development", covered_by: [keel-baseline@1, keel-ci-identity@1], findings: [landing_zone_drift, permission_boundary, ci_identity]}
+  - {framework: SSDF, id: "PS.1.1", title: "Store all forms of code based on least privilege and protect from tampering", covered_by: [keel-github@1], findings: [github_governance]}
   - {framework: SSDF, id: "PS.2.1", title: "Make software integrity verification information available", covered_by: [keel-release@1]}
   - {framework: SSDF, id: "PS.3.2", title: "Collect, safeguard, maintain and share provenance data (SBOM)", covered_by: [keel-sbom@1, keel-release@1]}
-  - {framework: SSDF, id: "PW.4.4", title: "Verify that acquired components comply with requirements throughout their life", covered_by: [keel-sbom@1, keel-scans@1]}
-  - {framework: SSDF, id: "PW.7.2", title: "Review and analyse code for vulnerabilities (automated)", covered_by: [keel-scans@1]}
+  - {framework: SSDF, id: "PW.4.4", title: "Verify that acquired components comply with requirements throughout their life", covered_by: [keel-sbom@1, keel-scans@1], findings: [vulnerability]}
+  - {framework: SSDF, id: "PW.7.2", title: "Review and analyse code for vulnerabilities (automated)", covered_by: [keel-scans@1], findings: [sast, code_scan, secret, iac, workflow]}
   - {framework: SSDF, id: "PW.9.1", title: "Secure the build and deployment configuration by default", covered_by: [keel-admission@1, keel-promotion@1]}
-  - {framework: SSDF, id: "RV.1.1", title: "Gather information about potential vulnerabilities in released software", covered_by: [keel-sbom@1, keel-scans@1]}
-  - {framework: SSDF, id: "RV.2.2", title: "Plan and implement risk responses for vulnerabilities", covered_by: [keel-findings@1, keel-vex@1]}
+  - {framework: SSDF, id: "RV.1.1", title: "Gather information about potential vulnerabilities in released software", covered_by: [keel-sbom@1, keel-scans@1], findings: [vulnerability]}
+  - {framework: SSDF, id: "RV.2.2", title: "Plan and implement risk responses for vulnerabilities", covered_by: [keel-findings@1, keel-vex@1], findings: [unowned_findings]}
   # SLSA v1.2 build track
   - {framework: SLSA, id: "SLSA-BUILD-L1", title: "Provenance exists", covered_by: [keel-release@1]}
   - {framework: SLSA, id: "SLSA-BUILD-L2", title: "Hosted build platform, signed provenance", covered_by: [keel-release@1]}
@@ -51,14 +57,14 @@ controls:
   - {framework: CRA, id: "CRA-I.1.2c", title: "Vulnerabilities addressed by security updates", covered_by: [keel-findings@1, keel-promotion@1]}
   - {framework: CRA, id: "CRA-I.1.2f", title: "Protection of integrity of data, programs and configuration", covered_by: [keel-release@1, keel-admission@1, keel-activity@1]}
   - {framework: CRA, id: "CRA-I.2.1", title: "Identify and document components, including an SBOM", covered_by: [keel-sbom@1]}
-  - {framework: CRA, id: "CRA-I.2.2", title: "Address and remediate vulnerabilities without delay", covered_by: [keel-findings@1, keel-sbom@1]}
+  - {framework: CRA, id: "CRA-I.2.2", title: "Address and remediate vulnerabilities without delay", covered_by: [keel-findings@1, keel-sbom@1], findings: [vulnerability, unowned_findings]}
   - {framework: CRA, id: "CRA-I.2.4", title: "Publicly disclose fixed vulnerabilities (VEX/advisories)", covered_by: [keel-vex@1]}
   # OWASP Top 10 CI/CD Security Risks
-  - {framework: OWASP-CICD, id: "CICD-SEC-1", title: "Insufficient flow control mechanisms", covered_by: [keel-github@1, keel-promotion@1]}
-  - {framework: OWASP-CICD, id: "CICD-SEC-2", title: "Inadequate identity and access management", covered_by: [keel-authz@1, keel-ci-identity@1]}
-  - {framework: OWASP-CICD, id: "CICD-SEC-3", title: "Dependency chain abuse", covered_by: [keel-sbom@1, keel-scans@1]}
-  - {framework: OWASP-CICD, id: "CICD-SEC-4", title: "Poisoned pipeline execution", covered_by: [keel-github@1, keel-release@1]}
-  - {framework: OWASP-CICD, id: "CICD-SEC-6", title: "Insufficient credential hygiene", covered_by: [keel-ci-identity@1, keel-github@1]}
+  - {framework: OWASP-CICD, id: "CICD-SEC-1", title: "Insufficient flow control mechanisms", covered_by: [keel-github@1, keel-promotion@1], findings: [github_governance]}
+  - {framework: OWASP-CICD, id: "CICD-SEC-2", title: "Inadequate identity and access management", covered_by: [keel-authz@1, keel-ci-identity@1], findings: [ci_identity]}
+  - {framework: OWASP-CICD, id: "CICD-SEC-3", title: "Dependency chain abuse", covered_by: [keel-sbom@1, keel-scans@1], findings: [vulnerability]}
+  - {framework: OWASP-CICD, id: "CICD-SEC-4", title: "Poisoned pipeline execution", covered_by: [keel-github@1, keel-release@1], findings: [github_governance]}
+  - {framework: OWASP-CICD, id: "CICD-SEC-6", title: "Insufficient credential hygiene", covered_by: [keel-ci-identity@1, keel-github@1], findings: [ci_identity, leaked_key, secret]}
   - {framework: OWASP-CICD, id: "CICD-SEC-7", title: "Insecure system configuration (CI/CD systems themselves)", covered_by: [], gap_reason: "No Policy checks the hardening of CI runners and build systems"}
   - {framework: OWASP-CICD, id: "CICD-SEC-9", title: "Improper artifact integrity validation", covered_by: [keel-release@1, keel-admission@1]}
   - {framework: OWASP-CICD, id: "CICD-SEC-10", title: "Insufficient logging and visibility", covered_by: [keel-activity@1]}
@@ -79,15 +85,15 @@ controls:
   - {framework: ISO27001, id: "5.12", title: "Classification of information", covered_by: [], gap_reason: "No data classification in Keel yet"}
   - {framework: ISO27001, id: "5.13", title: "Labelling of information", covered_by: [], gap_reason: "No data classification in Keel yet"}
   - {framework: ISO27001, id: "5.14", title: "Information transfer", covered_by: [], gap_reason: "Organisational: outside Keel"}
-  - {framework: ISO27001, id: "5.15", title: "Access control", covered_by: [keel-authz@1, keel-access@1]}
-  - {framework: ISO27001, id: "5.16", title: "Identity management", covered_by: [keel-baseline@1, keel-ci-identity@1]}
-  - {framework: ISO27001, id: "5.17", title: "Authentication information", covered_by: [keel-ci-identity@1, keel-github@1]}
-  - {framework: ISO27001, id: "5.18", title: "Access rights", covered_by: [keel-access@1, keel-authz@1]}
+  - {framework: ISO27001, id: "5.15", title: "Access control", covered_by: [keel-authz@1, keel-access@1], findings: [standing_access, access_grant_orphaned]}
+  - {framework: ISO27001, id: "5.16", title: "Identity management", covered_by: [keel-baseline@1, keel-ci-identity@1], findings: [ci_identity, breakglass]}
+  - {framework: ISO27001, id: "5.17", title: "Authentication information", covered_by: [keel-ci-identity@1, keel-github@1], findings: [leaked_key, secret]}
+  - {framework: ISO27001, id: "5.18", title: "Access rights", covered_by: [keel-access@1, keel-authz@1], findings: [standing_access, access_grant_orphaned]}
   - {framework: ISO27001, id: "5.19", title: "Information security in supplier relationships", covered_by: [], gap_reason: "Organisational: supplier management is outside Keel"}
   - {framework: ISO27001, id: "5.20", title: "Addressing information security within supplier agreements", covered_by: [], gap_reason: "Organisational: supplier management is outside Keel"}
-  - {framework: ISO27001, id: "5.21", title: "Managing information security in the ICT supply chain", covered_by: [keel-sbom@1, keel-scans@1, keel-release@1]}
+  - {framework: ISO27001, id: "5.21", title: "Managing information security in the ICT supply chain", covered_by: [keel-sbom@1, keel-scans@1, keel-release@1], findings: [vulnerability]}
   - {framework: ISO27001, id: "5.22", title: "Monitoring, review and change management of supplier services", covered_by: [], gap_reason: "Organisational: supplier management is outside Keel"}
-  - {framework: ISO27001, id: "5.23", title: "Information security for use of cloud services", covered_by: [keel-baseline@1, keel-ci-identity@1]}
+  - {framework: ISO27001, id: "5.23", title: "Information security for use of cloud services", covered_by: [keel-baseline@1, keel-ci-identity@1], findings: [landing_zone_drift, permission_boundary]}
   - {framework: ISO27001, id: "5.24", title: "Information security incident management planning and preparation", covered_by: [], gap_reason: "Incident management process is outside Keel"}
   - {framework: ISO27001, id: "5.25", title: "Assessment and decision on information security events", covered_by: [], gap_reason: "Incident management process is outside Keel"}
   - {framework: ISO27001, id: "5.26", title: "Response to information security incidents", covered_by: [], gap_reason: "Incident management process is outside Keel"}
@@ -125,14 +131,14 @@ controls:
   - {framework: ISO27001, id: "7.13", title: "Equipment maintenance", covered_by: [], gap_reason: "Physical: offices and cloud provider data centres"}
   - {framework: ISO27001, id: "7.14", title: "Secure disposal or re-use of equipment", covered_by: [], gap_reason: "Physical: offices and cloud provider data centres"}
   - {framework: ISO27001, id: "8.1", title: "User endpoint devices", covered_by: [], gap_reason: "Endpoint fleet is outside Keel"}
-  - {framework: ISO27001, id: "8.2", title: "Privileged access rights", covered_by: [keel-access@1, keel-ci-identity@1]}
+  - {framework: ISO27001, id: "8.2", title: "Privileged access rights", covered_by: [keel-access@1, keel-ci-identity@1], findings: [standing_access, access_grant_orphaned]}
   - {framework: ISO27001, id: "8.3", title: "Information access restriction", covered_by: [keel-authz@1]}
-  - {framework: ISO27001, id: "8.4", title: "Access to source code", covered_by: [keel-github@1]}
-  - {framework: ISO27001, id: "8.5", title: "Secure authentication", covered_by: [keel-ci-identity@1]}
+  - {framework: ISO27001, id: "8.4", title: "Access to source code", covered_by: [keel-github@1], findings: [github_governance]}
+  - {framework: ISO27001, id: "8.5", title: "Secure authentication", covered_by: [keel-ci-identity@1], findings: [ci_identity, leaked_key]}
   - {framework: ISO27001, id: "8.6", title: "Capacity management", covered_by: [], gap_reason: "Utilisation is reported, but no Policy enforces capacity"}
   - {framework: ISO27001, id: "8.7", title: "Protection against malware", covered_by: [], gap_reason: "No malware scanning Policy; admission blocks unsigned images (8.19)"}
-  - {framework: ISO27001, id: "8.8", title: "Management of technical vulnerabilities", covered_by: [keel-scans@1, keel-sbom@1, keel-findings@1, keel-vex@1]}
-  - {framework: ISO27001, id: "8.9", title: "Configuration management", covered_by: [keel-baseline@1, keel-scans@1]}
+  - {framework: ISO27001, id: "8.8", title: "Management of technical vulnerabilities", covered_by: [keel-scans@1, keel-sbom@1, keel-findings@1, keel-vex@1], findings: [vulnerability, sast, code_scan, iac, workflow, unowned_findings]}
+  - {framework: ISO27001, id: "8.9", title: "Configuration management", covered_by: [keel-baseline@1, keel-scans@1], findings: [landing_zone_drift, permission_boundary, iac]}
   - {framework: ISO27001, id: "8.10", title: "Information deletion", covered_by: [], gap_reason: "PDPA retention and deletion Controls are #190"}
   - {framework: ISO27001, id: "8.11", title: "Data masking", covered_by: [], gap_reason: "No Policy on Tenant data"}
   - {framework: ISO27001, id: "8.12", title: "Data leakage prevention", covered_by: [], gap_reason: "Secret push protection covers credentials only (5.17)"}
@@ -148,14 +154,14 @@ controls:
   - {framework: ISO27001, id: "8.22", title: "Segregation of networks", covered_by: [], gap_reason: "No network Policy"}
   - {framework: ISO27001, id: "8.23", title: "Web filtering", covered_by: [], gap_reason: "Endpoint fleet is outside Keel"}
   - {framework: ISO27001, id: "8.24", title: "Use of cryptography", covered_by: [], gap_reason: "Releases are signed (keel-release@1), but no Policy covers encryption or key management"}
-  - {framework: ISO27001, id: "8.25", title: "Secure development life cycle", covered_by: [keel-github@1, keel-scans@1, keel-release@1, keel-promotion@1]}
+  - {framework: ISO27001, id: "8.25", title: "Secure development life cycle", covered_by: [keel-github@1, keel-scans@1, keel-release@1, keel-promotion@1], findings: [github_governance, vulnerability, sast, code_scan, secret, iac, workflow]}
   - {framework: ISO27001, id: "8.26", title: "Application security requirements", covered_by: [], gap_reason: "Security requirements are written by each Team; no Policy checks them"}
   - {framework: ISO27001, id: "8.27", title: "Secure system architecture and engineering principles", covered_by: [], gap_reason: "Architecture review is outside Keel"}
-  - {framework: ISO27001, id: "8.28", title: "Secure coding", covered_by: [keel-scans@1, keel-github@1]}
-  - {framework: ISO27001, id: "8.29", title: "Security testing in development and acceptance", covered_by: [keel-scans@1, keel-promotion@1]}
+  - {framework: ISO27001, id: "8.28", title: "Secure coding", covered_by: [keel-scans@1, keel-github@1], findings: [sast, code_scan, secret, iac, workflow]}
+  - {framework: ISO27001, id: "8.29", title: "Security testing in development and acceptance", covered_by: [keel-scans@1, keel-promotion@1], findings: [vulnerability, sast, code_scan, secret, iac, workflow]}
   - {framework: ISO27001, id: "8.30", title: "Outsourced development", covered_by: [], gap_reason: "Organisational: supplier management is outside Keel"}
-  - {framework: ISO27001, id: "8.31", title: "Separation of development, test and production environments", covered_by: [keel-promotion@1, keel-baseline@1, keel-ci-identity@1]}
-  - {framework: ISO27001, id: "8.32", title: "Change management", covered_by: [keel-github@1, keel-promotion@1, keel-activity@1]}
+  - {framework: ISO27001, id: "8.31", title: "Separation of development, test and production environments", covered_by: [keel-promotion@1, keel-baseline@1, keel-ci-identity@1], findings: [ci_identity, landing_zone_drift, permission_boundary]}
+  - {framework: ISO27001, id: "8.32", title: "Change management", covered_by: [keel-github@1, keel-promotion@1, keel-activity@1], findings: [github_governance]}
   - {framework: ISO27001, id: "8.33", title: "Test information", covered_by: [], gap_reason: "No Policy on test data"}
   - {framework: ISO27001, id: "8.34", title: "Protection of information systems during audit testing", covered_by: [], gap_reason: "Organisational: audit planning is outside Keel"}
 
@@ -174,24 +180,24 @@ controls:
   - {framework: SOC2, id: "CC3.3", title: "Fraud risk", covered_by: [], gap_reason: "Risk assessment is outside Keel"}
   - {framework: SOC2, id: "CC3.4", title: "Significant changes affecting internal control", covered_by: [], gap_reason: "Risk assessment is outside Keel"}
   - {framework: SOC2, id: "CC4.1", title: "Ongoing and separate evaluations", covered_by: [], gap_reason: "The evaluation programme is the entity's; this report is an input"}
-  - {framework: SOC2, id: "CC4.2", title: "Evaluating and communicating deficiencies", covered_by: [keel-findings@1]}
+  - {framework: SOC2, id: "CC4.2", title: "Evaluating and communicating deficiencies", covered_by: [keel-findings@1], findings: [unowned_findings]}
   - {framework: SOC2, id: "CC5.1", title: "Selecting and developing control activities", covered_by: [], gap_reason: "Control selection is organisational"}
   - {framework: SOC2, id: "CC5.2", title: "General controls over technology", covered_by: [], gap_reason: "Control selection is organisational; Keel Policies are mapped under CC6 to CC8"}
   - {framework: SOC2, id: "CC5.3", title: "Policies and procedures that deploy control activities", covered_by: [], gap_reason: "Control selection is organisational"}
-  - {framework: SOC2, id: "CC6.1", title: "Logical access security over information assets", covered_by: [keel-authz@1, keel-baseline@1, keel-ci-identity@1]}
-  - {framework: SOC2, id: "CC6.2", title: "Registering and authorising users before access", covered_by: [keel-access@1]}
-  - {framework: SOC2, id: "CC6.3", title: "Role-based access, least privilege and segregation of duties", covered_by: [keel-authz@1, keel-access@1, keel-ci-identity@1]}
+  - {framework: SOC2, id: "CC6.1", title: "Logical access security over information assets", covered_by: [keel-authz@1, keel-baseline@1, keel-ci-identity@1], findings: [ci_identity, permission_boundary, breakglass]}
+  - {framework: SOC2, id: "CC6.2", title: "Registering and authorising users before access", covered_by: [keel-access@1], findings: [access_grant_orphaned, standing_access]}
+  - {framework: SOC2, id: "CC6.3", title: "Role-based access, least privilege and segregation of duties", covered_by: [keel-authz@1, keel-access@1, keel-ci-identity@1], findings: [standing_access, access_grant_orphaned, ci_identity]}
   - {framework: SOC2, id: "CC6.4", title: "Restricting physical access", covered_by: [], gap_reason: "Physical: offices and cloud provider data centres"}
   - {framework: SOC2, id: "CC6.5", title: "Disposal of physical assets", covered_by: [], gap_reason: "Physical: offices and cloud provider data centres"}
   - {framework: SOC2, id: "CC6.6", title: "Protection against threats from outside system boundaries", covered_by: [], gap_reason: "No network Policy"}
   - {framework: SOC2, id: "CC6.7", title: "Restricting transmission and movement of information", covered_by: [], gap_reason: "No data transfer or encryption Policy"}
   - {framework: SOC2, id: "CC6.8", title: "Preventing or detecting unauthorised or malicious software", covered_by: [keel-admission@1]}
-  - {framework: SOC2, id: "CC7.1", title: "Detecting configuration changes and new vulnerabilities", covered_by: [keel-scans@1, keel-sbom@1]}
+  - {framework: SOC2, id: "CC7.1", title: "Detecting configuration changes and new vulnerabilities", covered_by: [keel-scans@1, keel-sbom@1], findings: [vulnerability, sast, code_scan, iac, workflow]}
   - {framework: SOC2, id: "CC7.2", title: "Monitoring system components for anomalies", covered_by: [], gap_reason: "Audit logs are protected but not monitored by a Keel Policy"}
   - {framework: SOC2, id: "CC7.3", title: "Evaluating security events", covered_by: [], gap_reason: "Incident management process is outside Keel"}
   - {framework: SOC2, id: "CC7.4", title: "Responding to security incidents", covered_by: [], gap_reason: "Incident management process is outside Keel"}
   - {framework: SOC2, id: "CC7.5", title: "Recovering from security incidents", covered_by: [], gap_reason: "Incident management process is outside Keel"}
-  - {framework: SOC2, id: "CC8.1", title: "Authorising, testing, approving and implementing changes", covered_by: [keel-github@1, keel-release@1, keel-promotion@1, keel-activity@1]}
+  - {framework: SOC2, id: "CC8.1", title: "Authorising, testing, approving and implementing changes", covered_by: [keel-github@1, keel-release@1, keel-promotion@1, keel-activity@1], findings: [github_governance]}
   - {framework: SOC2, id: "CC9.1", title: "Mitigating risks from business disruption", covered_by: [], gap_reason: "Business continuity is outside Keel"}
   - {framework: SOC2, id: "CC9.2", title: "Vendor and business partner risk", covered_by: [], gap_reason: "Organisational: supplier management is outside Keel"}
   - {framework: SOC2, id: "A1.1", title: "Capacity planning", covered_by: [], gap_reason: "Utilisation is reported, but no Policy enforces capacity"}
@@ -206,12 +212,12 @@ controls:
   - {framework: PDPA, id: "s.19", title: "Consent before collecting, using or disclosing personal data", covered_by: [], gap_reason: "Consent is collected by each Tenant's applications; Keel holds no consent records"}
   - {framework: PDPA, id: "s.23", title: "Tell data subjects what is collected and why", covered_by: [], gap_reason: "Privacy notices are each Tenant's to publish"}
   - {framework: PDPA, id: "s.26", title: "Sensitive personal data", covered_by: [], gap_reason: "No data classification in Keel to find sensitive data"}
-  - {framework: PDPA, id: "s.28", title: "Transfers of personal data outside Thailand", covered_by: [keel-pdpa-residency@1]}
+  - {framework: PDPA, id: "s.28", title: "Transfers of personal data outside Thailand", covered_by: [keel-pdpa-residency@1], findings: [pdpa_residency]}
   - {framework: PDPA, id: "s.30", title: "Data subject access requests", covered_by: [], gap_reason: "Data subject requests are served by each Tenant's applications; Keel holds no index of data subjects"}
   - {framework: PDPA, id: "s.33", title: "Data subject erasure requests", covered_by: [], gap_reason: "Data subject requests are served by each Tenant's applications; Keel holds no index of data subjects"}
-  - {framework: PDPA, id: "s.37(1)", title: "Appropriate security measures, reviewed as needed", covered_by: [keel-authz@1, keel-access@1, keel-activity@1]}
+  - {framework: PDPA, id: "s.37(1)", title: "Appropriate security measures, reviewed as needed", covered_by: [keel-authz@1, keel-access@1, keel-activity@1], findings: [standing_access, access_grant_orphaned]}
   - {framework: PDPA, id: "s.37(3)", title: "Erase personal data once the retention period ends", covered_by: [keel-pdpa-retention@1]}
-  - {framework: PDPA, id: "s.37(4)", title: "Notify the PDPC of a personal data breach within 72 hours", covered_by: [keel-pdpa-breach@1]}
+  - {framework: PDPA, id: "s.37(4)", title: "Notify the PDPC of a personal data breach within 72 hours", covered_by: [keel-pdpa-breach@1], findings: [pdpa_breach]}
   - {framework: PDPA, id: "s.39", title: "Records of processing activities", covered_by: [], gap_reason: "Organisational: each controller keeps its record of processing outside Keel"}
-  - {framework: PDPA, id: "s.40", title: "Processor security and breach reporting to the controller", covered_by: [keel-pdpa-breach@1, keel-authz@1]}
+  - {framework: PDPA, id: "s.40", title: "Processor security and breach reporting to the controller", covered_by: [keel-pdpa-breach@1, keel-authz@1], findings: [pdpa_breach]}
   - {framework: PDPA, id: "s.41", title: "Data protection officer", covered_by: [], gap_reason: "Organisational: outside Keel"}
