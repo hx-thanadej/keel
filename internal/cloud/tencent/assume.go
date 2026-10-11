@@ -3,6 +3,7 @@ package tencent
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -20,12 +21,35 @@ type MemberRole struct {
 	Account string // member UIN
 	Role    string // role name in the member account, e.g. KeelReadOnly
 	Region  string
+	// ExternalID is sent on AssumeRole when set; a client role's trust policy
+	// requires it (sts:external_id) so only Keel's registration of that payer
+	// can assume it.
+	ExternalID string
 	// Endpoint overrides the STS host (scheme://host), for tests.
 	Endpoint string
 
 	mu      sync.Mutex
 	cached  common.CredentialIface
 	expires time.Time
+}
+
+var roleARN = regexp.MustCompile(`^qcs::cam::uin/(\d{1,20}):roleName/([\w+=,.@-]{1,128})$`)
+
+// ReadOnlyRole is a client's read-only role (ADR-0018), assumed from Keel's
+// base identity with Keel's ExternalId for that payer. The role must live in
+// account, the client payer whose bills it reads.
+func ReadOnlyRole(base common.Provider, arn, account, externalID, region string) (*MemberRole, error) {
+	m := roleARN.FindStringSubmatch(arn)
+	if m == nil {
+		return nil, fmt.Errorf("read-only role %q is not qcs::cam::uin/<uin>:roleName/<name>", arn)
+	}
+	if m[1] != account {
+		return nil, fmt.Errorf("read-only role %s is not in payer %s", arn, account)
+	}
+	if externalID == "" {
+		return nil, fmt.Errorf("read-only role %s has no ExternalId", arn)
+	}
+	return &MemberRole{Base: base, Account: account, Role: m[2], Region: region, ExternalID: externalID}, nil
 }
 
 // RoleArn is the member role's ARN.
@@ -55,6 +79,9 @@ func (m *MemberRole) GetCredential() (common.CredentialIface, error) {
 	req := sts.NewAssumeRoleRequest()
 	arn, session, dur := m.RoleArn(), "keel", uint64(3600)
 	req.RoleArn, req.RoleSessionName, req.DurationSeconds = &arn, &session, &dur
+	if m.ExternalID != "" {
+		req.ExternalId = &m.ExternalID
+	}
 	res, err := c.AssumeRole(req)
 	if err != nil {
 		return nil, fmt.Errorf("AssumeRole %s: %w", arn, err)

@@ -62,6 +62,8 @@ type BillSync struct {
 	Mode             FileMode
 	Invoices         InvoiceSource // optional
 	Now              func() time.Time
+	// Tenant is set for a client payer: see Load.Tenant.
+	Tenant string
 }
 
 // SyncedLoad reports one load made by a sync run.
@@ -70,16 +72,18 @@ type SyncedLoad struct {
 	Period    time.Time `json:"period"`
 	Final     bool      `json:"final"`
 	Lines     int       `json:"lines"`
+	Dropped   int       `json:"dropped"`
 	Reconcile string    `json:"reconcile"`
 }
 
 // SyncReport summarises a run.
 type SyncReport struct {
-	NewFiles int          `json:"new_files"`
-	Loads    []SyncedLoad `json:"loads"`
-	Skipped  []string     `json:"skipped"`   // files for already-final periods
-	NotFOCUS []string     `json:"not_focus"` // other bill types, newly seen and never ingested
-	Blocked  []string     `json:"blocked"`   // periods (YYYY-MM) left unloaded because their files overlap
+	BillFiles int          `json:"bill_files"` // listed under the prefix, new or not
+	NewFiles  int          `json:"new_files"`
+	Loads     []SyncedLoad `json:"loads"`
+	Skipped   []string     `json:"skipped"`   // files for already-final periods
+	NotFOCUS  []string     `json:"not_focus"` // other bill types, newly seen and never ingested
+	Blocked   []string     `json:"blocked"`   // periods (YYYY-MM) left unloaded because their files overlap
 }
 
 var billExt = []string{".csv", ".csv.gz", ".gz", ".zip", ".parquet"}
@@ -168,8 +172,12 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	touched := map[time.Time]bool{}
 	for _, o := range objects {
 		key := o.Key
+		if !slices.ContainsFunc(billExt, func(e string) bool { return strings.HasSuffix(strings.ToLower(key), e) }) {
+			continue
+		}
+		rep.BillFiles++
 		subject := "bill_file/" + b.Provider + "/" + b.BillingAccountID + "/" + key + "@" + o.ETag
-		if seen[key+"\x00"+o.ETag] || notFOCUS[subject] || !slices.ContainsFunc(billExt, func(e string) bool { return strings.HasSuffix(strings.ToLower(key), e) }) {
+		if seen[key+"\x00"+o.ETag] || notFOCUS[subject] {
 			continue
 		}
 		var lines []Line
@@ -318,7 +326,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 		final := PeriodFinal(b.Provider, p, now(), invoiced && len(lines) > 0)
 		res, err := b.Ingester.Load(ctx, Load{Provider: b.Provider, BillingAccountID: b.BillingAccountID, BillingPeriod: p,
-			Source: strings.Join(files, ","), Final: final, Lines: lines})
+			Source: strings.Join(files, ","), Final: final, Lines: lines, Tenant: b.Tenant})
 		if errors.Is(err, ErrPeriodFinal) {
 			continue
 		}
@@ -332,7 +340,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}); err != nil {
 			return rep, err
 		}
-		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Reconcile: "pending"}
+		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Dropped: res.Dropped, Reconcile: "pending"}
 		if b.Invoices != nil {
 			if sl.Reconcile, err = b.reconcile(ctx, home, res.LoadID, p); err != nil {
 				return rep, err
@@ -433,7 +441,7 @@ func (b *BillSync) reconcile(ctx context.Context, home, loadID string, period ti
 			}
 			var total string
 			if qerr := b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-				return tx.QueryRow(ctx, `SELECT total_billed::text FROM cost_loads WHERE id = $1`, loadID).Scan(&total)
+				return tx.QueryRow(ctx, `SELECT (total_billed + dropped_billed)::text FROM cost_loads WHERE id = $1`, loadID).Scan(&total)
 			}); qerr != nil {
 				return "", qerr
 			}

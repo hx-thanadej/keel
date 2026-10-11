@@ -27,6 +27,7 @@
 //	KEEL_TENCENT_BILL_ROLE     name of the payer CAM role Keel's base identity assumes for bill sync and invoices
 //	KEEL_TENCENT_BILL_MODE     per-day (default) | cumulative (daily FOCUS files are month-to-date); confirm on first delivery
 //	KEEL_TENCENT_REGION        region for billing API and COS (default ap-bangkok)
+//	                           client payers (ADR-0018) are data, not env: client_payers rows on client-owned Cloud Accounts
 //	KEEL_AWS_BILL_BUCKET      S3 bucket of the AWS Data Exports FOCUS 1.2 export (CSV)
 //	KEEL_AWS_BILL_PREFIX      export prefix
 //	KEEL_AWS_PAYER_ACCOUNT    management account id (FOCUS BillingAccountId)
@@ -432,6 +433,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
+	go clientBillSyncLoop(ctx, st, evaluator)
 	if err := startAWSBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
@@ -1083,6 +1085,63 @@ func billCredentials(base common.Provider, payer, role, region string) common.Pr
 		return base
 	}
 	return &tencent.MemberRole{Base: base, Account: payer, Role: role, Region: region}
+}
+
+// clientBillSyncLoop loads client payers' Tencent bills hourly, each through
+// its client's read-only role and into its own Tenant (ADR-0018, #182).
+// Client payers are data: client_payers rows on client-owned Cloud Accounts.
+func clientBillSyncLoop(ctx context.Context, st *store.Store, ev budget.Evaluator) {
+	var own []string
+	if payer := os.Getenv("KEEL_TENCENT_PAYER_UIN"); payer != "" {
+		own = append(own, payer)
+	}
+	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: st}, Provider: "tencent", OwnPayers: own,
+		Connect: clientPayerConnect(tencent.Credentials(), "")}
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		runs, err := cs.Run(ctx)
+		if err != nil {
+			slog.Error("ALERT tencent client bill sync failed", "err", err)
+		}
+		loaded := false
+		for _, r := range runs {
+			slog.Info("tencent client bill sync", "tenant", r.Payer.TenantID, "payer", r.Payer.UIN, "no_delivery", r.NoDelivery,
+				"new_files", r.Report.NewFiles, "loads", len(r.Report.Loads), "not_focus", r.Report.NotFOCUS, "blocked", r.Report.Blocked)
+			loaded = loaded || len(r.Report.Loads) > 0
+		}
+		if loaded {
+			evaluate(ctx, ev)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// clientPayerConnect gives read-only access to a client payer's bills and
+// invoice totals, as that client's read-only role assumed from Keel's base
+// identity. It assumes the role up front, so a role that refuses Keel fails
+// here and not mid-sync. stsEndpoint overrides the STS host in tests.
+func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.UIN, p.RoleExternalID, p.Region)
+		if err != nil {
+			return nil, nil, &cost.RoleError{Err: err}
+		}
+		role.Endpoint = stsEndpoint
+		if _, err := role.GetCredential(); err != nil {
+			return nil, nil, &cost.RoleError{Err: err}
+		}
+		objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + p.Region + ".myqcloud.com", Region: p.Region, Bucket: p.Bucket,
+			Creds: archive.Refreshing(tencent.STS{Creds: role}, 10*time.Minute)})
+		if err != nil {
+			return nil, nil, err
+		}
+		return billObjects{objs}, tencent.Invoices{Region: p.Region, Creds: role}, nil
+	}
 }
 
 // fxLoop keeps ECB reference rates current: a full 3-year backfill when the

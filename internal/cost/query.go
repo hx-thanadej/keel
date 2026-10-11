@@ -105,6 +105,8 @@ type LoadSummary struct {
 	Lines           int        `json:"lines"`
 	TotalBilled     string     `json:"total_billed"`
 	Unallocated     string     `json:"unallocated_billed"`
+	DroppedLines    int        `json:"dropped_lines"`
+	DroppedBilled   string     `json:"dropped_billed"`
 	Currency        string     `json:"currency"`
 	InvoiceTotal    *string    `json:"invoice_total"`
 	ReconcileStatus string     `json:"reconcile_status"`
@@ -121,8 +123,8 @@ func (q Queries) Loads(ctx context.Context, homeTenantID string, limit int) ([]L
 	var out []LoadSummary
 	err := q.Store.InTenant(ctx, homeTenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id::text, provider, billing_account_id, billing_period, is_final, line_count,
-				to_char(total_billed, 'FM999999999990.00'), to_char(unallocated_billed, 'FM999999999990.00'), currency,
-				to_char(invoice_total, 'FM999999999990.00'), reconcile_status, to_char(reconcile_diff, 'FM999999999990.00'), loaded_at, superseded_at
+				to_char(total_billed, 'FM999999999990.00'), to_char(unallocated_billed, 'FM999999999990.00'), dropped_lines,
+				to_char(dropped_billed, 'FM999999999990.00'), currency, to_char(invoice_total, 'FM999999999990.00'), reconcile_status, to_char(reconcile_diff, 'FM999999999990.00'), loaded_at, superseded_at
 			FROM cost_loads ORDER BY loaded_at DESC LIMIT $1`, limit)
 		if err != nil {
 			return err

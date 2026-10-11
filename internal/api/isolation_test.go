@@ -140,6 +140,7 @@ func TestCrossTenantIsolationEveryRoute(t *testing.T) {
 		"POST /v1/tenants/{tenant}/cloud-accounts":                                  {"provider": "aws", "external_id": "pwn-1", "name": "pwn"},
 		"POST /v1/tenants/{tenant}/cloud-accounts/{account}/archive":                {"why": "pwn"},
 		"PATCH /v1/tenants/{tenant}/cloud-accounts/{account}":                       {"ownership": "platform", "why": "pwn"},
+		"PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer":            {"bucket": "pwn-bills-1250000000", "region": "ap-bangkok", "why": "pwn"},
 		"POST /v1/tenants/{tenant}/identity-providers":                              {"issuer": "https://pwn.example", "client_id": "pwn", "client_secret_ref": "PWN"},
 		"POST /v1/tenants/{tenant}/identity-providers/{idp}/group-roles":            {"group": "pwn", "role": "platform_admin", "target_tenant_id": a},
 		"POST /v1/tenants/{tenant}/discoveries/{provider}":                          {},
