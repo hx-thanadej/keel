@@ -268,6 +268,8 @@ export type ControlView = {
   gap_reason?: string
   coverage: { name: string; point: string; covered_services: number }[]
   gap: boolean
+  /** Open Findings of the kinds the Control's policies raise: the most severe items of count. */
+  open_findings: { count: number; items: { id: string; title: string; severity: Finding['severity'] }[] }
 }
 export type FrameworkCoverage = { id: string; name: string; controls: number; mapped: number; covered: number; gaps: number }
 export type ControlReport = { version: string; services: number; frameworks: FrameworkCoverage[]; controls: ControlView[] }

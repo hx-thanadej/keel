@@ -31,6 +31,11 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
   const [tenants, setTenants] = useState<Tenant[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('budgets')
+  const [focusFinding, setFocusFinding] = useState<string>()
+  const openFinding = (id: string) => {
+    setFocusFinding(id)
+    setTab('findings')
+  }
 
   useEffect(() => {
     // A binding the policy rejects (e.g. outside a Tenant Member's own Tenant) simply fails to load.
@@ -86,11 +91,11 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
             </div>
             {tab === 'budgets' && <BudgetsView key={current.id} tenantId={current.id} />}
             {tab === 'costs' && <CostsView key={current.id} tenantId={current.id} />}
-            {tab === 'findings' && <FindingsView key={current.id} tenantId={current.id} />}
+            {tab === 'findings' && <FindingsView key={current.id} tenantId={current.id} focus={focusFinding} />}
             {tab === 'savings' && <SavingsView key={current.id} tenantId={current.id} />}
             {tab === 'delivery' && <DeliveryView key={current.id} tenantId={current.id} />}
             {tab === 'security' && <SecurityView key={current.id} tenantId={current.id} />}
-            {tab === 'compliance' && <ComplianceView key={current.id} tenantId={current.id} canConfigure={me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin')} />}
+            {tab === 'compliance' && <ComplianceView key={current.id} tenantId={current.id} onOpenFinding={openFinding} canConfigure={me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin')} />}
             {tab === 'access' && <AccessView key={current.id} tenantId={current.id} />}
             {tab === 'insights' && <InsightsView key={current.id} tenantId={current.id} canSubmit={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'tenant_approver'))} canGenerate={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'finops_lead'))} />}
             {tab === 'catalog' && (

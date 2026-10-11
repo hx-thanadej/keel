@@ -1,10 +1,12 @@
-# keel-controls@2: the Controls Keel is measured against, per framework, and
+# keel-controls@3: the Controls Keel is measured against, per framework, and
 # the Keel Policies (each at one Enforcement Point) that evidence them. One
 # Policy covers many Controls across frameworks. A Control no Policy evidences
-# has `covered_by: []` and a `gap_reason`, so the report shows the gap.
+# has `covered_by: []` and a `gap_reason`, so the report shows the gap. A
+# Policy's `findings` are the Finding kinds it raises; a Control's open
+# Findings are those of its Policies' kinds (#210).
 # Versioned data: change by pull request, bump the version when the shape
 # changes. Titles only; never copy a framework's requirement text.
-version: keel-controls@2
+version: keel-controls@3
 frameworks:
   - {id: SSDF, name: "NIST SSDF 1.2 (SP 800-218r1)"}
   - {id: SLSA, name: "SLSA v1.2 build track"}
@@ -15,21 +17,21 @@ frameworks:
   - {id: PDPA, name: "Thailand Personal Data Protection Act B.E. 2562 (2019)"}
 policies:
   - {name: keel-authz@1, point: api, description: "Every API call decided by OPA; default deny; Tenant isolation"}
-  - {name: keel-access@1, point: cloud, description: "Just-in-time Access Grants: role eligibility per Team and Environment, time-boxed; write or production grants need approval by a Team Lead (plus a second approver for production write) who is not the requester; read-only non-production grants are self-served"}
-  - {name: keel-github@1, point: pr, description: "Rulesets (review, CODEOWNERS, checks), secret scanning + push protection, Actions SHA pinning, read-only token"}
-  - {name: keel-scans@1, point: pipeline, description: "SARIF from secrets/SAST/SCA/IaC scanners → owned Findings"}
+  - {name: keel-access@1, point: cloud, description: "Just-in-time Access Grants: role eligibility per Team and Environment, time-boxed; write or production grants need approval by a Team Lead (plus a second approver for production write) who is not the requester; read-only non-production grants are self-served", findings: [access_grant_orphaned, standing_access]}
+  - {name: keel-github@1, point: pr, description: "Rulesets (review, CODEOWNERS, checks), secret scanning + push protection, Actions SHA pinning, read-only token", findings: [github_governance, secret]}
+  - {name: keel-scans@1, point: pipeline, description: "SARIF from secrets/SAST/SCA/IaC scanners → owned Findings", findings: [vulnerability, secret, sast, iac, workflow, code_scan]}
   - {name: keel-release@1, point: pipeline, description: "Sigstore-verified SLSA provenance from Keel's builder; VSA per image"}
-  - {name: keel-sbom@1, point: pipeline, description: "SBOM per Release; CISA 2026 minimum elements; daily OSV re-match"}
+  - {name: keel-sbom@1, point: pipeline, description: "SBOM per Release; CISA 2026 minimum elements; daily OSV re-match", findings: [vulnerability]}
   - {name: keel-promotion@1, point: promotion, description: "Digests only, previous Environment first, VSA, no unexcepted critical Findings, budget, approval by someone other than the requester"}
   - {name: keel-admission@1, point: admission, description: "Kyverno IVP signature + provenance; digest-only VAP"}
-  - {name: keel-baseline@1, point: cloud, description: "Organisation SCPs: stay in org, protect CloudAudit, identities only via Keel"}
-  - {name: keel-ci-identity@1, point: cloud, description: "Keyless CI: OIDC role pinned to repository id + environment, no access keys"}
-  - {name: keel-findings@1, point: platform, description: "Owner, severity and SLA on every Finding; Exceptions time-boxed and approved by someone other than the requester"}
+  - {name: keel-baseline@1, point: cloud, description: "Organisation SCPs: stay in org, protect CloudAudit, identities only via Keel", findings: [landing_zone_drift, permission_boundary, breakglass]}
+  - {name: keel-ci-identity@1, point: cloud, description: "Keyless CI: OIDC role pinned to repository id + environment, no access keys", findings: [ci_identity, leaked_key]}
+  - {name: keel-findings@1, point: platform, description: "Owner, severity and SLA on every Finding; Exceptions time-boxed and approved by someone other than the requester", findings: [unowned_findings]}
   - {name: keel-vex@1, point: platform, description: "VEX statements with justification applied at gates"}
   - {name: keel-activity@1, point: platform, description: "Signed, chained, archived Activity Log"}
-  - {name: keel-pdpa-residency@1, point: platform, description: "Daily check that each Tenant's Cloud Account regions and the platform's archive and bill buckets sit in the Tenant's data region set; each one outside is a Finding"}
+  - {name: keel-pdpa-residency@1, point: platform, description: "Daily check that each Tenant's Cloud Account regions and the platform's archive and bill buckets sit in the Tenant's data region set; each one outside is a Finding", findings: [pdpa_residency]}
   - {name: keel-pdpa-retention@1, point: platform, description: "Daily retention run per data class; a dry run unless a platform admin enables deletion; nothing deleted under legal hold or while a breach is open; one Activity per run"}
-  - {name: keel-pdpa-breach@1, point: platform, description: "Declared personal data breaches run a 72-hour clock with Findings at 48h and at the deadline, ended by the recorded PDPC notification"}
+  - {name: keel-pdpa-breach@1, point: platform, description: "Declared personal data breaches run a 72-hour clock with Findings at 48h and at the deadline, ended by the recorded PDPC notification", findings: [pdpa_breach]}
 controls:
   # NIST SSDF 1.2 (SP 800-218r1)
   - {framework: SSDF, id: "PO.1.1", title: "Identify and document security requirements for software development", covered_by: [], gap_reason: "Security requirements are written by each Team; no Policy checks them"}

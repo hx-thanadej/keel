@@ -440,18 +440,19 @@ describe('finops screens', () => {
   })
 
   const controlReport = {
-    version: 'keel-controls@2',
+    version: 'keel-controls@3',
     services: 3,
     frameworks: [
       { id: 'ISO27001', name: 'ISO/IEC 27001:2022 Annex A', controls: 3, mapped: 2, covered: 1, gaps: 2 },
       { id: 'PDPA', name: 'Thailand Personal Data Protection Act B.E. 2562 (2019)', controls: 2, mapped: 2, covered: 2, gaps: 0 },
     ],
     controls: [
-      { id: '8.8', framework: 'ISO27001', title: 'Management of technical vulnerabilities', covered_by: ['keel-scans@1'], coverage: [{ name: 'keel-scans@1', point: 'pipeline', covered_services: 3 }], gap: false },
-      { id: '6.1', framework: 'ISO27001', title: 'Screening', covered_by: [], gap_reason: 'People: HR process outside Keel', coverage: [], gap: true },
-      { id: '8.32', framework: 'ISO27001', title: 'Change management', covered_by: ['keel-promotion@1'], coverage: [{ name: 'keel-promotion@1', point: 'promotion', covered_services: 0 }], gap: true },
-      { id: 's.37(4)', framework: 'PDPA', title: 'Notify the PDPC of a breach within 72 hours', covered_by: ['keel-pdpa-breach@1'], coverage: [{ name: 'keel-pdpa-breach@1', point: 'platform', covered_services: 3 }], gap: false },
-      { id: 's.37(3)', framework: 'PDPA', title: 'Erase personal data past its retention period', covered_by: ['keel-pdpa-retention@1'], coverage: [{ name: 'keel-pdpa-retention@1', point: 'platform', covered_services: 3 }], gap: false },
+      { id: '8.8', framework: 'ISO27001', title: 'Management of technical vulnerabilities', covered_by: ['keel-scans@1'], coverage: [{ name: 'keel-scans@1', point: 'pipeline', covered_services: 3 }], gap: false,
+        open_findings: { count: 3, items: [{ id: 'v1', title: 'CVE-2026-7 in openssl', severity: 'critical' }, { id: 'v2', title: 'SQL injection in crm-api', severity: 'high' }] } },
+      { id: '6.1', framework: 'ISO27001', title: 'Screening', covered_by: [], gap_reason: 'People: HR process outside Keel', coverage: [], gap: true, open_findings: { count: 0, items: [] } },
+      { id: '8.32', framework: 'ISO27001', title: 'Change management', covered_by: ['keel-promotion@1'], coverage: [{ name: 'keel-promotion@1', point: 'promotion', covered_services: 0 }], gap: true, open_findings: { count: 0, items: [] } },
+      { id: 's.37(4)', framework: 'PDPA', title: 'Notify the PDPC of a breach within 72 hours', covered_by: ['keel-pdpa-breach@1'], coverage: [{ name: 'keel-pdpa-breach@1', point: 'platform', covered_services: 3 }], gap: false, open_findings: { count: 0, items: [] } },
+      { id: 's.37(3)', framework: 'PDPA', title: 'Erase personal data past its retention period', covered_by: ['keel-pdpa-retention@1'], coverage: [{ name: 'keel-pdpa-retention@1', point: 'platform', covered_services: 3 }], gap: false, open_findings: { count: 0, items: [] } },
     ],
   }
   const hours = (h: number) => new Date(Date.now() + h * 3600000).toISOString()
@@ -475,7 +476,7 @@ describe('finops screens', () => {
     await compliancePage()
     expect(screen.getByRole('status').textContent).toMatch(/ISO\/IEC 27001:2022 Annex A: 1 of 3 controls covered, 2 gaps\. 2 mapped to a Keel policy, across 3 services\./)
     const table = screen.getByRole('table')
-    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Control', 'Status', 'Keel policies (services covered)', 'Gap reason'])
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Control', 'Status', 'Keel policies (services covered)', 'Open findings', 'Gap reason'])
     expect(within(table).getByRole('rowheader', { name: '8.8 Management of technical vulnerabilities' })).toBeTruthy()
     expect(within(table).getByText('keel-scans@1 @pipeline (3)')).toBeTruthy()
     expect(within(table).getAllByText('✕ Gap')).toHaveLength(2)
@@ -493,6 +494,33 @@ describe('finops screens', () => {
     await userEvent.click(screen.getByLabelText('Show gaps only'))
     expect(screen.getByRole('rowheader', { name: 's.37(4) Notify the PDPC of a breach within 72 hours' })).toBeTruthy()
     expect(screen.queryByText(/Screening/)).toBeNull()
+  })
+
+  it('compliance shows open Findings per Control, links each to the Findings tab, and says none when there are none', async () => {
+    const finding = (id: string, title: string, severity: string) => ({ id, kind: 'vulnerability', severity, status: 'open', title, detail: {}, first_seen_at: '2026-10-01T00:00:00Z', resolution: null })
+    mockFetch({
+      ...routes([]),
+      [`/v1/tenants/${tat}/controls`]: controlReport,
+      [`/v1/tenants/${tat}/pdpa`]: pdpaOverview(),
+      [`/v1/tenants/${tat}/findings`]: { items: [finding('v1', 'CVE-2026-7 in openssl', 'critical'), finding('v2', 'SQL injection in crm-api', 'high')] },
+    })
+    render(<App />)
+    await compliancePage()
+    const table = screen.getByRole('table')
+    const vulns = within(table).getByRole('rowheader', { name: '8.8 Management of technical vulnerabilities' }).closest('tr') as HTMLElement
+    expect(within(vulns).getByText('3 open')).toBeTruthy()
+    expect(within(vulns).getAllByRole('link').map((a) => a.textContent)).toEqual(['Critical: CVE-2026-7 in openssl', 'High: SQL injection in crm-api'])
+    expect(within(vulns).getByText('and 1 more')).toBeTruthy()
+    const screening = within(table).getByRole('rowheader', { name: '6.1 Screening' }).closest('tr') as HTMLElement
+    expect(within(screening).getByText('None open')).toBeTruthy()
+    expect(within(screening).queryByRole('link')).toBeNull()
+    expect(within(screening).getByText('People: HR process outside Keel')).toBeTruthy()
+
+    await userEvent.click(within(vulns).getByRole('link', { name: 'High: SQL injection in crm-api' }))
+    expect(screen.getByRole('tab', { name: 'Findings' }).getAttribute('aria-selected')).toBe('true')
+    const card = (await screen.findByText('SQL injection in crm-api')).closest('article') as HTMLElement
+    await waitFor(() => expect(document.activeElement).toBe(card))
+    expect(card.id).toBe('finding-v2')
   })
 
   it('compliance exports the chosen framework\'s evidence and shows a server error next to the button', async () => {

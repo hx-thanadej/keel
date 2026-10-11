@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, finops, ApiError, type CloudAccount, type Finding, type Recommendation } from './api'
 import { manualSteps, opensPullRequest, ownershipOf, readOnlyReason, recommendationAccounts } from './ownership'
 
@@ -9,8 +9,13 @@ const sev = {
   low: { cls: 'good', icon: 'i', text: 'Low' },
 } as const
 
-export function FindingsView({ tenantId }: { tenantId: string }) {
+export function FindingsView({ tenantId, focus }: { tenantId: string; focus?: string }) {
   const [items, setItems] = useState<Finding[] | null>(null)
+  const focused = useRef<HTMLElement>(null)
+  useEffect(() => {
+    focused.current?.scrollIntoView?.({ block: 'center' })
+    focused.current?.focus()
+  }, [items, focus])
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
 
@@ -75,7 +80,7 @@ export function FindingsView({ tenantId }: { tenantId: string }) {
         const r = recs[f.id]
         const readOnly = r ? readOnlyReason(ownershipOf(recommendationAccounts(r, accounts))) : null
         return (
-          <article key={f.id} className="card finding">
+          <article key={f.id} id={`finding-${f.id}`} className="card finding" tabIndex={-1} ref={f.id === focus ? focused : undefined}>
             <span className={`status ${s.cls}`}>
               <span aria-hidden>{s.icon}</span> {s.text} · {f.kind.replace('_', ' ')}
             </span>

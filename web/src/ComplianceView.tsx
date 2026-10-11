@@ -33,7 +33,7 @@ function load<T>(p: Promise<T>, set: (l: Loaded<T>) => void, stale: () => boolea
 const SectionError = ({ text }: { text?: string }) => (text ? <p className="notice error" role="alert">{text}</p> : null)
 
 /** Compliance: per-framework Control coverage with gaps, evidence export, and PDPA state (#192). */
-export function ComplianceView({ tenantId, canConfigure }: { tenantId: string; canConfigure: boolean }) {
+export function ComplianceView({ tenantId, canConfigure, onOpenFinding }: { tenantId: string; canConfigure: boolean; onOpenFinding: (id: string) => void }) {
   const [framework, setFramework] = useState<FrameworkId>('iso27001')
   const [report, setReport] = useState<Loaded<ControlReport>>({ state: 'loading' })
 
@@ -63,7 +63,7 @@ export function ComplianceView({ tenantId, canConfigure }: { tenantId: string; c
       <h2>Controls</h2>
       {report.state === 'loading' && <p className="muted">Loading controls…</p>}
       <SectionError text={report.state === 'error' ? report.message : undefined} />
-      {report.state === 'ok' && <Controls report={report.data} framework={framework} />}
+      {report.state === 'ok' && <Controls report={report.data} framework={framework} onOpenFinding={onOpenFinding} />}
 
       <h2>Evidence export</h2>
       <Evidence key={framework} tenantId={tenantId} framework={framework} />
@@ -76,7 +76,33 @@ export function ComplianceView({ tenantId, canConfigure }: { tenantId: string; c
 const statusOf = (c: ControlView) => (c.gap ? { cls: 'critical', text: '✕ Gap' } : { cls: 'good', text: '✓ Covered' })
 const gapReason = (c: ControlView) => c.gap_reason ?? (c.gap ? 'Mapped to a Keel policy that has not covered any Service yet' : '')
 
-function Controls({ report, framework }: { report: ControlReport; framework: FrameworkId }) {
+function OpenFindings({ open, onOpen }: { open: ControlView['open_findings']; onOpen: (id: string) => void }) {
+  if (open.count === 0) return <>None open</>
+  const more = open.count - open.items.length
+  return (
+    <>
+      <span>{open.count} open</span>
+      <ul className="plain">
+        {open.items.map((f) => (
+          <li key={f.id}>
+            <a
+              href={`#finding-${f.id}`}
+              onClick={(e) => {
+                e.preventDefault()
+                onOpen(f.id)
+              }}
+            >
+              {f.severity[0].toUpperCase() + f.severity.slice(1)}: {f.title}
+            </a>
+          </li>
+        ))}
+      </ul>
+      {more > 0 && <span className="meta">and {more} more</span>}
+    </>
+  )
+}
+
+function Controls({ report, framework, onOpenFinding }: { report: ControlReport; framework: FrameworkId; onOpenFinding: (id: string) => void }) {
   const [gapsOnly, setGapsOnly] = useState(false)
   const summary = report.frameworks.find((f) => f.id.toLowerCase() === framework)
   if (!summary) return <p className="muted">Keel maps no Controls to this framework yet.</p>
@@ -102,6 +128,7 @@ function Controls({ report, framework }: { report: ControlReport; framework: Fra
                 <th scope="col">Control</th>
                 <th scope="col">Status</th>
                 <th scope="col">Keel policies (services covered)</th>
+                <th scope="col">Open findings</th>
                 <th scope="col">Gap reason</th>
               </tr>
             </thead>
@@ -117,6 +144,9 @@ function Controls({ report, framework }: { report: ControlReport; framework: Fra
                       <span className={`status ${st.cls}`}>{st.text}</span>
                     </td>
                     <td>{c.coverage.length === 0 ? 'None' : c.coverage.map((p) => `${p.name} @${p.point} (${p.covered_services})`).join(', ')}</td>
+                    <td>
+                      <OpenFindings open={c.open_findings} onOpen={onOpenFinding} />
+                    </td>
                     <td>{gapReason(c)}</td>
                   </tr>
                 )

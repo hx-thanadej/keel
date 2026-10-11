@@ -12,7 +12,8 @@ import (
 )
 
 // ControlDeps serves the Controls registry (#116), optionally narrowed to
-// one framework with ?framework= (#188, #189).
+// one framework with ?framework= (#188, #189), with each Control's open
+// Findings (#210).
 type ControlDeps struct {
 	Authz   catalog.Authorizer
 	Service controls.Service
@@ -37,6 +38,9 @@ func mountControls(mux Mux, a auth.Authenticator, d ControlDeps) {
 			if out, ok = out.Only(f); !ok {
 				return errors.Join(catalog.ErrInvalid, fmt.Errorf("unknown framework %q", f))
 			}
+		}
+		if out, err = d.Service.WithFindings(r.Context(), tenant, out); err != nil {
+			return err
 		}
 		writeJSON(w, http.StatusOK, out)
 		return nil
