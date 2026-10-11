@@ -3,6 +3,7 @@ package catalog_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -428,8 +429,9 @@ func TestMutatorsRefuseClientOwnedAccounts(t *testing.T) {
 // read marks a cloud method or SDK identifier that makes no cloud write.
 const read = "read"
 
-// cloudMethods classifies every exported method of every type and interface
-// in internal/cloud, whatever its name: read, the mutator that exercises the
+// cloudMethods classifies every exported function in internal/cloud and
+// every exported method of every type and interface there, whatever its
+// name: read, the mutator that exercises the
 // write, or why the write never touches a Cloud Account. An unlisted method
 // fails TestEveryCloudMethodIsClassified, so a new write cannot slip past
 // the sweep under an unexpected verb.
@@ -439,6 +441,8 @@ var cloudMethods = map[string]string{
 	"alibaba.OSS.List":                                                  read,
 	"alibaba.OSS.ListWithETag":                                          read,
 	"alibaba.RRSA.Credentials":                                          read,
+	"alibaba.RRSAFromEnv":                                               read,
+	"aws.BudgetFor":                                                     read,
 	"aws.Budgets.Create":                                                "budget mirror",
 	"aws.Budgets.Delete":                                                "budget mirror",
 	"aws.Budgets.Get":                                                   read,
@@ -446,14 +450,20 @@ var cloudMethods = map[string]string{
 	"aws.Budgets.Provider":                                              read,
 	"aws.Budgets.Update":                                                "budget mirror",
 	"aws.COH.List":                                                      read,
+	"aws.FromCOH":                                                       read,
+	"aws.New":                                                           read,
+	"aws.NewCOH":                                                        read,
+	"aws.SpecFromBudget":                                                read,
 	"azure.Blob.Auth.Token":                                             read,
 	"azure.Blob.Get":                                                    read,
 	"azure.Blob.List":                                                   read,
 	"azure.Blob.ListWithETag":                                           read,
 	"azure.Federated.Token":                                             read,
+	"azure.FromEnv":                                                     read,
 	"gcp.GCS.Get":                                                       read,
 	"gcp.GCS.List":                                                      read,
 	"gcp.GCS.ListWithETag":                                              read,
+	"gcp.Keyless":                                                       read,
 	"tencent.AccessKeys.Disable":                                        "leaked key",
 	"tencent.AccessKeys.Find":                                           read,
 	"tencent.AccessKeys.Provider":                                       read,
@@ -505,7 +515,11 @@ var cloudMethods = map[string]string{
 	"tencent.CVMAPI.DescribeInstancesWithContext":                       read,
 	"tencent.CVMAPI.DescribeZoneInstanceConfigInfosWithContext":         read,
 	"tencent.Catalog.Types":                                             read,
+	"tencent.CatalogFromQuota":                                          read,
 	"tencent.CloudAudit.Events":                                         read,
+	"tencent.CountTargets":                                              read,
+	"tencent.CreateBudgetRequest":                                       read,
+	"tencent.Credentials":                                               read,
 	"tencent.DiskAPI.CreateSnapshotWithContext":                         "waste cleanup",
 	"tencent.DiskAPI.DescribeDisksWithContext":                          read,
 	"tencent.DiskAPI.TerminateDisksWithContext":                         "waste cleanup",
@@ -525,8 +539,18 @@ var cloudMethods = map[string]string{
 	"tencent.KeyAPI.UpdateAccessKeyWithContext":                         "leaked key",
 	"tencent.LBAPI.DescribeLoadBalancersWithContext":                    read,
 	"tencent.LBAPI.DescribeTargetsWithContext":                          read,
+	"tencent.MemberAccount":                                             read,
 	"tencent.MemberRole.GetCredential":                                  read,
 	"tencent.MemberRole.RoleArn":                                        read,
+	"tencent.NewBoundaries":                                             read,
+	"tencent.NewCAM":                                                    read,
+	"tencent.NewCAMUsers":                                               read,
+	"tencent.NewCVM":                                                    read,
+	"tencent.NewCloudAudit":                                             read,
+	"tencent.NewKeyAPI":                                                 read,
+	"tencent.NewOrgAPI":                                                 read,
+	"tencent.NewTCR":                                                    read,
+	"tencent.NewWaste":                                                  read,
 	"tencent.OrgAPI.AddOrganizationNodeWithContext":                     "not account-scoped: a unit in Keel's own organisation",
 	"tencent.OrgAPI.CreateOrganizationMemberWithContext":                "vending adopts the account",
 	"tencent.OrgAPI.DescribeOrganizationMembersWithContext":             read,
@@ -544,6 +568,8 @@ var cloudMethods = map[string]string{
 	"tencent.Registry.EnsureRetention":                                  "not account-scoped: Keel's shared regional registry",
 	"tencent.Registry.TempToken":                                        "not account-scoped: Keel's shared regional registry",
 	"tencent.STS.Get":                                                   read,
+	"tencent.SpecFromBudget":                                            read,
+	"tencent.SumRealTotalCost":                                          read,
 	"tencent.TCRAPI.CreateImmutableTagRulesWithContext":                 "not account-scoped: Keel's shared regional registry",
 	"tencent.TCRAPI.CreateInstanceTokenWithContext":                     "not account-scoped: Keel's shared regional registry",
 	"tencent.TCRAPI.CreateNamespaceWithContext":                         "not account-scoped: Keel's shared regional registry",
@@ -623,8 +649,8 @@ func TestEveryCloudMethodIsClassified(t *testing.T) {
 var sdkImport = regexp.MustCompile(`^(github\.com/(tencentcloud|aws/aws-sdk-go|Azure/azure-sdk-for-go|aliyun|alibabacloud-go)|cloud\.google\.com/go|google\.golang\.org/api)(/|$)`)
 
 // cloudSurface parses every non-test Go file under root. It returns the
-// exported methods of each type and interface in internal/cloud, as
-// pkg.Owner.Method, and each cloud SDK identifier referenced elsewhere, as
+// exported functions in internal/cloud, as pkg.Func, and the exported methods
+// of each type and interface there, as pkg.Owner.Method, and each cloud SDK identifier referenced elsewhere, as
 // dir: pkg.Identifier.
 func cloudSurface(t *testing.T, root string) (methods, sdk []string) {
 	t.Helper()
@@ -686,14 +712,10 @@ func exportedMethods(f *ast.File) []string {
 		case *ast.FuncDecl:
 			owner := pkg
 			if d.Recv != nil {
-				recv := d.Recv.List[0].Type
-				if star, ok := recv.(*ast.StarExpr); ok {
-					recv = star.X
-				}
-				owner += "." + recv.(*ast.Ident).Name
-				if d.Name.IsExported() {
-					out = append(out, owner+"."+d.Name.Name)
-				}
+				owner += "." + receiverName(d.Recv.List[0].Type)
+			}
+			if d.Name.IsExported() {
+				out = append(out, owner+"."+d.Name.Name)
 			}
 			if d.Type.Results != nil {
 				for _, r := range d.Type.Results.List {
@@ -709,6 +731,21 @@ func exportedMethods(f *ast.File) []string {
 		}
 	}
 	return out
+}
+
+// receiverName is the type a method is declared on, as in *T, T or T[K].
+func receiverName(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.StarExpr:
+		return receiverName(x.X)
+	case *ast.IndexExpr:
+		return receiverName(x.X)
+	case *ast.IndexListExpr:
+		return receiverName(x.X)
+	case *ast.Ident:
+		return x.Name
+	}
+	panic(fmt.Sprintf("receiver %T", e))
 }
 
 func sdkUses(f *ast.File, dir string) []string {

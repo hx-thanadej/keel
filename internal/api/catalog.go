@@ -43,7 +43,7 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
 	case errors.Is(err, catalog.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, errBody("not found"))
-	case errors.Is(err, catalog.ErrConflict), errors.Is(err, catalog.ErrClientOwned), errors.Is(err, catalog.ErrActiveGrants):
+	case errors.Is(err, catalog.ErrConflict), errors.Is(err, catalog.ErrClientOwned), errors.Is(err, catalog.ErrOpenGrants):
 		writeJSON(w, http.StatusConflict, errBody(err.Error()))
 	case errors.Is(err, catalog.ErrInvalid), errors.Is(err, errBadJSON):
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))

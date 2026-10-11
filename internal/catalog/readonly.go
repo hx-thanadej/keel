@@ -17,9 +17,11 @@ var ErrClientOwned = errors.New("the Cloud Account is client-owned and Keel is r
 // RequirePlatformOwned is the one guard every flow that writes to a Cloud
 // Account calls before the write. It reads ownership at call time, so an
 // account flipped to client-owned is refused on the next run whatever
-// markers it still carries. A refusal is recorded as an Activity in its own
-// transaction, so it survives the caller's error path, and the error wraps
-// ErrClientOwned.
+// markers it still carries. The read waits for an uncommitted ownership
+// switch, so a caller that commits its intent first (an Access Grant stays
+// requested until its assignment is done) is seen by the switch. A refusal
+// is recorded as an Activity in its own transaction, so it survives the
+// caller's error path, and the error wraps ErrClientOwned.
 func RequirePlatformOwned(ctx context.Context, st *store.Store, tenant, accountID, operation string, by activity.Actor) error {
 	refused := false
 	err := st.InTenant(ctx, tenant, func(tx pgx.Tx) error {

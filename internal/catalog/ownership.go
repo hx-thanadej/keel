@@ -126,7 +126,7 @@ func (s *Service) SetCloudAccountOwnership(ctx context.Context, p auth.Principal
 			return err
 		}
 		if o == OwnershipClient && was != OwnershipClient {
-			if err := noActiveGrants(ctx, tx, id); err != nil {
+			if err := noOpenGrants(ctx, tx, id); err != nil {
 				return err
 			}
 		}
@@ -146,22 +146,24 @@ func (s *Service) SetCloudAccountOwnership(ctx context.Context, p auth.Principal
 	return a, mapErr(err)
 }
 
-// noActiveGrants refuses to make an account client-owned while an Access
-// Grant is active in it. Once the account is client-owned Keel may not remove
-// the grant's Identity Center assignment (ADR-0018), so the grants are ended
-// first, while Keel still can.
-func noActiveGrants(ctx context.Context, tx pgx.Tx, id string) error {
+// noOpenGrants refuses to make an account client-owned while an Access Grant
+// is requested or active in it. Once the account is client-owned Keel may
+// not remove the grant's Identity Center assignment (ADR-0018), so the grants
+// are ended first, while Keel still can. A grant stays requested until its
+// assignment is done, and RequirePlatformOwned waits on this transaction's
+// row lock, so a grant either sees the switch and refuses or blocks it here.
+func noOpenGrants(ctx context.Context, tx pgx.Tx, id string) error {
 	rows, err := tx.Query(ctx, `SELECT 'access_grant/' || g.id || ' (' || g.requester || ', ' || r.template || ')'
 		FROM access_grants g JOIN access_roles r ON r.id = g.role_id JOIN cloud_accounts a ON a.environment_id = r.environment_id AND a.provider = 'tencent'
-		WHERE a.id = $1 AND g.state = 'active' ORDER BY g.created_at`, id)
+		WHERE a.id = $1 AND g.state IN ('requested', 'active') ORDER BY g.created_at`, id)
 	if err != nil {
 		return err
 	}
-	active, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil || len(active) == 0 {
+	open, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil || len(open) == 0 {
 		return err
 	}
-	return fmt.Errorf("%w: revoke them first: %s", ErrActiveGrants, strings.Join(active, ", "))
+	return fmt.Errorf("%w: reject or revoke them first: %s", ErrOpenGrants, strings.Join(open, ", "))
 }
 
 // Querier is what IsClientOwned needs: a pgx.Tx inside a Tenant's scope.
@@ -172,10 +174,11 @@ type Querier interface {
 // IsClientOwned reports whether a Cloud Account sits in a client-owned
 // organisation, where every mutating flow must refuse to act (ADR-0018). q
 // must be scoped to the account's Tenant. A missing account is ErrNotFound,
-// so a guard fails closed.
+// so a guard fails closed. The read takes FOR SHARE, so it waits for an
+// uncommitted ownership switch and sees its result.
 func IsClientOwned(ctx context.Context, q Querier, accountID string) (bool, error) {
 	var o Ownership
-	if err := q.QueryRow(ctx, `SELECT ownership FROM cloud_accounts WHERE id = $1`, accountID).Scan(&o); err != nil {
+	if err := q.QueryRow(ctx, `SELECT ownership FROM cloud_accounts WHERE id = $1 FOR SHARE`, accountID).Scan(&o); err != nil {
 		return false, mapErr(err)
 	}
 	return o == OwnershipClient, nil
