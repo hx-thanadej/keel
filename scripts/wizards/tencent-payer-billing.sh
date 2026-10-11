@@ -397,7 +397,8 @@ if ! already delivery; then
   open_url "https://console.tencentcloud.com/expense/bill/overview"
   step "Billing Center → Bill Overview (Bill Management → Saving Bills to COS) → enable Bill Storage."
   step "In the pop-up click Authorize, then Grant (creates the service role that writes to COS)."
-  step "File types: Standard bill (FOCUS) daily + monthly, Cost Allocation Bill (FOCUS) daily + monthly."
+  step "File types: subscribe only the Standard bill (FOCUS) under Keel's prefix."
+  warn "Do not subscribe the Cost Allocation Bill (FOCUS) or any other bill type under that prefix."
   step "Bucket: $KEEL_TENCENT_BILL_BUCKET ($KEEL_TENCENT_REGION)."
   step "Tick 'Automatic Account Synchronization' and select every member account."
   step "Tick 'Synchronize historical monthly bills' (18 months, arrives the next day)."
@@ -584,9 +585,10 @@ if ! already layout; then
   else
     record BILL_PREFIX_ISOLATES_STANDARD_FOCUS yes
   fi
-  say "Open two consecutive daily files. Does day 2's file also contain day 1's lines?"
-  note "Tencent describes daily bills as month-to-date summaries (UNVERIFIED for FOCUS files)."
-  if confirm "Day 2's file repeats day 1 (month-to-date)?"; then mode=cumulative; else mode=per-day; fi
+  say "Tencent documents the daily FOCUS file as month-to-date, so day 2's file repeats day 1's lines."
+  say "Daily delivery therefore defaults to cumulative. Answer N to keep it."
+  note "Answer y only for one-file-per-day deliveries, where day 2's file holds just day 2's lines (per-day)."
+  if confirm "Does each daily file hold only that day's lines (one file per day)?"; then mode=per-day; else mode=cumulative; fi
   write_env KEEL_TENCENT_BILL_MODE "$mode"
   record BILL_FILE_MODE "$mode"
   mark_done layout
