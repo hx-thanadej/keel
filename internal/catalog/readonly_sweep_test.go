@@ -321,11 +321,26 @@ var mutators = []mutator{
 		}
 		return g.ID
 	}, run: func(t *testing.T, w world, c *cloud, grant any) error {
+		want := "revoked"
+		if w.count(t, `SELECT count(*) FROM cloud_accounts WHERE ownership = 'client'`) > 0 {
+			want = "orphaned"
+		}
 		g, err := grants(t, w, c).Revoke(context.Background(), w.tenant, grant.(string), "done", keelActor)
-		if err == nil && g.State != "revoked" {
-			t.Errorf("grant %s after revoke, want revoked", g.State)
+		if err == nil && g.State != want {
+			t.Errorf("grant %s after revoke, want %s", g.State, want)
 		}
 		return err
+	}, client: func(t *testing.T, w world) {
+		if n := w.count(t, `SELECT count(*) FROM findings f JOIN access_grants g ON f.detail->>'grant' = g.id::text
+			WHERE f.kind = 'access_grant_orphaned' AND f.severity = 'critical' AND f.status = 'open'
+			AND f.detail->>'principal' = 'u-1' AND f.detail->>'requester' = 'user:eng@harmonyx.co'
+			AND f.detail->>'account' = $1 AND f.detail->>'role_configuration' = 'rc-1' AND f.detail->>'template' = 'read-only'
+			AND f.detail->>'action' LIKE '%owner must remove%' AND f.title LIKE '%' || g.id::text || '%'`, external); n != 1 {
+			t.Error("no critical Finding naming the orphaned grant, principal, account and role")
+		}
+		if n := w.count(t, `SELECT count(*) FROM activities WHERE type = 'keel.access.grant_orphaned'`); n != 1 {
+			t.Error("no keel.access.grant_orphaned Activity")
+		}
 	}},
 	{name: "budget mirror", run: func(t *testing.T, w world, c *cloud, _ any) error {
 		svc := budget.Service{Store: w.s}
@@ -410,84 +425,313 @@ func TestMutatorsRefuseClientOwnedAccounts(t *testing.T) {
 	}
 }
 
-// accountWrites maps every write method of a cloud adapter to the mutator
-// that exercises it, or to why it never writes to a Cloud Account. A new
-// write method fails TestEveryCloudWriteIsSwept until it is listed here, and
-// a mutator name must be one TestMutatorsRefuseClientOwnedAccounts runs.
-var accountWrites = map[string]string{
-	"aws.Budgets.Create":                             "budget mirror",
-	"aws.Budgets.Update":                             "budget mirror",
-	"aws.Budgets.Delete":                             "budget mirror",
-	"tencent.Budgets.Create":                         "budget mirror",
-	"tencent.Budgets.Update":                         "budget mirror",
-	"tencent.Budgets.Delete":                         "budget mirror",
-	"tencent.AccountFactory.EnsureUnit":              "not account-scoped: a unit in Keel's own organisation",
-	"tencent.AccountFactory.CreateAccount":           "vending adopts the account",
-	"tencent.Guardrails.EnsurePolicy":                "landing zone remediation",
-	"tencent.Guardrails.Attach":                      "landing zone remediation",
-	"tencent.Boundaries.EnsurePolicy":                "boundary daily check",
-	"tencent.Boundaries.PutBoundary":                 "boundary vending step",
-	"tencent.CIIdentity.CreateOIDCProvider":          "CI identity sync",
-	"tencent.CIIdentity.UpdateOIDCProvider":          "CI identity sync",
-	"tencent.CIIdentity.CreateRole":                  "CI identity sync",
-	"tencent.CIIdentity.UpdateRoleTrust":             "CI identity sync",
-	"tencent.IdentityCenter.Assign":                  "access grant activation",
-	"tencent.IdentityCenter.Unassign":                "access grant revocation",
-	"tencent.IdentityCenter.EnsureRoleConfiguration": "not account-scoped: a role configuration in Keel's Identity Center zone",
-	"tencent.AccessKeys.Disable":                     "leaked key",
-	"tencent.Waste.Delete":                           "waste cleanup",
-	"tencent.Registry.EnsureNamespace":               "not account-scoped: Keel's shared regional registry",
-	"tencent.Registry.EnsureImmutableTags":           "not account-scoped: Keel's shared regional registry",
-	"tencent.Registry.EnsureRetention":               "not account-scoped: Keel's shared regional registry",
+// read marks a cloud method or SDK identifier that makes no cloud write.
+const read = "read"
+
+// cloudMethods classifies every exported method of every type and interface
+// in internal/cloud, whatever its name: read, the mutator that exercises the
+// write, or why the write never touches a Cloud Account. An unlisted method
+// fails TestEveryCloudMethodIsClassified, so a new write cannot slip past
+// the sweep under an unexpected verb.
+var cloudMethods = map[string]string{
+	"alibaba.OSS.Creds.Credentials":                                     read,
+	"alibaba.OSS.Get":                                                   read,
+	"alibaba.OSS.List":                                                  read,
+	"alibaba.OSS.ListWithETag":                                          read,
+	"alibaba.RRSA.Credentials":                                          read,
+	"aws.Budgets.Create":                                                "budget mirror",
+	"aws.Budgets.Delete":                                                "budget mirror",
+	"aws.Budgets.Get":                                                   read,
+	"aws.Budgets.MirrorsThresholds":                                     read,
+	"aws.Budgets.Provider":                                              read,
+	"aws.Budgets.Update":                                                "budget mirror",
+	"aws.COH.List":                                                      read,
+	"azure.Blob.Auth.Token":                                             read,
+	"azure.Blob.Get":                                                    read,
+	"azure.Blob.List":                                                   read,
+	"azure.Blob.ListWithETag":                                           read,
+	"azure.Federated.Token":                                             read,
+	"gcp.GCS.Get":                                                       read,
+	"gcp.GCS.List":                                                      read,
+	"gcp.GCS.ListWithETag":                                              read,
+	"tencent.AccessKeys.Disable":                                        "leaked key",
+	"tencent.AccessKeys.Find":                                           read,
+	"tencent.AccessKeys.Provider":                                       read,
+	"tencent.AccountFactory.AccountReady":                               read,
+	"tencent.AccountFactory.CreateAccount":                              "vending adopts the account",
+	"tencent.AccountFactory.EnsureUnit":                                 "not account-scoped: a unit in Keel's own organisation",
+	"tencent.AccountFactory.FindAccount":                                read,
+	"tencent.AccountFactory.Provider":                                   read,
+	"tencent.AddressAPI.DescribeAddressesWithContext":                   read,
+	"tencent.AddressAPI.ReleaseAddressesWithContext":                    "waste cleanup",
+	"tencent.AuditAPI.LookUpEventsWithContext":                          read,
+	"tencent.Boundaries.EnsurePolicy":                                   "boundary daily check",
+	"tencent.Boundaries.PutBoundary":                                    "boundary vending step",
+	"tencent.Boundaries.RoleBoundary":                                   read,
+	"tencent.Boundaries.Roles":                                          read,
+	"tencent.BoundaryAPI.CreatePolicyWithContext":                       "boundary daily check",
+	"tencent.BoundaryAPI.DescribeRoleListWithContext":                   read,
+	"tencent.BoundaryAPI.GetPolicyWithContext":                          read,
+	"tencent.BoundaryAPI.GetRolePermissionBoundaryWithContext":          read,
+	"tencent.BoundaryAPI.ListPoliciesWithContext":                       read,
+	"tencent.BoundaryAPI.PutRolePermissionsBoundaryWithContext":         "boundary vending step",
+	"tencent.BoundaryAPI.UpdatePolicyWithContext":                       "boundary daily check",
+	"tencent.Budgets.Create":                                            "budget mirror",
+	"tencent.Budgets.Delete":                                            "budget mirror",
+	"tencent.Budgets.Get":                                               read,
+	"tencent.Budgets.Provider":                                          read,
+	"tencent.Budgets.Update":                                            "budget mirror",
+	"tencent.CAMAPI.CreateOIDCConfigWithContext":                        "CI identity sync",
+	"tencent.CAMAPI.CreateRoleWithContext":                              "CI identity sync",
+	"tencent.CAMAPI.DescribeOIDCConfigWithContext":                      read,
+	"tencent.CAMAPI.GetRoleWithContext":                                 read,
+	"tencent.CAMAPI.UpdateAssumeRolePolicyWithContext":                  "CI identity sync",
+	"tencent.CAMAPI.UpdateOIDCConfigWithContext":                        "CI identity sync",
+	"tencent.CAMUsers.API.ListUsersWithContext":                         read,
+	"tencent.CAMUsers.Users":                                            read,
+	"tencent.CICAPI.AddPermissionPolicyToRoleConfigurationWithContext":  "not account-scoped: a role configuration in Keel's Identity Center zone",
+	"tencent.CICAPI.CreateRoleAssignmentWithContext":                    "access grant activation",
+	"tencent.CICAPI.CreateRoleConfigurationWithContext":                 "not account-scoped: a role configuration in Keel's Identity Center zone",
+	"tencent.CICAPI.DeleteRoleAssignmentWithContext":                    "access grant revocation",
+	"tencent.CICAPI.ListRoleAssignmentsWithContext":                     read,
+	"tencent.CICAPI.ListRoleConfigurationsWithContext":                  read,
+	"tencent.CICAPI.ListUsersWithContext":                               read,
+	"tencent.CIIdentity.CreateOIDCProvider":                             "CI identity sync",
+	"tencent.CIIdentity.CreateRole":                                     "CI identity sync",
+	"tencent.CIIdentity.OIDCProvider":                                   read,
+	"tencent.CIIdentity.RoleTrust":                                      read,
+	"tencent.CIIdentity.UpdateOIDCProvider":                             "CI identity sync",
+	"tencent.CIIdentity.UpdateRoleTrust":                                "CI identity sync",
+	"tencent.CVMAPI.DescribeInstancesWithContext":                       read,
+	"tencent.CVMAPI.DescribeZoneInstanceConfigInfosWithContext":         read,
+	"tencent.Catalog.Types":                                             read,
+	"tencent.CloudAudit.Events":                                         read,
+	"tencent.DiskAPI.CreateSnapshotWithContext":                         "waste cleanup",
+	"tencent.DiskAPI.DescribeDisksWithContext":                          read,
+	"tencent.DiskAPI.TerminateDisksWithContext":                         "waste cleanup",
+	"tencent.Guardrails.Attach":                                         "landing zone remediation",
+	"tencent.Guardrails.Attached":                                       read,
+	"tencent.Guardrails.EnsurePolicy":                                   "landing zone remediation",
+	"tencent.Guardrails.FindPolicy":                                     read,
+	"tencent.IdentityCenter.Assign":                                     "access grant activation",
+	"tencent.IdentityCenter.Assignments":                                read,
+	"tencent.IdentityCenter.EnsureRoleConfiguration":                    "not account-scoped: a role configuration in Keel's Identity Center zone",
+	"tencent.IdentityCenter.Unassign":                                   "access grant revocation",
+	"tencent.IdentityCenter.UserID":                                     read,
+	"tencent.Inventory.InstanceTypes":                                   read,
+	"tencent.Invoices.InvoiceTotal":                                     read,
+	"tencent.KeyAPI.ListAccessKeysWithContext":                          read,
+	"tencent.KeyAPI.ListUsersWithContext":                               read,
+	"tencent.KeyAPI.UpdateAccessKeyWithContext":                         "leaked key",
+	"tencent.LBAPI.DescribeLoadBalancersWithContext":                    read,
+	"tencent.LBAPI.DescribeTargetsWithContext":                          read,
+	"tencent.MemberRole.GetCredential":                                  read,
+	"tencent.MemberRole.RoleArn":                                        read,
+	"tencent.OrgAPI.AddOrganizationNodeWithContext":                     "not account-scoped: a unit in Keel's own organisation",
+	"tencent.OrgAPI.CreateOrganizationMemberWithContext":                "vending adopts the account",
+	"tencent.OrgAPI.DescribeOrganizationMembersWithContext":             read,
+	"tencent.OrgAPI.DescribeOrganizationNodesWithContext":               read,
+	"tencent.OrgSource.ListAccounts":                                    read,
+	"tencent.OrgSource.Provider":                                        read,
+	"tencent.PolicyAPI.AttachPolicyWithContext":                         "landing zone remediation",
+	"tencent.PolicyAPI.CreatePolicyWithContext":                         "landing zone remediation",
+	"tencent.PolicyAPI.DescribePolicyWithContext":                       read,
+	"tencent.PolicyAPI.ListPoliciesForTargetWithContext":                read,
+	"tencent.PolicyAPI.ListPoliciesWithContext":                         read,
+	"tencent.PolicyAPI.UpdatePolicyWithContext":                         "landing zone remediation",
+	"tencent.Registry.EnsureImmutableTags":                              "not account-scoped: Keel's shared regional registry",
+	"tencent.Registry.EnsureNamespace":                                  "not account-scoped: Keel's shared regional registry",
+	"tencent.Registry.EnsureRetention":                                  "not account-scoped: Keel's shared regional registry",
+	"tencent.Registry.TempToken":                                        "not account-scoped: Keel's shared regional registry",
+	"tencent.STS.Get":                                                   read,
+	"tencent.TCRAPI.CreateImmutableTagRulesWithContext":                 "not account-scoped: Keel's shared regional registry",
+	"tencent.TCRAPI.CreateInstanceTokenWithContext":                     "not account-scoped: Keel's shared regional registry",
+	"tencent.TCRAPI.CreateNamespaceWithContext":                         "not account-scoped: Keel's shared regional registry",
+	"tencent.TCRAPI.CreateTagRetentionRuleWithContext":                  "not account-scoped: Keel's shared regional registry",
+	"tencent.TCRAPI.DescribeImmutableTagRulesWithContext":               read,
+	"tencent.TCRAPI.DescribeNamespacesWithContext":                      read,
+	"tencent.TCRAPI.DescribeTagRetentionRulesWithContext":               read,
+	"tencent.Waste.Delete":                                              "waste cleanup",
+	"tencent.Waste.Scan":                                                read,
+	"tencent.lazyOrg.AddOrganizationNodeWithContext":                    "not account-scoped: a unit in Keel's own organisation",
+	"tencent.lazyOrg.AddPermissionPolicyToRoleConfigurationWithContext": "not account-scoped: a role configuration in Keel's Identity Center zone",
+	"tencent.lazyOrg.AttachPolicyWithContext":                           "landing zone remediation",
+	"tencent.lazyOrg.CreateOrganizationMemberWithContext":               "vending adopts the account",
+	"tencent.lazyOrg.CreatePolicyWithContext":                           "landing zone remediation",
+	"tencent.lazyOrg.CreateRoleAssignmentWithContext":                   "access grant activation",
+	"tencent.lazyOrg.CreateRoleConfigurationWithContext":                "not account-scoped: a role configuration in Keel's Identity Center zone",
+	"tencent.lazyOrg.DeleteRoleAssignmentWithContext":                   "access grant revocation",
+	"tencent.lazyOrg.DescribeOrganizationMembersWithContext":            read,
+	"tencent.lazyOrg.DescribeOrganizationNodesWithContext":              read,
+	"tencent.lazyOrg.DescribePolicyWithContext":                         read,
+	"tencent.lazyOrg.ListPoliciesForTargetWithContext":                  read,
+	"tencent.lazyOrg.ListPoliciesWithContext":                           read,
+	"tencent.lazyOrg.ListRoleAssignmentsWithContext":                    read,
+	"tencent.lazyOrg.ListRoleConfigurationsWithContext":                 read,
+	"tencent.lazyOrg.ListUsersWithContext":                              read,
+	"tencent.lazyOrg.UpdatePolicyWithContext":                           "landing zone remediation",
 }
 
-var writeVerb = regexp.MustCompile(`^(Create|Update|Delete|Put|Attach|Detach|Assign|Unassign|Disable|Enable|Ensure|Add|Remove|Set|Modify|Stop|Start|Terminate|Reset|Tag|Untag)([A-Z]|$)`)
+// sdkOutsideCloud lists every cloud SDK identifier used outside
+// internal/cloud. Each is a read: a write belongs behind an internal/cloud
+// adapter, where cloudMethods classifies it.
+var sdkOutsideCloud = map[string]string{
+	"cmd/keel-api: common.Provider":                          read,
+	"internal/utilisation: common.Provider":                  read,
+	"internal/utilisation: monitor.Dimension":                read,
+	"internal/utilisation: monitor.GetMonitorDataRequest":    read,
+	"internal/utilisation: monitor.GetMonitorDataResponse":   read,
+	"internal/utilisation: monitor.Instance":                 read,
+	"internal/utilisation: monitor.NewClient":                read,
+	"internal/utilisation: monitor.NewGetMonitorDataRequest": read,
+	"internal/utilisation: profile.NewClientProfile":         read,
+}
 
-// TestEveryCloudWriteIsSwept keeps accountWrites complete: every exported
-// write method on an exported cloud adapter type must be listed.
-func TestEveryCloudWriteIsSwept(t *testing.T) {
-	found := map[string]bool{}
-	err := filepath.WalkDir("../cloud", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+// TestEveryCloudMethodIsClassified keeps cloudMethods and sdkOutsideCloud
+// exhaustive and current.
+func TestEveryCloudMethodIsClassified(t *testing.T) {
+	methods, sdk := cloudSurface(t, "../..")
+	swept := map[string]bool{}
+	for _, m := range mutators {
+		swept[m.name] = true
+	}
+	for _, m := range methods {
+		if _, ok := cloudMethods[m]; !ok {
+			t.Errorf("%s is not in cloudMethods: classify it as read, or guard its flow with catalog.RequirePlatformOwned and name its mutator, or say why it is not account-scoped", m)
+		}
+	}
+	for m, by := range cloudMethods {
+		if !slices.Contains(methods, m) {
+			t.Errorf("cloudMethods lists %s, which internal/cloud no longer has", m)
+		}
+		if by != read && !strings.HasPrefix(by, "not account-scoped: ") && !swept[by] {
+			t.Errorf("%s maps to %q, which is not read, not account-scoped, or a mutator", m, by)
+		}
+	}
+	for _, id := range sdk {
+		if sdkOutsideCloud[id] != read {
+			t.Errorf("%s uses a cloud SDK outside internal/cloud: list it in sdkOutsideCloud if it only reads, or move the call behind an internal/cloud adapter", id)
+		}
+	}
+	for id := range sdkOutsideCloud {
+		if !slices.Contains(sdk, id) {
+			t.Errorf("sdkOutsideCloud lists %s, which nothing uses any more", id)
+		}
+	}
+}
+
+var sdkImport = regexp.MustCompile(`^(github\.com/(tencentcloud|aws/aws-sdk-go|Azure/azure-sdk-for-go|aliyun|alibabacloud-go)|cloud\.google\.com/go|google\.golang\.org/api)(/|$)`)
+
+// cloudSurface parses every non-test Go file under root. It returns the
+// exported methods of each type and interface in internal/cloud, as
+// pkg.Owner.Method, and each cloud SDK identifier referenced elsewhere, as
+// dir: pkg.Identifier.
+func cloudSurface(t *testing.T, root string) (methods, sdk []string) {
+	t.Helper()
+	cloudDir := filepath.Join(root, "internal", "cloud")
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() && (d.Name() == "web" || d.Name() == "node_modules" || strings.HasPrefix(d.Name(), ".")) && path != root {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
 			return err
 		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Recv == nil || !fn.Name.IsExported() || !writeVerb.MatchString(fn.Name.Name) {
-				continue
-			}
-			recv := fn.Recv.List[0].Type
-			if star, ok := recv.(*ast.StarExpr); ok {
-				recv = star.X
-			}
-			if id, ok := recv.(*ast.Ident); ok && id.IsExported() {
-				found[f.Name.Name+"."+id.Name+"."+fn.Name.Name] = true
-			}
+		if strings.HasPrefix(path, cloudDir+string(filepath.Separator)) {
+			methods = append(methods, exportedMethods(f)...)
+			return nil
 		}
+		rel, _ := filepath.Rel(root, filepath.Dir(path))
+		sdk = append(sdk, sdkUses(f, rel)...)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	swept := map[string]bool{}
-	for _, m := range mutators {
-		swept[m.name] = true
-	}
-	for method := range found {
-		if _, ok := accountWrites[method]; !ok {
-			t.Errorf("%s writes to the cloud but is not in accountWrites: guard its flow with catalog.RequirePlatformOwned and add a mutator, or say why it is not account-scoped", method)
+	slices.Sort(methods)
+	slices.Sort(sdk)
+	return slices.Compact(methods), slices.Compact(sdk)
+}
+
+func exportedMethods(f *ast.File) []string {
+	var out []string
+	var walk func(e ast.Expr, owner string)
+	walk = func(e ast.Expr, owner string) {
+		switch x := e.(type) {
+		case *ast.InterfaceType:
+			for _, m := range x.Methods.List {
+				for _, n := range m.Names {
+					if n.IsExported() {
+						out = append(out, owner+"."+n.Name)
+					}
+				}
+			}
+		case *ast.StructType:
+			for _, fld := range x.Fields.List {
+				for _, n := range fld.Names {
+					walk(fld.Type, owner+"."+n.Name)
+				}
+			}
 		}
 	}
-	for method, by := range accountWrites {
-		if !found[method] {
-			t.Errorf("accountWrites lists %s, which no cloud adapter has any more", method)
-		}
-		if !strings.HasPrefix(by, "not account-scoped: ") && !swept[by] {
-			t.Errorf("%s maps to %q, which is not a mutator", method, by)
+	pkg := f.Name.Name
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			owner := pkg
+			if d.Recv != nil {
+				recv := d.Recv.List[0].Type
+				if star, ok := recv.(*ast.StarExpr); ok {
+					recv = star.X
+				}
+				owner += "." + recv.(*ast.Ident).Name
+				if d.Name.IsExported() {
+					out = append(out, owner+"."+d.Name.Name)
+				}
+			}
+			if d.Type.Results != nil {
+				for _, r := range d.Type.Results.List {
+					walk(r.Type, owner+"."+d.Name.Name)
+				}
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok {
+					walk(ts.Type, pkg+"."+ts.Name.Name)
+				}
+			}
 		}
 	}
+	return out
+}
+
+func sdkUses(f *ast.File, dir string) []string {
+	local := map[string]bool{}
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if !sdkImport.MatchString(path) {
+			continue
+		}
+		name := filepath.Base(path)
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		local[name] = true
+	}
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			if id, ok := sel.X.(*ast.Ident); ok && local[id.Name] {
+				out = append(out, dir+": "+id.Name+"."+sel.Sel.Name)
+			}
+		}
+		return true
+	})
+	return out
 }

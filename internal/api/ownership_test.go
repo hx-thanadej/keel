@@ -1,10 +1,19 @@
 package api_test
 
 import (
+	"context"
+	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/hx-thanadej/keel/internal/access"
+	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/auth"
+	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/flow/flowtest"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 var clientRoles = map[string]map[string]any{
@@ -114,5 +123,90 @@ func TestCloudAccountOwnership(t *testing.T) {
 	}
 	if denied != 1 {
 		t.Errorf("denied ownership changes recorded = %d, want 1", denied)
+	}
+}
+
+// directory is an Identity Center that knows every user.
+type directory struct{ assigned map[string]bool }
+
+func (directory) EnsureRoleConfiguration(context.Context, string, string, string, int) (string, error) {
+	return "rc-1", nil
+}
+func (directory) UserID(context.Context, string) (string, bool, error) { return "u-1", true, nil }
+func (d directory) Assign(_ context.Context, cfg string, account int64, user string) error {
+	d.assigned[fmt.Sprint(cfg, account, user)] = true
+	return nil
+}
+func (d directory) Unassign(_ context.Context, cfg string, account int64, user string) error {
+	delete(d.assigned, fmt.Sprint(cfg, account, user))
+	return nil
+}
+func (directory) Assignments(context.Context, int64) ([]access.Assignment, error) { return nil, nil }
+
+// TestClientOwnedAccessGrants: an account with an active Access Grant cannot
+// become client-owned until the grant ends, so Keel removes the assignment
+// while it still may; once client-owned, no grant activates there (ADR-0018).
+func TestClientOwnedAccessGrants(t *testing.T) {
+	s := storetest.New(t)
+	az, _ := authz.New()
+	home, _ := s.CreateTenant(t.Context(), "harmonyx", "HarmonyX", true)
+	dir := directory{assigned: map[string]bool{}}
+	grants, err := access.New(s, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _ := flowtest.Client(t, s, grants.Register)
+	grants.SetClient(rc)
+	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: catalog.New(s, az), Access: &api.AccessDeps{Authz: az, Service: grants}}))
+	t.Cleanup(srv.Close)
+	c := client{t: t, url: srv.URL}
+
+	admin := c.as(homeAdmin(home))
+	_, body := admin.do("POST", "/v1/tenants", map[string]any{"slug": "tat", "name": "TAT"})
+	tat := body["id"].(string)
+	inTAT := c.as(homeAdmin(home, auth.Binding{Role: auth.RolePlatformAdmin, TenantID: tat}))
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/teams", map[string]any{"slug": "crm", "name": "CRM"})
+	team := body["id"].(string)
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/projects", map[string]any{"team_id": team, "slug": "tat-crm", "name": "TAT CRM"})
+	project := body["id"].(string)
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/projects/"+project+"/environments", map[string]any{"name": "dev"})
+	env := body["id"].(string)
+	st, body := inTAT.do("POST", "/v1/tenants/"+tat+"/cloud-accounts", map[string]any{"environment_id": env, "provider": "tencent", "external_id": "200000000001", "name": "ours"})
+	mustStatus(t, st, 201, body)
+	account := "/v1/tenants/" + tat + "/cloud-accounts/" + body["id"].(string)
+	st, body = inTAT.do("POST", "/v1/tenants/"+tat+"/access/roles", map[string]any{"environment_id": env, "team_id": team, "template": "read-only"})
+	mustStatus(t, st, 200, body)
+	role := body["id"].(string)
+	eng := c.as(auth.Principal{Subject: "user:eng@harmonyx.co", Kind: auth.KindHuman, TenantID: home, Home: true,
+		Bindings: []auth.Binding{{Role: auth.RoleEngineer, TenantID: tat}}})
+	request := map[string]any{"role_id": role, "hours": 1, "reason": "look at failing pods"}
+	st, body = eng.do("POST", "/v1/tenants/"+tat+"/access/grants", request)
+	mustStatus(t, st, 200, body)
+	if body["state"] != "active" || len(dir.assigned) != 1 {
+		t.Fatalf("grant on a platform-owned account: %v, assigned %v", body, dir.assigned)
+	}
+	grant := body["id"].(string)
+
+	toClient := map[string]any{"ownership": "client", "read_only_role": clientRoles["tencent"], "why": "TAT owns this organisation"}
+	st, body = inTAT.do("PATCH", account, toClient)
+	mustStatus(t, st, 409, body)
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "access_grant/"+grant) || !strings.Contains(msg, "user:eng@harmonyx.co") {
+		t.Errorf("flip with an active grant: %v, want the grant listed", body)
+	}
+	st, body = inTAT.do("POST", "/v1/tenants/"+tat+"/access/grants/"+grant+"/revoke", map[string]any{"reason": "handing the account to TAT"})
+	mustStatus(t, st, 200, body)
+	if body["state"] != "revoked" || len(dir.assigned) != 0 {
+		t.Fatalf("revoke before the flip: %v, assigned %v", body, dir.assigned)
+	}
+	st, body = inTAT.do("PATCH", account, toClient)
+	mustStatus(t, st, 200, body)
+
+	st, body = eng.do("POST", "/v1/tenants/"+tat+"/access/grants", request)
+	mustStatus(t, st, 409, body)
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "client-owned") || !strings.Contains(msg, "ADR-0018") {
+		t.Errorf("grant on a client-owned account: %v", body)
+	}
+	if len(dir.assigned) != 0 {
+		t.Errorf("client-owned account assigned: %v", dir.assigned)
 	}
 }

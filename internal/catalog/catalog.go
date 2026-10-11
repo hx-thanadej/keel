@@ -26,6 +26,9 @@ var (
 	ErrNotFound  = errors.New("not found")
 	ErrConflict  = errors.New("already exists")
 	ErrInvalid   = errors.New("invalid")
+	// ErrActiveGrants refuses to make a Cloud Account client-owned while
+	// Access Grants are active in it.
+	ErrActiveGrants = errors.New("the Cloud Account has active Access Grants, whose Identity Center assignments Keel could not remove once it is client-owned (ADR-0018)")
 )
 
 // Authorizer is the policy decision point.

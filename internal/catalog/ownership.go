@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -124,6 +125,11 @@ func (s *Service) SetCloudAccountOwnership(ctx context.Context, p auth.Principal
 		if err := checkOwnership(provider, o, role); err != nil {
 			return err
 		}
+		if o == OwnershipClient && was != OwnershipClient {
+			if err := noActiveGrants(ctx, tx, id); err != nil {
+				return err
+			}
+		}
 		if err := tx.QueryRow(ctx, `UPDATE cloud_accounts SET ownership = $2, read_only_role = $3 WHERE id = $1 RETURNING `+accountCols, id, o, role).
 			Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.Ownership, &a.ReadOnlyRole, &a.ArchivedAt); err != nil {
 			return err
@@ -138,6 +144,24 @@ func (s *Service) SetCloudAccountOwnership(ctx context.Context, p auth.Principal
 		return err
 	})
 	return a, mapErr(err)
+}
+
+// noActiveGrants refuses to make an account client-owned while an Access
+// Grant is active in it. Once the account is client-owned Keel may not remove
+// the grant's Identity Center assignment (ADR-0018), so the grants are ended
+// first, while Keel still can.
+func noActiveGrants(ctx context.Context, tx pgx.Tx, id string) error {
+	rows, err := tx.Query(ctx, `SELECT 'access_grant/' || g.id || ' (' || g.requester || ', ' || r.template || ')'
+		FROM access_grants g JOIN access_roles r ON r.id = g.role_id JOIN cloud_accounts a ON a.environment_id = r.environment_id AND a.provider = 'tencent'
+		WHERE a.id = $1 AND g.state = 'active' ORDER BY g.created_at`, id)
+	if err != nil {
+		return err
+	}
+	active, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil || len(active) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w: revoke them first: %s", ErrActiveGrants, strings.Join(active, ", "))
 }
 
 // Querier is what IsClientOwned needs: a pgx.Tx inside a Tenant's scope.
