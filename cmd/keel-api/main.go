@@ -49,6 +49,9 @@
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
 //	KEEL_PDPA_REGIONS   default data region set for Tenants with no PDPA settings (default ap-bangkok,ap-southeast-7)
+//	KEEL_DB_REGION      region of Keel's Postgres; unset, each PDPA residency run reports the database as not checked
+//	KEEL_GCP_BILL_BUCKET_REGION    region of KEEL_GCP_BILL_BUCKET; required with it (PDPA residency)
+//	KEEL_AZURE_BILL_EXPORT_REGION  region of the KEEL_AZURE_BILL_STORAGE_ACCOUNT holding the bill export; required with KEEL_AZURE_BILL_CONTAINER
 //	KEEL_TENCENT_ORG_REGION  enables Tencent organisation discovery (e.g. ap-bangkok);
 //	                    credentials: TKE pod identity or CVM role (env keys only with KEEL_ENV=dev)
 //
@@ -245,7 +248,12 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	pdpaSvc := pdpa.Service{Store: st, Regions: strings.FieldsFunc(os.Getenv("KEEL_PDPA_REGIONS"), func(r rune) bool { return r == ',' }), Stores: pdpaStores()}
+	pdpaStores, err := pdpa.PlatformStores(os.Getenv)
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	pdpaSvc := pdpa.Service{Store: st, Regions: strings.FieldsFunc(os.Getenv("KEEL_PDPA_REGIONS"), func(r rune) bool { return r == ',' }), Stores: pdpaStores}
 	deps.PDPA = &api.PDPADeps{Authz: az, Service: pdpaSvc}
 	deps.Evidence = &api.EvidenceDeps{Authz: az, Exporter: evidence.Exporter{Store: st, Controls: controls.Service{Store: st, Registry: reg}, PDPA: pdpaSvc, Key: evKey}}
 	go every(ctx, 15*time.Minute, "PDPA breach clock", func(ctx context.Context) error {
@@ -1606,20 +1614,4 @@ func startMultiCloudBillSync(ctx context.Context, st *store.Store, ev budget.Eva
 		})
 	}
 	return nil
-}
-
-// pdpaStores lists the platform buckets that hold every Tenant's data or
-// logs, for the PDPA residency check (#190).
-func pdpaStores() []pdpa.Location {
-	var out []pdpa.Location
-	add := func(kind, bucket, region string) {
-		if bucket != "" {
-			out = append(out, pdpa.Location{Kind: kind, Name: bucket, Region: region})
-		}
-	}
-	add("archive", os.Getenv("KEEL_ARCHIVE_BUCKET"), os.Getenv("KEEL_ARCHIVE_REGION"))
-	add("bill_bucket", os.Getenv("KEEL_TENCENT_BILL_BUCKET"), envOr("KEEL_TENCENT_REGION", "ap-bangkok"))
-	add("bill_bucket", os.Getenv("KEEL_AWS_BILL_BUCKET"), envOr("KEEL_AWS_REGION", "us-east-1"))
-	add("bill_bucket", os.Getenv("KEEL_ALIBABA_BILL_BUCKET"), envOr("KEEL_ALIBABA_REGION", "ap-southeast-1"))
-	return out
 }

@@ -190,6 +190,98 @@ func TestResidencyRaisesOneFindingPerLocationOutsideTheRegionSet(t *testing.T) {
 	storetest.ClockedFindings(t, s, "pdpa_residency")
 }
 
+func lastResidencyDetail(t *testing.T, s *store.Store, tenant string) string {
+	t.Helper()
+	return scalar[string](t, s, tenant, `SELECT event->'data'->>'status_detail' FROM activities WHERE type = 'keel.pdpa.residency.checked' ORDER BY seq DESC LIMIT 1`)
+}
+
+func TestResidencyChecksGCPAndAzureBillStoresAndKeelsDatabase(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	c := newClock()
+	tat, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	if _, err := (pdpa.Service{Store: s, Now: c.now}).Configure(ctx, tat, pdpa.Change{DataRegions: &[]string{"ap-bangkok", "asia-southeast1", "southeastasia"}}, admin); err != nil {
+		t.Fatal(err)
+	}
+	stores := []pdpa.Location{
+		{Kind: "bill_bucket", Name: "gcp-in", Region: "asia-southeast1"},
+		{Kind: "bill_bucket", Name: "gcp-out", Region: "us-central1"},
+		{Kind: "bill_bucket", Name: "azure/in", Region: "southeastasia"},
+		{Kind: "bill_bucket", Name: "azure/out", Region: "westeurope"},
+	}
+	run := func(db pdpa.Location) pdpa.ResidencyRun {
+		t.Helper()
+		r, err := pdpa.Service{Store: s, Now: c.now, Stores: append(slices.Clone(stores), db)}.CheckResidency(ctx, tat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.advance(time.Hour)
+		return r
+	}
+
+	run(pdpa.Location{Kind: "database", Name: "keel-postgres", Region: "ap-bangkok"})
+	want := []string{"pdpa_residency:bill_bucket:gcp-out:us-central1", "pdpa_residency:bill_bucket:azure/out:westeurope"}
+	if got := open(findings(t, s, tat, "pdpa_residency")); !slices.Equal(got, want) && !slices.Equal(got, []string{want[1], want[0]}) {
+		t.Fatalf("open Findings %v, want exactly the out-of-region GCP and Azure stores", got)
+	}
+
+	run(pdpa.Location{Kind: "database", Name: "keel-postgres", Region: "eu-frankfurt"})
+	db := "pdpa_residency:database:keel-postgres:eu-frankfurt"
+	if got := open(findings(t, s, tat, "pdpa_residency")); len(got) != 3 || !slices.Contains(got, db) {
+		t.Fatalf("open Findings %v, want the database outside the region set raised", got)
+	}
+
+	r := run(pdpa.Location{Kind: "database", Name: "keel-postgres"})
+	if got := open(findings(t, s, tat, "pdpa_residency")); len(got) != 3 || !slices.Contains(got, db) {
+		t.Fatalf("open Findings %v: an unknown database region neither raises nor resolves", got)
+	}
+	if len(r.Unchecked) != 1 || r.Unchecked[0].Kind != "database" {
+		t.Fatalf("unchecked %+v, want the database", r.Unchecked)
+	}
+	if d := lastResidencyDetail(t, s, tat); !strings.Contains(d, "not checked: database keel-postgres (KEEL_DB_REGION unset)") {
+		t.Fatalf("residency Activity %q does not name the unchecked database", d)
+	}
+	if n := scalar[int](t, s, tat, `SELECT count(*) FROM activities WHERE type = 'keel.pdpa.residency.checked' AND status_id = $1`, int(activity.Failure)); n != 3 {
+		t.Fatalf("%d failed residency runs, want every run with a store outside or unchecked to fail", n)
+	}
+}
+
+func TestResidencyChecksAccountsWithoutRecentBillsFromTheirLastKnownRegions(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	c := newClock()
+	tat, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	svc := pdpa.Service{Store: s, Now: c.now}
+	now := c.now()
+
+	quietOut, load := account(t, s, tat, "quietout")
+	fact(t, s, tat, load, quietOut, "uin-quietout", "ap-singapore", now.AddDate(0, 0, -100))
+	fact(t, s, tat, load, quietOut, "uin-quietout", "ap-tokyo", now.AddDate(0, 0, -300)) // before its last window
+	quietIn, load := account(t, s, tat, "quietin")
+	fact(t, s, tat, load, quietIn, "uin-quietin", "ap-bangkok", now.AddDate(0, 0, -50))
+	account(t, s, tat, "never")
+
+	r, err := svc.CheckResidency(ctx, tat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := open(findings(t, s, tat, "pdpa_residency")); !slices.Equal(got, []string{"pdpa_residency:cloud_account:tencent:quietout-prod:ap-singapore"}) {
+		t.Fatalf("open Findings %v, want only the quiet account's last known out-of-region", got)
+	}
+	if len(r.Outside) != 1 || !r.Outside[0].LastKnown {
+		t.Fatalf("outside %+v, want the quiet account marked as last known", r.Outside)
+	}
+	if len(r.Unchecked) != 1 || r.Unchecked[0] != (pdpa.Location{Kind: "cloud_account", Name: "tencent:never-prod"}) {
+		t.Fatalf("unchecked %+v, want the never-billed account", r.Unchecked)
+	}
+	d := lastResidencyDetail(t, s, tat)
+	for _, want := range []string{"from last known regions: cloud account tencent:quietin-prod (ap-bangkok), cloud account tencent:quietout-prod (ap-singapore)", "not checked: cloud account tencent:never-prod (no billed regional usage on record)"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("residency Activity %q does not contain %q", d, want)
+		}
+	}
+}
+
 // expirable seeds, for every deletable class, one row past its retention
 // period and one inside it, plus rows retention must never touch. It returns
 // the keys of the expired rows per class. The nth seeding of a Tenant shifts
@@ -585,7 +677,13 @@ func TestEvidenceExportCarriesEveryPDPAControl(t *testing.T) {
 		t.Fatalf("PDPA section has %d controls, registry %d", len(fw.Controls), len(want))
 	}
 	refs := map[string]int{}
+	var residencyRefs []string
 	for i, ce := range fw.Controls {
+		if ce.ID == "s.28" {
+			for _, r := range ce.Evidence {
+				residencyRefs = append(residencyRefs, r.Section)
+			}
+		}
 		if ce.ID != want[i] || (len(ce.CoveredBy) == 0) != (len(ce.Evidence) == 0) || (ce.Gap && ce.GapReason == "") {
 			t.Errorf("control %+v: needs evidence or a gap reason", ce)
 		}
@@ -594,6 +692,9 @@ func TestEvidenceExportCarriesEveryPDPAControl(t *testing.T) {
 				refs[r.Section] = *r.Items
 			}
 		}
+	}
+	if !slices.Equal(residencyRefs, []string{"pdpa.residency", "pdpa.residency_coverage"}) {
+		t.Fatalf("s.28 points at %v, want the residency state and its coverage", residencyRefs)
 	}
 	if refs["pdpa.breaches"] != 1 || refs["pdpa.retention_runs"] == 0 || refs["pdpa.retention_schedule"] != len(pdpa.Schedule) {
 		t.Fatalf("PDPA controls point at %v", refs)
@@ -604,6 +705,10 @@ func TestEvidenceExportCarriesEveryPDPAControl(t *testing.T) {
 	}
 	if len(sec.Breaches) != 1 || len(sec.Schedule) != len(pdpa.Schedule) || string(sec.RetentionRuns) == "[]" {
 		t.Fatalf("pdpa section %s", bundle.Sections["pdpa"])
+	}
+	cov := sec.ResidencyCoverage
+	if len(cov.Covers) == 0 || !slices.ContainsFunc(cov.NotCovered, func(g string) bool { return strings.Contains(g, "KEEL_DB_REGION") }) {
+		t.Fatalf("residency coverage %+v does not state what the check covers and leaves out", cov)
 	}
 	var res struct {
 		Open []json.RawMessage `json:"open"`
