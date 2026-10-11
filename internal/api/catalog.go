@@ -337,6 +337,14 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
+	mux.Handle("GET /v1/tenants/{tenant}/cloud-accounts/role-health", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		out, err := c.ListRoleHealth(r.Context(), p, r.PathValue("tenant"))
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
 	mux.Handle("POST /v1/tenants/{tenant}/cloud-accounts/{account}/archive", authed(a, []string{"tenant", "account"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct{ Why string }
 		if err := decode(r, &in); err != nil {

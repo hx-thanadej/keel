@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { accessApi, api, finops, ApiError, type AccessGrant, type AccessRole, type AccessTemplate, type Environment, type Finding, type Team } from './api'
+import { accessApi, api, finops, ApiError, type AccessGrant, type AccessRole, type AccessTemplate, type CloudAccount, type Environment, type Finding, type Team } from './api'
+import { accountsIn, ownershipOf, readOnlyReason } from './ownership'
+import { GuardedButton } from './OwnershipBadge'
 
 const message = (e: unknown) => (e instanceof ApiError && e.status === 403 ? 'You are not allowed to do that here.' : (e as Error).message)
 const time = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
@@ -12,14 +14,15 @@ export function AccessView({ tenantId }: { tenantId: string }) {
   const [envs, setEnvs] = useState<Environment[]>([])
   const [teams, setTeams] = useState<Team[]>([])
   const [standing, setStanding] = useState<Finding[]>([])
+  const [accounts, setAccounts] = useState<CloudAccount[]>([])
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
 
   useEffect(() => {
     let stale = false
     const ok = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback)
-    Promise.all([ok(accessApi.templates(tenantId), []), ok(accessApi.roles(tenantId), []), ok(accessApi.grants(tenantId), []), ok(accessApi.teams(tenantId), []), ok(api.projects(tenantId), []), ok(finops.findings(tenantId), [])])
-      .then(async ([ts, rs, gs, tm, ps, fs]) => {
+    Promise.all([ok(accessApi.templates(tenantId), []), ok(accessApi.roles(tenantId), []), ok(accessApi.grants(tenantId), []), ok(accessApi.teams(tenantId), []), ok(api.projects(tenantId), []), ok(finops.findings(tenantId), []), ok(api.cloudAccounts(tenantId), [])])
+      .then(async ([ts, rs, gs, tm, ps, fs, cas]) => {
         const es = (await Promise.all(ps.map((p) => ok(api.environments(tenantId, p.id), [])))).flat()
         if (stale) return
         setTemplates(ts)
@@ -27,6 +30,7 @@ export function AccessView({ tenantId }: { tenantId: string }) {
         setGrants(gs)
         setTeams(tm)
         setEnvs(es)
+        setAccounts(cas)
         setStanding(fs.filter((f) => f.kind === 'standing_access'))
       })
       .catch((e: Error) => !stale && setError(e.message))
@@ -48,6 +52,7 @@ export function AccessView({ tenantId }: { tenantId: string }) {
   const team = (id: string) => teams.find((t) => t.id === id)?.name ?? 'team'
   const role = (id: string) => roles.find((r) => r.id === id)
   const label = (r?: AccessRole) => (r ? `${r.template} in ${env(r.environment_id)}` : 'role')
+  const refusal = (r?: AccessRole) => (r ? readOnlyReason(ownershipOf(accountsIn(accounts, [r.environment_id]))) : null)
 
   const pending = grants.filter((g) => g.state === 'requested')
   const active = grants.filter((g) => g.state === 'active')
@@ -68,7 +73,7 @@ export function AccessView({ tenantId }: { tenantId: string }) {
       )}
 
       <h2>Request access</h2>
-      <GrantForm roles={roles.filter((r) => r.state === 'active')} label={label} templates={templates} onSubmit={(b) => act(() => accessApi.requestGrant(tenantId, b))} />
+      <GrantForm roles={roles.filter((r) => r.state === 'active')} label={label} refusal={refusal} templates={templates} onSubmit={(b) => act(() => accessApi.requestGrant(tenantId, b))} />
 
       {pending.length > 0 && <h2>Waiting for approval</h2>}
       {pending.map((g) => (
@@ -145,7 +150,7 @@ export function AccessView({ tenantId }: { tenantId: string }) {
   )
 }
 
-function GrantForm({ roles, label, templates, onSubmit }: { roles: AccessRole[]; label: (r?: AccessRole) => string; templates: AccessTemplate[]; onSubmit: (b: { role_id: string; hours: number; reason: string }) => void }) {
+function GrantForm({ roles, label, refusal, templates, onSubmit }: { roles: AccessRole[]; label: (r?: AccessRole) => string; refusal: (r?: AccessRole) => string | null; templates: AccessTemplate[]; onSubmit: (b: { role_id: string; hours: number; reason: string }) => void }) {
   const [roleId, setRoleId] = useState(roles[0]?.id ?? '')
   const [hours, setHours] = useState(1)
   const [reason, setReason] = useState('')
@@ -177,9 +182,9 @@ function GrantForm({ roles, label, templates, onSubmit }: { roles: AccessRole[];
       <label>
         Reason <input value={reason} onChange={(e) => setReason(e.target.value)} minLength={10} placeholder="incident or ticket" required />
       </label>
-      <button className="primary" type="submit">
+      <GuardedButton className="primary" type="submit" reason={refusal(selected)}>
         Request access
-      </button>
+      </GuardedButton>
     </form>
   )
 }

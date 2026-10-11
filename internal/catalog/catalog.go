@@ -88,11 +88,12 @@ type (
 		CodeScanningSource string `json:"code_scanning_source"`
 	}
 	Environment struct {
-		ID         string     `json:"id"`
-		TenantID   string     `json:"tenant_id"`
-		ProjectID  string     `json:"project_id"`
-		Name       string     `json:"name"`
-		ArchivedAt *time.Time `json:"archived_at,omitempty"`
+		ID           string     `json:"id"`
+		TenantID     string     `json:"tenant_id"`
+		ProjectID    string     `json:"project_id"`
+		Name         string     `json:"name"`
+		WasteCleanup bool       `json:"waste_cleanup"`
+		ArchivedAt   *time.Time `json:"archived_at,omitempty"`
 	}
 	CloudAccount struct {
 		ID            string    `json:"id"`

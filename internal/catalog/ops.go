@@ -295,7 +295,7 @@ func (s *Service) mutateProject(ctx context.Context, p auth.Principal, tenantID,
 
 // ---------- Environments ----------
 
-const envCols = `id::text, tenant_id::text, project_id::text, name, archived_at`
+const envCols = `id::text, tenant_id::text, project_id::text, name, waste_cleanup, archived_at`
 
 // CreateEnvironment adds an Environment to a Project.
 func (s *Service) CreateEnvironment(ctx context.Context, p auth.Principal, tenantID, projectID, name, why string) (Environment, error) {
@@ -308,7 +308,7 @@ func (s *Service) CreateEnvironment(ctx context.Context, p auth.Principal, tenan
 		actType: "keel.environment.created", operation: "CreateEnvironment", kind: activity.Create, why: why},
 		func(tx pgx.Tx) (string, error) {
 			err := tx.QueryRow(ctx, `INSERT INTO environments (tenant_id, project_id, name) VALUES ($1, $2, $3) RETURNING `+envCols,
-				tenantID, projectID, name).Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.ArchivedAt)
+				tenantID, projectID, name).Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.WasteCleanup, &e.ArchivedAt)
 			return e.ID, err
 		})
 	return e, mapErr(err)
@@ -339,7 +339,7 @@ func (s *Service) ArchiveEnvironment(ctx context.Context, p auth.Principal, tena
 		actType: "keel.environment.archived", operation: "ArchiveEnvironment", kind: activity.Update, why: why},
 		func(tx pgx.Tx) (string, error) {
 			err := tx.QueryRow(ctx, `UPDATE environments SET archived_at = coalesce(archived_at, now()) WHERE id = $1 AND project_id = $2 RETURNING `+envCols, id, projectID).
-				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.ArchivedAt)
+				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.WasteCleanup, &e.ArchivedAt)
 			return id, err
 		})
 	return e, mapErr(err)
@@ -364,7 +364,7 @@ func (s *Service) SetWasteCleanup(ctx context.Context, p auth.Principal, tenantI
 				return "", invalid("production Environments cannot enable automatic waste cleanup")
 			}
 			err := tx.QueryRow(ctx, `UPDATE environments SET waste_cleanup = $3 WHERE id = $1 AND project_id = $2 RETURNING `+envCols, id, projectID, on).
-				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.ArchivedAt)
+				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.WasteCleanup, &e.ArchivedAt)
 			return id, err
 		})
 	return e, mapErr(err)
@@ -389,7 +389,7 @@ func (s *Service) SetPromotionPath(ctx context.Context, p auth.Principal, tenant
 			err := tx.QueryRow(ctx, `UPDATE environments SET promotion_order = CASE WHEN $3 THEN $4 ELSE promotion_order END,
 					requires_approval = coalesce($5, requires_approval)
 				WHERE id = $1 AND project_id = $2 RETURNING `+envCols, id, projectID, order != nil, order, requiresApproval).
-				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.ArchivedAt)
+				Scan(&e.ID, &e.TenantID, &e.ProjectID, &e.Name, &e.WasteCleanup, &e.ArchivedAt)
 			return id, err
 		})
 	return e, mapErr(err)
