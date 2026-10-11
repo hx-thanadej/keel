@@ -239,10 +239,24 @@ COS history is in it.
 2. Switch Keel to `KEEL_ARCHIVE_PROVIDER=aws` and the new bucket. Restart.
    Keel must start (lock and versioning checked).
 3. Copy every object under `activity-log/v1/` from COS to the same keys in S3,
-   for example with `rclone copy cos:<bucket>-<appid>/activity-log/v1 s3:<bucket>/activity-log/v1`
-   run as an operator. The bucket's default retention locks each copy in
-   COMPLIANCE mode. The retain-until date counts from the copy, not the
-   original write. That keeps it at least as long as required.
+   run as an operator. S3 rejects an upload to a bucket with default
+   retention unless the request carries `Content-MD5` or an `x-amz-checksum-*`
+   header, so the copy tool must send one. Stage the COS objects locally, then
+   upload with an explicit checksum algorithm (AWS CLI v2):
+
+   ```bash
+   aws s3 cp ./activity-log s3://<bucket>/activity-log --recursive --checksum-algorithm SHA256
+   # one object:
+   aws s3api put-object --bucket <bucket> --key activity-log/v1/<tenant>/<object> \
+     --body ./<object> --checksum-algorithm SHA256
+   ```
+
+   A tool that sends no checksum fails with `InvalidRequest: Content-MD5 OR
+   x-amz-checksum-* HTTP header is required`. If you use another tool such as
+   `rclone`, copy one object first and confirm it succeeds before the bulk run.
+   The bucket's default retention locks each copy in COMPLIANCE mode. The
+   retain-until date counts from the copy, not the original write. That keeps
+   it at least as long as required.
 4. For every Tenant run `verify-archive` against S3. The result is `OK` and
    every `RETENTION` line says `COMPLIANCE`.
 5. Keep the COS bucket and its delete-deny policies. Do not delete it. Note
