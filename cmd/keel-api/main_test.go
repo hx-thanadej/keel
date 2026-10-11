@@ -71,20 +71,29 @@ func TestClientPayerConnectAssumesEachClientsRole(t *testing.T) {
 	var assumed []string
 	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var req struct{ RoleArn string }
+		var req struct{ RoleArn, ExternalId string }
 		_ = json.Unmarshal(body, &req)
+		externalIDs := map[string]string{"qcs::cam::uin/300000000001:roleName/KeelReadOnly": "ext-c1", "qcs::cam::uin/300000000002:roleName/AcmeKeelRead": "ext-c2",
+			"qcs::cam::uin/300000000001:roleName/Untrusted": "ext-c1"}
+		if want := externalIDs[req.RoleArn]; req.ExternalId != want {
+			t.Errorf("AssumeRole %s with ExternalId %q, want the payer's own %q", req.RoleArn, req.ExternalId, want)
+		}
 		if r.Header.Get("X-TC-Action") != "AssumeRole" || !strings.Contains(r.Header.Get("Authorization"), "Credential=base-id/") {
 			t.Errorf("STS got action %q auth %q", r.Header.Get("X-TC-Action"), r.Header.Get("Authorization"))
 		}
 		assumed = append(assumed, req.RoleArn)
+		if strings.HasSuffix(req.RoleArn, "/Untrusted") {
+			_, _ = io.WriteString(w, `{"Response":{"Error":{"Code":"InvalidParameter.ExternalIdIncorrect","Message":"external id mismatch"},"RequestId":"r"}}`)
+			return
+		}
 		_, _ = io.WriteString(w, `{"Response":{"Credentials":{"TmpSecretId":"id-`+req.RoleArn+`","TmpSecretKey":"k","Token":"token-`+req.RoleArn+`"},"ExpiredTime":4102444800,"RequestId":"r"}}`)
 	}))
 	defer sts.Close()
 	connect := clientPayerConnect(staticCreds{id: "base-id"}, sts.URL)
 
 	payers := []cost.ClientPayer{
-		{TenantID: "t1", UIN: "300000000001", RoleARN: "qcs::cam::uin/300000000001:roleName/KeelReadOnly", Bucket: "c1-bills-1250000001", Region: "ap-bangkok"},
-		{TenantID: "t2", UIN: "300000000002", RoleARN: "qcs::cam::uin/300000000002:roleName/AcmeKeelRead", Bucket: "c2-bills-1250000002", Region: "ap-singapore"},
+		{TenantID: "t1", UIN: "300000000001", RoleARN: "qcs::cam::uin/300000000001:roleName/KeelReadOnly", ExternalID: "ext-c1", Bucket: "c1-bills-1250000001", Region: "ap-bangkok"},
+		{TenantID: "t2", UIN: "300000000002", RoleARN: "qcs::cam::uin/300000000002:roleName/AcmeKeelRead", ExternalID: "ext-c2", Bucket: "c2-bills-1250000002", Region: "ap-singapore"},
 	}
 	for _, p := range payers {
 		_, inv, err := connect(p)
@@ -107,5 +116,11 @@ func TestClientPayerConnectAssumesEachClientsRole(t *testing.T) {
 	elsewhere.RoleARN = "qcs::cam::uin/300000000002:roleName/KeelReadOnly"
 	if _, _, err := connect(elsewhere); err == nil {
 		t.Error("a read-only role outside the payer account was accepted")
+	}
+
+	untrusted := payers[0]
+	untrusted.RoleARN = "qcs::cam::uin/300000000001:roleName/Untrusted"
+	if _, _, err := connect(untrusted); err == nil || !strings.Contains(err.Error(), "external id mismatch") {
+		t.Errorf("connect with a role that refuses Keel = %v, want the AssumeRole error before any bill read", err)
 	}
 }

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +233,88 @@ func TestClientPayerCannotBeOurPayer(t *testing.T) {
 		}}
 	if _, err := cs.Run(context.Background()); err == nil {
 		t.Fatal("client payer with our payer id ran")
+	}
+}
+
+// TestOurPayerNeverAllocatesClientAccounts: a client-owned account on Keel's
+// own payer bill stays in the home Tenant unallocated, whatever its tags or
+// the home Tenant's rules say.
+func TestOurPayerNeverAllocatesClientAccounts(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	c1 := addClient(t, w, "c1", "300000000001", "300000000011", "")
+	c2 := addClient(t, w, "c2", "300000000002", "300000000022", "")
+	_, err := cost.Rules{Store: w.s}.Create(ctx, w.home, cost.Rule{Provider: "tencent", SubAccountID: c1.member, Kind: "weights",
+		Shares: []cost.Share{{ProjectID: w.project, EnvironmentID: &w.prdEnv, Weight: "1"}}})
+	must(t, err)
+	ours := &memObjects{objs: map[string][]byte{"bills/2026-09-01.csv": bill(t, "200045645249",
+		billRow{sub: "200046202634", cost: "5.00"},
+		billRow{sub: c1.member, cost: "6.00"},                                           // home rule aims at tat
+		billRow{sub: c2.payer, cost: "3.00", tags: `{"keel-scope": "c2/c2-shop/prod"}`}, // client tag aims at c2
+	)}}
+	_, err = (&cost.BillSync{Ingester: &cost.Ingester{Store: w.s}, Objects: ours, Provider: "tencent", BillingAccountID: "200045645249",
+		Prefix: "bills/", Mode: cost.PerDayFiles, Now: func() time.Time { return time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC) }}).Run(ctx)
+	must(t, err)
+
+	if got := facts(t, w, c2.id); len(got) != 0 {
+		t.Errorf("c2 facts %v, want none from our payer", got)
+	}
+	if got, want := facts(t, w, w.tat), [][3]string{{"200045645249", "200046202634", "5.00"}}; !slices.Equal(got, want) {
+		t.Errorf("tat facts %v, want only its own account %v", got, want)
+	}
+	if got, want := facts(t, w, w.home), [][3]string{{"200045645249", c2.payer, "3.00"}, {"200045645249", c1.member, "6.00"}}; !slices.Equal(got, want) {
+		t.Errorf("home facts %v, want both client accounts' lines %v", got, want)
+	}
+	if got := sum(t, w, w.home, `allocation_method <> 'unallocated'`); got != "0" {
+		t.Errorf("home holds %s allocated from client accounts, want all unallocated", got)
+	}
+}
+
+// TestClientPayerAssumeFailureRaisesFinding: when Keel cannot assume a
+// client's read-only role, the client's Tenant gets a Finding naming the role
+// and the ExternalId its trust policy must require; the next success
+// resolves it.
+func TestClientPayerAssumeFailureRaisesFinding(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	c1 := addClient(t, w, "c1", "300000000001", "300000000011", "c1-bills-1250000001")
+	c2 := addClient(t, w, "c2", "300000000002", "300000000022", "c2-bills-1250000002")
+	broken := true
+	externalIDs := map[string]string{}
+	cs := &cost.ClientBillSync{Ingester: &cost.Ingester{Store: w.s}, Provider: "tencent",
+		Connect: func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+			externalIDs[p.UIN] = p.ExternalID
+			if p.UIN == c1.payer && broken {
+				return nil, nil, errors.New("AssumeRole: role trust policy does not allow this principal")
+			}
+			return &memObjects{objs: map[string][]byte{"focus/2026-09-01.csv": bill(t, p.UIN, billRow{sub: p.UIN, cost: "1.00"})}}, nil, nil
+		}}
+	if _, err := cs.Run(ctx); err == nil {
+		t.Fatal("a failed AssumeRole was not reported")
+	}
+	if e1, e2 := externalIDs[c1.payer], externalIDs[c2.payer]; len(e1) != 32 || len(e2) != 32 || e1 == e2 {
+		t.Errorf("external ids %q %q, want a distinct one per client payer", e1, e2)
+	}
+	fp := "client_role_unusable:tencent/" + c1.payer
+	title := openFinding(t, w, c1.id, fp)
+	if title == "" {
+		t.Fatal("c1 has no Finding for its unusable role")
+	}
+	var configure string
+	must(t, w.s.InTenant(ctx, c1.id, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT detail->>'configure' FROM findings WHERE fingerprint = $1 AND status = 'open'`, fp).Scan(&configure)
+	}))
+	if !strings.Contains(configure, "qcs::cam::uin/"+c1.payer+":roleName/KeelReadOnly") || !strings.Contains(configure, externalIDs[c1.payer]) {
+		t.Errorf("Finding hint %q does not name the role and its ExternalId", configure)
+	}
+	if openFinding(t, w, c2.id, fp) != "" || openFinding(t, w, c2.id, "client_role_unusable:tencent/"+c2.payer) != "" {
+		t.Error("c2 got a role Finding")
+	}
+
+	broken = false
+	_, err := cs.Run(ctx)
+	must(t, err)
+	if title := openFinding(t, w, c1.id, fp); title != "" {
+		t.Errorf("Finding still open after the role worked: %s", title)
 	}
 }

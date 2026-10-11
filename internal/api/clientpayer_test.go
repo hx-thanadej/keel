@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/hx-thanadej/keel/internal/auth"
@@ -34,10 +35,23 @@ func TestClientPayer(t *testing.T) {
 	if body["bucket"] != "" || body["mode"] != "cumulative" || body["region"] != "ap-bangkok" {
 		t.Errorf("payer without delivery = %v", body)
 	}
+	ext, _ := body["external_id"].(string)
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(ext) {
+		t.Errorf("first PUT external_id %q, want a fresh 32-hex id for the client's trust policy", ext)
+	}
 	st, body = inTAT.do("PUT", accounts+"/"+payer+"/client-payer", map[string]any{"bucket": "tat-bills-1250000001", "prefix": "focus/", "region": "ap-singapore", "mode": "per-day", "why": "delivery set up"})
 	mustStatus(t, st, 200, body)
 	if body["bucket"] != "tat-bills-1250000001" || body["prefix"] != "focus/" || body["region"] != "ap-singapore" || body["mode"] != "per-day" {
 		t.Errorf("payer with delivery = %v", body)
+	}
+	if _, shown := body["external_id"]; shown {
+		t.Errorf("external_id shown again on update: %v", body)
+	}
+	other := create("tencent", "100000000002", "client")
+	st, body = inTAT.do("PUT", accounts+"/"+other+"/client-payer", map[string]any{"why": "second payer"})
+	mustStatus(t, st, 200, body)
+	if body["external_id"] == ext {
+		t.Errorf("two payers share external_id %s", ext)
 	}
 
 	for name, tc := range map[string]struct {

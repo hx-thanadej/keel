@@ -7,6 +7,11 @@
 --
 -- client_payers_for joins on tenant_id as well as the account id, so a row
 -- that names another Tenant's account (FK checks bypass RLS) is inert.
+--
+-- role_external_id is Keel's ExternalId for this payer's AssumeRole. Keel
+-- generates it, the client's trust policy requires it (sts:external_id), and
+-- nobody can set or change it, so registering someone else's payer and role
+-- in another Tenant cannot assume that role (confused deputy).
 CREATE TABLE client_payers (
     cloud_account_id uuid PRIMARY KEY REFERENCES cloud_accounts (id),
     tenant_id        uuid NOT NULL REFERENCES tenants (id),
@@ -14,22 +19,24 @@ CREATE TABLE client_payers (
     prefix           text NOT NULL DEFAULT '' CHECK (length(prefix) <= 1024),
     region           text NOT NULL CHECK (region ~ '^[a-z]{2,4}-[a-z]+(-[0-9]+)?$'),
     mode             text NOT NULL DEFAULT 'cumulative' CHECK (mode IN ('per-day', 'cumulative')),
+    role_external_id text NOT NULL DEFAULT replace(gen_random_uuid()::text, '-', '') CHECK (role_external_id ~ '^[0-9a-f]{32}$'),
     updated_at       timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE client_payers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE client_payers FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON client_payers
     USING (tenant_id = current_tenant_id()) WITH CHECK (tenant_id = current_tenant_id());
-GRANT SELECT, INSERT ON client_payers TO keel_app;
+GRANT SELECT ON client_payers TO keel_app;
+GRANT INSERT (cloud_account_id, tenant_id, bucket, prefix, region, mode) ON client_payers TO keel_app;
 GRANT UPDATE (bucket, prefix, region, mode, updated_at) ON client_payers TO keel_app;
 GRANT SELECT ON client_payers TO keel_lookup;
 
 -- Every Tenant's client payers for one provider, for Keel's own bill sync.
 -- +goose StatementBegin
 CREATE FUNCTION client_payers_for(p_provider text)
-RETURNS TABLE (tenant_id uuid, cloud_account_id uuid, external_id text, role_arn text, bucket text, prefix text, region text, mode text)
+RETURNS TABLE (tenant_id uuid, cloud_account_id uuid, external_id text, role_arn text, role_external_id text, bucket text, prefix text, region text, mode text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
-    SELECT p.tenant_id, a.id, a.external_id, a.read_only_role->>'role_arn', p.bucket, p.prefix, p.region, p.mode
+    SELECT p.tenant_id, a.id, a.external_id, a.read_only_role->>'role_arn', p.role_external_id, p.bucket, p.prefix, p.region, p.mode
     FROM client_payers p JOIN cloud_accounts a ON a.id = p.cloud_account_id AND a.tenant_id = p.tenant_id
     WHERE a.provider = p_provider AND a.ownership = 'client' AND a.archived_at IS NULL
     ORDER BY a.external_id

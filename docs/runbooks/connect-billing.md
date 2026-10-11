@@ -94,9 +94,31 @@ role. Each client payer is data, not an environment variable, so one Keel runs
 any number of them.
 
 1. **The client creates a read-only CAM role in its payer account.** Its trust
-   policy allows `sts:AssumeRole` from Keel's base role ARN and nothing else.
+   policy allows `sts:AssumeRole` from Keel's base role ARN and nothing else,
+   and requires Keel's ExternalId for this payer (step 3 returns it).
    Keel's base role needs `sts:AssumeRole` on the client's role ARN. The role
    carries only read actions.
+
+   ```json
+   {
+     "version": "2.0",
+     "statement": [
+       {"effect": "allow", "action": "name/sts:AssumeRole",
+        "principal": {"qcs": ["<Keel's base role ARN>"]},
+        "condition": {"string_equal": {"sts:external_id": "<external_id from step 3>"}}}
+     ]
+   }
+   ```
+
+   Keel generates the ExternalId per payer and sends it on every AssumeRole
+   ([STS AssumeRole `ExternalId`](https://www.tencentcloud.com/document/api/1150/49456)).
+   Nobody can choose or change it, so a payer and role registered again in
+   another Tenant gets a different ExternalId and cannot assume this role.
+   The CAM console's "external ID" option on role creation
+   ([Creating a Role](https://www.tencentcloud.com/document/product/598/19381))
+   sets the same check. Tencent's docs do not print the condition key; confirm
+   `sts:external_id` in the role's trust policy after saving.
+   The role's permissions:
 
    ```json
    {
@@ -132,6 +154,12 @@ any number of them.
    PUT /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer
    {"bucket": "<bucket>-<appid>", "prefix": "<folder>", "region": "ap-bangkok", "mode": "cumulative", "why": "..."}
    ```
+   The first PUT returns `external_id`, once. Later PUTs do not show it. The
+   client adds it to the trust-policy condition from step 1. Until then, or
+   whenever Keel cannot assume the role, the hourly sync raises a
+   `client_role_unusable` Finding in the Tenant naming the role and the
+   ExternalId the condition needs, and resolves it on the next successful
+   AssumeRole.
    A payer recorded with no bucket is allowed. The hourly sync then raises a
    `bill_delivery_missing` Finding in the Tenant that says what to configure.
    It also raises it when the bucket holds no bill files under the prefix, and
@@ -142,7 +170,9 @@ any number of them.
    (`GET /v1/tenants/{home}/cost-loads`). Reconciliation adds the dropped
    amount back, because the invoice covers the whole payer. Tags and
    allocation rules cannot move a client payer's spend into another Tenant.
-   Keel's own payers never attribute spend to a client-owned account.
+   Keel's own payers never attribute spend to a client-owned account: such a
+   line stays in the home Tenant unallocated, whatever its tags or the home
+   Tenant's allocation rules say.
 
 ## AWS (optional, #44)
 

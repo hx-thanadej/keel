@@ -75,6 +75,7 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 		ids = append(ids, s)
 	}
 	owners := map[string]owner{}
+	clientOnOurs := map[string]bool{}
 	rows, err := pool.Query(ctx, `SELECT external_id, tenant_id::text, cloud_account_id::text, environment_id::text, project_id::text, ownership = 'client' FROM account_owners($1, $2)`, l.Provider, ids)
 	if err != nil {
 		return LoadResult{}, err
@@ -88,8 +89,11 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 		}
 		// Keel's payers attribute only platform-owned accounts; a client
 		// payer only its own Tenant's client-owned ones.
-		if (l.Tenant == "" && !o.client) || (o.client && *o.tenant == l.Tenant) {
+		switch {
+		case (l.Tenant == "" && !o.client) || (o.client && *o.tenant == l.Tenant):
 			owners[ext] = o
+		case l.Tenant == "":
+			clientOnOurs[ext] = true
 		}
 	}
 	rows.Close()
@@ -104,6 +108,13 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 	var res LoadResult
 	for _, ln := range l.Lines {
 		o, known := owners[ln.SubAccountID]
+		if clientOnOurs[ln.SubAccountID] {
+			// A client-owned account on Keel's payer (ADR-0018 says it should
+			// not be there). Keel pays it, so it stays visible as home
+			// unallocated; its client-controlled tags and any rule are ignored.
+			facts = append(facts, fact{line: ln, tenant: *home, method: "unallocated"})
+			continue
+		}
 		if l.Tenant == "" {
 			facts = append(facts, al.allocate(ln, owners)...)
 			continue

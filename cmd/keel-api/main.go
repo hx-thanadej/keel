@@ -1123,14 +1123,18 @@ func clientBillSyncLoop(ctx context.Context, st *store.Store, ev budget.Evaluato
 
 // clientPayerConnect gives read-only access to a client payer's bills and
 // invoice totals, as that client's read-only role assumed from Keel's base
-// identity. stsEndpoint overrides the STS host in tests.
+// identity. It assumes the role up front, so a role that refuses Keel fails
+// here and not mid-sync. stsEndpoint overrides the STS host in tests.
 func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.UIN, p.Region)
+		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.UIN, p.ExternalID, p.Region)
 		if err != nil {
 			return nil, nil, err
 		}
 		role.Endpoint = stsEndpoint
+		if _, err := role.GetCredential(); err != nil {
+			return nil, nil, err
+		}
 		objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + p.Region + ".myqcloud.com", Region: p.Region, Bucket: p.Bucket,
 			Creds: archive.Refreshing(tencent.STS{Creds: role}, 10*time.Minute)})
 		if err != nil {

@@ -24,10 +24,15 @@ type ClientPayer struct {
 	Region         string    `json:"region"`
 	Mode           string    `json:"mode"` // per-day | cumulative
 	UpdatedAt      time.Time `json:"updated_at"`
+	// ExternalID is the ExternalId Keel sends when assuming the payer's
+	// role. Keel generates it; it is returned only when the payer is first
+	// recorded, for the client's trust-policy condition.
+	ExternalID string `json:"external_id,omitempty"`
 }
 
 // SetClientPayer records or updates a client payer. Migration 00050 checks
-// the bucket, region and mode formats.
+// the bucket, region and mode formats and generates the role's ExternalId,
+// which no update changes.
 func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID, accountID string, in ClientPayer, why string) (ClientPayer, error) {
 	if in.Mode == "" {
 		in.Mode = "cumulative"
@@ -36,6 +41,7 @@ func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID
 		in.Region = "ap-bangkok"
 	}
 	var out ClientPayer
+	var inserted bool
 	err := s.do(ctx, p, write{action: "cloud_account.update", res: authz.Resource{Type: "cloud_account", ID: accountID, TenantID: tenantID},
 		actType: "keel.cloud_account.client_payer_set", operation: "SetClientPayer", kind: activity.Update, why: why},
 		func(tx pgx.Tx) (string, error) {
@@ -49,9 +55,12 @@ func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID
 			}
 			err := tx.QueryRow(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, bucket, prefix, region, mode) VALUES ($1, $2, $3, $4, $5, $6)
 				ON CONFLICT (cloud_account_id) DO UPDATE SET bucket = excluded.bucket, prefix = excluded.prefix, region = excluded.region, mode = excluded.mode, updated_at = now()
-				RETURNING cloud_account_id::text, tenant_id::text, bucket, prefix, region, mode, updated_at`,
+				RETURNING cloud_account_id::text, tenant_id::text, bucket, prefix, region, mode, updated_at, role_external_id, xmax = 0`,
 				accountID, tenantID, in.Bucket, in.Prefix, in.Region, in.Mode).
-				Scan(&out.CloudAccountID, &out.TenantID, &out.Bucket, &out.Prefix, &out.Region, &out.Mode, &out.UpdatedAt)
+				Scan(&out.CloudAccountID, &out.TenantID, &out.Bucket, &out.Prefix, &out.Region, &out.Mode, &out.UpdatedAt, &out.ExternalID, &inserted)
+			if !inserted {
+				out.ExternalID = ""
+			}
 			return accountID, err
 		})
 	return out, mapErr(err)
