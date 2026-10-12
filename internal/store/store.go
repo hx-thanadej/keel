@@ -10,6 +10,8 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"math/rand/v2"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -23,9 +25,59 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// Migrate applies all pending migrations. ownerURL must connect as the role
-// that owns the schema (never the application role).
+// migrationLockKey names the session advisory lock that serialises Migrate
+// across keel-api replicas (ADR-0021). Advisory locks are per database.
+const migrationLockKey int64 = 0x6b65656c6d6967 // "keelmig"
+
+// migrationLockWait bounds how long Migrate waits for another replica's run.
+// It leaves room for a concurrent index build on a large table.
+var migrationLockWait = 15 * time.Minute
+
+// migrationLockPoll is the mean gap between attempts to take the lock.
+const migrationLockPoll = time.Second
+
+// Migrate applies all pending migrations: goose's, River's, and River's
+// grants. ownerURL must connect as the role that owns the schema (never the
+// application role). Replicas starting together run it one at a time: each
+// holds a session advisory lock on a dedicated connection for the whole run,
+// so ownerURL must reach Postgres directly, not through a transaction pooler.
+//
+// CREATE INDEX CONCURRENTLY waits for every snapshot older than the build, so
+// neither the holder nor a waiter may keep one open. The holder's lock
+// connection sits idle outside any transaction. A waiter polls
+// pg_try_advisory_lock instead of blocking in pg_advisory_lock, whose
+// statement would hold a snapshot for the whole wait and stall the build.
 func Migrate(ctx context.Context, ownerURL string) error {
+	lock, err := pgx.Connect(ctx, ownerURL)
+	if err != nil {
+		return fmt.Errorf("migration lock: %w", err)
+	}
+	defer func() { _ = lock.Close(context.Background()) }()
+	deadline := time.Now().Add(migrationLockWait)
+	for {
+		var got bool
+		if err := lock.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, migrationLockKey).Scan(&got); err != nil {
+			return fmt.Errorf("migration lock: %w", err)
+		}
+		if got {
+			break
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return fmt.Errorf("migration lock not acquired within %s; another replica is still migrating", migrationLockWait)
+		}
+		timer := time.NewTimer(min(left, migrationLockPoll/2+rand.N(migrationLockPoll)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("migration lock: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return migrate(ctx, ownerURL) // closing the lock connection releases the lock
+}
+
+func migrate(ctx context.Context, ownerURL string) error {
 	db, err := sql.Open("pgx", ownerURL)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
