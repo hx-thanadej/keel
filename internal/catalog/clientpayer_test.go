@@ -195,8 +195,9 @@ func TestReonboardArchivedPayer(t *testing.T) {
 	if got := w.storedExternalID(t, w.tat, account); got != ext {
 		t.Errorf("unarchive changed role_external_id to %q", got)
 	}
-	if _, err := w.c.UnarchiveCloudAccount(ctx, w.admin(w.tat), w.tat, account, "again"); err != nil {
-		t.Errorf("unarchive an active account = %v, want a no-op", err)
+	again, err := w.c.UnarchiveCloudAccount(ctx, w.admin(w.tat), w.tat, account, "again")
+	if err != nil || again.ID != account || again.ArchivedAt != nil {
+		t.Errorf("unarchive an active account = %+v, %v, want the active account unchanged", again, err)
 	}
 	if err := register(w.tat); !errors.Is(err, catalog.ErrConflict) {
 		t.Errorf("register a second active payer = %v, want ErrConflict", err)
@@ -215,7 +216,33 @@ func TestReonboardArchivedPayer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(acts) != 2 {
-		t.Errorf("unarchive Activities = %d, want 2", len(acts))
+	if len(acts) != 1 {
+		t.Errorf("unarchive Activities = %d, want 1: unarchiving an active account is a no-op", len(acts))
+	}
+}
+
+// TestRotateRefusedOnPlatformOwnedPayer: a payer whose Cloud Account was
+// made platform-owned keeps its client_payers row, but sync never assumes a
+// client role for it, so a rotated id would never be used. Rotation is
+// refused like PUT client-payer, the id stays and no Activity is written.
+func TestRotateRefusedOnPlatformOwnedPayer(t *testing.T) {
+	w := newPayerWorld(t)
+	ctx := t.Context()
+	account, ext := w.payer(t, w.tat, "100000000001")
+	if _, err := w.c.SetCloudAccountOwnership(ctx, w.admin(w.tat), w.tat, account, catalog.OwnershipPlatform, nil, "Keel runs it now"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.c.RotateClientPayerExternalID(ctx, w.admin(w.tat), w.tat, account, "x"); !errors.Is(err, catalog.ErrInvalid) {
+		t.Errorf("rotate a platform-owned payer = %v, want ErrInvalid", err)
+	}
+	if got := w.storedExternalID(t, w.tat, account); got != ext {
+		t.Errorf("refused rotation changed role_external_id to %q", got)
+	}
+	acts, err := w.c.ListActivities(ctx, w.admin(w.tat), w.tat, activity.Filter{Type: "keel.cloud_account.client_payer_external_id_rotated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) != 0 {
+		t.Errorf("rotation Activities = %d, want 0", len(acts))
 	}
 }
