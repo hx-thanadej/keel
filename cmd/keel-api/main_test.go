@@ -299,7 +299,11 @@ func TestBrokenAWSIdentityLeavesTencentSyncing(t *testing.T) {
 			for k, v := range env {
 				t.Setenv(k, v)
 			}
-			syncs := clientBillSyncs(context.Background(), nil)
+			fake := &fakeSTS{provider: "tencent"}
+			fake.set(true, true)
+			srv := httptest.NewServer(fake)
+			defer srv.Close()
+			syncs := clientBillSyncs(context.Background(), nil, srv.URL)
 			providers := []string{}
 			for _, cs := range syncs {
 				providers = append(providers, cs.Provider)
@@ -307,8 +311,8 @@ func TestBrokenAWSIdentityLeavesTencentSyncing(t *testing.T) {
 			if !slices.Equal(providers, []string{"tencent", "aws"}) {
 				t.Fatalf("client syncs %v, want tencent and aws", providers)
 			}
-			if syncs[0].Ready == nil || syncs[0].Connect == nil {
-				t.Error("the Tencent sync is not wired with a broken AWS identity")
+			if err := syncs[0].Ready(context.Background()); err != nil || syncs[0].Connect == nil {
+				t.Errorf("the Tencent sync is not ready with Keel's Tencent credentials and a broken AWS identity: %v", err)
 			}
 			if err := syncs[1].Ready(context.Background()); err == nil {
 				t.Error("the AWS sync is ready with a broken Keel identity")

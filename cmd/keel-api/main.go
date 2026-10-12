@@ -442,7 +442,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	go clientBillSyncLoop(ctx, evaluator, clientBillSyncs(ctx, st))
+	go clientBillSyncLoop(ctx, evaluator, clientBillSyncs(ctx, st, ""))
 	if err := startAWSBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
@@ -1085,7 +1085,7 @@ func billCredentials(base common.Provider, payer, role, region string) common.Pr
 // (unloadable config, access keys instead of a keyless source, or one STS
 // rejects) fails the AWS sync's Ready check once per run with payers, as
 // Keel's fault, and never stops the Tencent sync.
-func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSync {
+func clientBillSyncs(ctx context.Context, st *store.Store, tencentSTS string) []*cost.ClientBillSync {
 	own := func(env string) []string {
 		if v := os.Getenv(env); v != "" {
 			return []string{v}
@@ -1100,7 +1100,7 @@ func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSyn
 		aws = awsClientBillSync(in, base, "", "")
 	}
 	return []*cost.ClientBillSync{
-		tencentClientBillSync(in, tencent.Credentials(), ""),
+		tencentClientBillSync(in, tencent.Credentials(), tencentSTS),
 		aws,
 	}
 }
@@ -1120,7 +1120,7 @@ func awsClientBillSync(in *cost.Ingester, base awsadapter.Identity, stsEndpoint,
 				return fmt.Errorf("loading Keel's AWS identity: %w", err)
 			}
 			if err := awsadapter.CallerIdentity(ctx, base, stsEndpoint); err != nil {
-				return fmt.Errorf("STS rejected Keel's AWS identity: %w", err)
+				return fmt.Errorf("%w Keel's AWS identity: %w", cost.ErrIdentityRejected, err)
 			}
 			return nil
 		}}
@@ -1129,22 +1129,35 @@ func awsClientBillSync(in *cost.Ingester, base awsadapter.Identity, stsEndpoint,
 // tencentClientBillSync reads Tencent client payers as their read-only roles,
 // assumed from Keel's base identity. Ready loads that identity and has STS
 // accept it first, so Keel's own missing or rejected credentials are never
-// blamed on a client's role. stsEndpoint overrides the STS host in tests.
+// blamed on a client's role. The SDK calls cannot be cancelled, so Ready
+// returns when ctx ends and leaves the call to the SDK's own timeout.
+// stsEndpoint overrides the STS host in tests.
 func tencentClientBillSync(in *cost.Ingester, base common.Provider, stsEndpoint string) *cost.ClientBillSync {
 	var own []string
 	if v := os.Getenv("KEEL_TENCENT_PAYER_UIN"); v != "" {
 		own = []string{v}
 	}
 	return &cost.ClientBillSync{Ingester: in, Provider: "tencent", OwnPayers: own, Connect: clientPayerConnect(base, stsEndpoint),
-		Ready: func(context.Context) error {
-			cred, err := base.GetCredential()
-			if err != nil {
-				return fmt.Errorf("loading Keel's Tencent identity: %w", err)
+		Ready: func(ctx context.Context) error {
+			done := make(chan error, 1)
+			go func() {
+				cred, err := base.GetCredential()
+				if err != nil {
+					done <- fmt.Errorf("loading Keel's Tencent identity: %w", err)
+					return
+				}
+				if err := tencent.CallerIdentity(cred, envOr("KEEL_TENCENT_REGION", "ap-bangkok"), stsEndpoint); err != nil {
+					done <- fmt.Errorf("%w Keel's Tencent identity: %w", cost.ErrIdentityRejected, err)
+					return
+				}
+				done <- nil
+			}()
+			select {
+			case err := <-done:
+				return err
+			case <-ctx.Done():
+				return fmt.Errorf("checking Keel's Tencent identity: %w", ctx.Err())
 			}
-			if err := tencent.CallerIdentity(cred, envOr("KEEL_TENCENT_REGION", "ap-bangkok"), stsEndpoint); err != nil {
-				return fmt.Errorf("STS rejected Keel's Tencent identity: %w", err)
-			}
-			return nil
 		}}
 }
 

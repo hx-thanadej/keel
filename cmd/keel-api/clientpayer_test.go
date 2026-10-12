@@ -40,7 +40,6 @@ var payerShapes = map[string]struct{ role, bucket, prefix, region, mode string }
 func newClientWorld(t *testing.T, provider string) clientWorld {
 	t.Helper()
 	ctx := context.Background()
-	shape := payerShapes[provider]
 	c := clientWorld{st: storetest.New(t), provider: provider, payer: "300000000001"}
 	c.roleFP, c.kfp = "client_role_unusable:"+provider+"/"+c.payer, "keel_identity_unusable:"+provider
 	var err error
@@ -50,19 +49,31 @@ func newClientWorld(t *testing.T, provider string) clientWorld {
 	if c.tenant, err = c.st.CreateTenant(ctx, "c1", "C1", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.st.InTenant(ctx, c.tenant, func(tx pgx.Tx) error {
+	c.account = addClientPayer(t, c.st, c.tenant, provider, c.payer)
+	return c
+}
+
+// addClientPayer registers one client payer on provider in tenant and
+// returns its Cloud Account id.
+func addClientPayer(t *testing.T, st *store.Store, tenant, provider, payer string) string {
+	t.Helper()
+	ctx := context.Background()
+	shape := payerShapes[provider]
+	role := strings.ReplaceAll(shape.role, "300000000001", payer)
+	var account string
+	if err := st.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role)
 			VALUES ($1, $2, $3, 'payer', 'client', jsonb_build_object('role_arn', $4::text)) RETURNING id`,
-			c.tenant, provider, c.payer, shape.role).Scan(&c.account); err != nil {
+			tenant, provider, payer, role).Scan(&account); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, prefix, region, mode)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`, c.account, c.tenant, provider, shape.bucket, shape.prefix, shape.region, shape.mode)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)`, account, tenant, provider, shape.bucket, shape.prefix, shape.region, shape.mode)
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return account
 }
 
 func (c clientWorld) open(t *testing.T, tenant, fingerprint string) (title, detail string) {
@@ -107,7 +118,7 @@ func TestTencentClientSyncBlamesKeelForItsOwnCredentials(t *testing.T) {
 	c := newClientWorld(t, "tencent")
 	ctx := context.Background()
 	withoutTencentCredentials(t)
-	sync := clientBillSyncs(ctx, c.st)[0]
+	sync := clientBillSyncs(ctx, c.st, "")[0]
 	if sync.Provider != "tencent" {
 		t.Fatalf("first client sync is %s, want tencent", sync.Provider)
 	}
@@ -120,8 +131,12 @@ func TestTencentClientSyncBlamesKeelForItsOwnCredentials(t *testing.T) {
 	if at := c.lastAssumed(t); at != nil {
 		t.Errorf("last_assumed_at = %v without Keel's credentials, want never", at)
 	}
-	if title, _ := c.open(t, c.home, c.kfp); title == "" {
+	title, detail := c.open(t, c.home, c.kfp)
+	if title == "" {
 		t.Fatalf("home Tenant has no Finding for Keel's unusable Tencent identity")
+	}
+	if !strings.Contains(detail, "Give keel-api a keyless Tencent identity") {
+		t.Errorf("an identity that never loaded is not told to give Keel a keyless one: %s", detail)
 	}
 }
 
@@ -164,6 +179,8 @@ func (f *fakeSTS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `{"Response":{"Error":{"Code":"AuthFailure.SecretIdNotFound","Message":"secret id not found"},"RequestId":"r"}}`)
 		case !ok:
 			_, _ = io.WriteString(w, `{"Response":{"Error":{"Code":"InvalidParameter.ExternalIdIncorrect","Message":"external id mismatch"},"RequestId":"r"}}`)
+		case action == "AssumeRole":
+			_, _ = io.WriteString(w, `{"Response":{"Credentials":{"TmpSecretId":"id","TmpSecretKey":"k","Token":"t"},"ExpiredTime":4102444800,"RequestId":"r"}}`)
 		case action == "GetCallerIdentity":
 			_, _ = io.WriteString(w, `{"Response":{"Arn":"qcs::sts:200000000001:assumed-role/4611686018427397919/keel","AccountId":"200000000001","UserId":"4611686018427397919:keel","PrincipalId":"200000000001","Type":"AssumedRole","RequestId":"r"}}`)
 		default:
@@ -180,6 +197,10 @@ func (f *fakeSTS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>not authorized to perform sts:AssumeRole</Message></Error><RequestId>r</RequestId></ErrorResponse>`)
 	case action == "GetCallerIdentity":
 		_, _ = io.WriteString(w, `<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Arn>arn:aws:sts::200000000001:assumed-role/keel/keel</Arn><UserId>AROA:keel</UserId><Account>200000000001</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></GetCallerIdentityResponse>`)
+	case action == "AssumeRole":
+		_, _ = io.WriteString(w, `<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><AssumedRoleUser><Arn>arn:aws:sts::300000000001:assumed-role/KeelReadOnly/keel</Arn><AssumedRoleId>AROA:keel</AssumedRoleId></AssumedRoleUser>`+
+			`<Credentials><AccessKeyId>ASIAX</AccessKeyId><SecretAccessKey>secret-x</SecretAccessKey><SessionToken>token-x</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials>`+
+			`</AssumeRoleResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></AssumeRoleResponse>`)
 	default:
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -228,6 +249,9 @@ func TestSTSRejectingKeelsIdentityStaysHome(t *testing.T) {
 			title, detail := c.open(t, c.home, c.kfp)
 			if title == "" {
 				t.Fatal("home Tenant has no keel_identity_unusable for Keel's rejected identity")
+			}
+			if strings.Contains(detail, "Give keel-api a keyless") || !strings.Contains(detail, "rejected") {
+				t.Errorf("an already keyless identity STS rejected is not told what to check: %s", detail)
 			}
 			for _, secret := range []string{"base-key", "base-secret", "base-token"} {
 				if strings.Contains(detail, secret) {
@@ -293,5 +317,85 @@ func TestKeelIdentityFindingResolvesWithNoPayers(t *testing.T) {
 	}
 	if got := fake.calls(); len(got) != 0 {
 		t.Errorf("STS calls %v with no client payers, want none", got)
+	}
+}
+
+// TestTencentReadyHonoursItsContext: the Tencent SDK call cannot be
+// cancelled, so Ready must return when its ctx ends instead of waiting out
+// the SDK's own timeout on a STS that never answers.
+func TestTencentReadyHonoursItsContext(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	defer srv.Close()
+	defer close(release)
+	sync := tencentClientBillSync(&cost.Ingester{}, staticCreds{id: "base-id"}, srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sync.Ready(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Ready after its ctx ended = %v, want the ctx error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ready ignored its ctx and kept waiting on STS")
+	}
+}
+
+// TestOneProvidersKeelIdentityFailureLeavesTheOtherSyncing: with Keel's
+// Tencent identity rejected, the AWS client payer in the same database is
+// still synced through its role and stamped, and each provider's Findings
+// stay its own.
+func TestOneProvidersKeelIdentityFailureLeavesTheOtherSyncing(t *testing.T) {
+	c := newClientWorld(t, "tencent")
+	ctx := context.Background()
+	awsAccount := addClientPayer(t, c.st, c.tenant, "aws", "300000000002")
+
+	tfake, afake := &fakeSTS{provider: "tencent"}, &fakeSTS{provider: "aws"}
+	tfake.set(false, true)
+	afake.set(true, true)
+	tsrv, asrv := httptest.NewServer(tfake), httptest.NewServer(afake)
+	defer tsrv.Close()
+	defer asrv.Close()
+	s3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>b</Name><KeyCount>0</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`)
+	}))
+	defer s3.Close()
+
+	in := &cost.Ingester{Store: c.st}
+	if _, err := tencentClientBillSync(in, staticCreds{id: "base-id"}, tsrv.URL).Run(ctx); err == nil || !strings.Contains(err.Error(), "STS rejected Keel's Tencent identity") {
+		t.Fatalf("Tencent sync with Keel's identity rejected = %v, want Keel's identity error", err)
+	}
+	if _, err := awsClientBillSync(in, webIdentity{}, asrv.URL, s3.URL).Run(ctx); err != nil && !strings.Contains(err.Error(), "holds no bill files") {
+		t.Fatalf("AWS sync beside a rejected Tencent identity = %v", err)
+	}
+
+	if title, _ := c.open(t, c.home, c.kfp); title == "" {
+		t.Error("home Tenant has no keel_identity_unusable:tencent")
+	}
+	if title, _ := c.open(t, c.home, "keel_identity_unusable:aws"); title != "" {
+		t.Errorf("AWS blamed for Tencent's rejected identity: %s", title)
+	}
+	if title, _ := c.open(t, c.tenant, "client_role_unusable:aws/300000000002"); title != "" {
+		t.Errorf("AWS client role blamed: %s", title)
+	}
+	if got := tfake.calls(); !slices.Equal(got, []string{"GetCallerIdentity"}) {
+		t.Errorf("Tencent STS calls %v, want only GetCallerIdentity", got)
+	}
+	if got := afake.calls(); !slices.Equal(got, []string{"GetCallerIdentity", "AssumeRole"}) {
+		t.Errorf("AWS STS calls %v, want GetCallerIdentity then AssumeRole", got)
+	}
+	if at := c.lastAssumed(t); at != nil {
+		t.Errorf("Tencent payer last_assumed_at = %v, want never", at)
+	}
+	var at *time.Time
+	if err := c.st.InTenant(ctx, c.tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT last_assumed_at FROM client_payers WHERE cloud_account_id = $1`, awsAccount).Scan(&at)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if at == nil {
+		t.Error("AWS payer last_assumed_at is unset though its role was assumed")
 	}
 }
