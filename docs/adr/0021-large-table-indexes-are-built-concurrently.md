@@ -52,7 +52,14 @@ DROP INDEX CONCURRENTLY IF EXISTS cost_facts_example;
   numbered 00055 or higher that breaks one of these rules on one of these
   tables. It reads the SQL after stripping comments, lower-casing and
   removing identifier quotes, and ignores any schema prefix, so spelling does
-  not hide a statement. Indexes on small tables are not checked.
+  not hide a statement. It also flags `ALTER TABLE ... ADD EXCLUDE` and
+  `REINDEX TABLE` without `CONCURRENTLY` on these tables. Indexes on small
+  tables are not checked.
+- The lint reads SQL text, not a parse tree, so some forms pass it unchecked.
+  A statement built as a string and run by `EXECUTE` is not seen. Neither is
+  `REINDEX INDEX`, `SCHEMA` or `DATABASE`, whose table the text does not name.
+  Comment markers inside a dollar-quoted or `E''` string, and `U&""`
+  identifiers, can hide a statement too. Review these forms by hand.
 
 ### Replicas migrate one at a time
 
@@ -61,20 +68,26 @@ start together race. Without serialising them, River's grants failed with
 `tuple concurrently updated` in most rounds of three or four parallel
 migrators (#239).
 
-`store.Migrate` takes a session advisory lock (`pg_advisory_lock`) on a
-dedicated connection before goose's migrations, River's migrations and
-River's grants, and holds it until all three finish. A second replica waits,
-then finds nothing pending. The wait is bounded by `lock_timeout` (15
-minutes), after which `Migrate` fails with "migration lock not acquired
-within 15m0s; another replica is still migrating". The lock is released when
-its connection closes, so a crashed replica does not leave it held.
+`store.Migrate` takes a session advisory lock on a dedicated connection
+before goose's migrations, River's migrations and River's grants, and holds
+it until all three finish. A second replica waits, then finds nothing
+pending. The wait is bounded at 15 minutes, after which `Migrate` fails with
+"migration lock not acquired within 15m0s; another replica is still
+migrating". The lock is released when its connection closes, so a crashed
+replica does not leave it held.
 
-The lock connection is idle outside any transaction while the migrations run
-on other connections. `CREATE INDEX CONCURRENTLY` waits only for
-transactions, so a `NO TRANSACTION` migration is not blocked by the lock.
-`TestConcurrentIndexBuildIsNotBlockedByTheMigrationLock` checks this. A
-session lock needs a direct connection, so `KEEL_MIGRATE_URL` must not point
-at a transaction-mode pooler.
+`CREATE INDEX CONCURRENTLY` waits for every transaction whose snapshot is
+older than the build, so no replica may hold a snapshot while the lock is
+held. The holder's lock connection is idle outside any transaction while the
+migrations run on other connections. A waiter does not block in
+`pg_advisory_lock`. That statement would hold a snapshot for the whole wait,
+and a `NO TRANSACTION` migration's concurrent build would stall until the
+waiter gave up. Instead the waiter runs `pg_try_advisory_lock` as a single
+autocommit statement about once a second, with jitter, and holds no snapshot
+between attempts. `TestConcurrentIndexBuildIsNotBlockedByTheMigrationLock`
+and `TestConcurrentIndexBuildIsNotBlockedByAWaitingMigrator` check both
+sides. A session lock needs a direct connection, so `KEEL_MIGRATE_URL` must
+not point at a transaction-mode pooler.
 
 Goose's own session locker was not used. It covers only goose's migrations,
 and River's migrations and grants would still race.

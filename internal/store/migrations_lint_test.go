@@ -30,7 +30,9 @@ const ident = `[\w$]+(?:\.[\w$]+)?`
 var (
 	createIndex  = regexp.MustCompile(`\bcreate\s+(?:unique\s+)?index\s+(concurrently\s+)?(?:if\s+not\s+exists\s+)?(?:(` + ident + `)\s+)??on\s+(?:only\s+)?(` + ident + `)`)
 	alterTable   = regexp.MustCompile(`\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(` + ident + `)([^;]*)`)
-	uniqueClause = regexp.MustCompile(`\b(unique|primary\s+key)\b(\s+using\s+index\b)?`)
+	uniqueClause = regexp.MustCompile(`\b(unique|primary\s+key|exclude)\b(\s+using\s+index\b)?`)
+	reindex      = regexp.MustCompile(`\breindex\s+(?:\([^)]*\)\s*)?table\s+(concurrently\s+)?(` + ident + `)`)
+	literal      = regexp.MustCompile(`'(?:[^']|'')*'`)
 	doBlock      = regexp.MustCompile(`\bdo\s+(\$[\w]*\$)`)
 	noTxMarker   = regexp.MustCompile(`(?m)^--\s*\+goose\s+NO\s+TRANSACTION\s*$`)
 	migrationNo  = regexp.MustCompile(`^(\d+)_.*\.sql$`)
@@ -168,14 +170,22 @@ func largeTableIndexProblems(sql string) []string {
 		if !largeTables[table] {
 			continue
 		}
-		for _, u := range uniqueClause.FindAllStringSubmatch(m[2], -1) {
-			if u[2] == "" {
+		for _, u := range uniqueClause.FindAllStringSubmatch(literal.ReplaceAllString(m[2], "''"), -1) {
+			switch {
+			case u[1] == "exclude":
+				out = append(out, fmt.Sprintf("ALTER TABLE %s ADD EXCLUDE builds its index under a write lock and cannot attach a concurrently built one", table))
+			case u[2] == "":
 				kind := "ADD UNIQUE"
 				if u[1] != "unique" {
 					kind = "ADD PRIMARY KEY"
 				}
 				out = append(out, fmt.Sprintf("ALTER TABLE %s %s builds its index under a write lock; build it CONCURRENTLY and attach it with USING INDEX", table, kind))
 			}
+		}
+	}
+	for _, m := range reindex.FindAllStringSubmatch(code, -1) {
+		if table := tableName(m[2]); largeTables[table] && m[1] == "" {
+			out = append(out, fmt.Sprintf("REINDEX TABLE %s blocks its writes; use REINDEX TABLE CONCURRENTLY", table))
 		}
 	}
 	return out
@@ -255,6 +265,13 @@ func TestLargeTableIndexCheckCases(t *testing.T) {
 		{"ADD COLUMN UNIQUE", `ALTER TABLE findings ADD COLUMN c text UNIQUE;`, []string{"ADD UNIQUE"}},
 		{"ADD CONSTRAINT UNIQUE USING INDEX", noTx + `DROP INDEX IF EXISTS findings_u; CREATE UNIQUE INDEX CONCURRENTLY findings_u ON findings (a);
 			ALTER TABLE findings ADD CONSTRAINT findings_u UNIQUE USING INDEX findings_u;`, nil},
+		{"ADD COLUMN DEFAULT 'unique'", `ALTER TABLE findings ADD COLUMN c text DEFAULT 'unique';`, nil},
+		{"ADD COLUMN DEFAULT quoting 'unique'", `ALTER TABLE findings ADD COLUMN c text DEFAULT 'it''s unique';`, nil},
+		{"ADD EXCLUDE", `ALTER TABLE cost_facts ADD CONSTRAINT x EXCLUDE USING gist (a WITH =);`, []string{"ADD EXCLUDE"}},
+		{"REINDEX TABLE", `REINDEX TABLE public.cost_facts;`, []string{"REINDEX TABLE cost_facts"}},
+		{"REINDEX with options", `REINDEX (VERBOSE) TABLE activities;`, []string{"REINDEX TABLE activities"}},
+		{"REINDEX TABLE CONCURRENTLY", noTx + `REINDEX TABLE CONCURRENTLY cost_facts;`, nil},
+		{"REINDEX on a small table", `REINDEX TABLE teams;`, nil},
 		{"ADD PRIMARY KEY on a small table", `ALTER TABLE teams ADD PRIMARY KEY (id);`, nil},
 		{"utilisation_daily is large", `CREATE INDEX x ON utilisation_daily (a);`, []string{"not CREATE INDEX CONCURRENTLY", "NO TRANSACTION", "DROP INDEX IF EXISTS"}},
 		{"k8s_namespace_costs is large", `CREATE INDEX x ON k8s_namespace_costs (a);`, []string{"not CREATE INDEX CONCURRENTLY", "NO TRANSACTION", "DROP INDEX IF EXISTS"}},
