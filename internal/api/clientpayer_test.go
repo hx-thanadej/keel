@@ -88,3 +88,47 @@ func TestClientPayer(t *testing.T) {
 		}
 	}
 }
+
+// TestRotateAndUnarchiveRoutes: a platform admin rotates a payer's
+// ExternalId over HTTP and sees the new id once; a viewer and another
+// Tenant's admin get 403. An archived payer is re-onboarded by unarchive.
+func TestRotateAndUnarchiveRoutes(t *testing.T) {
+	c, home := setup(t)
+	admin := c.as(homeAdmin(home))
+	_, body := admin.do("POST", "/v1/tenants", map[string]any{"slug": "tat", "name": "TAT"})
+	tat := body["id"].(string)
+	_, body = admin.do("POST", "/v1/tenants", map[string]any{"slug": "other", "name": "Other"})
+	other := body["id"].(string)
+	inTAT := c.as(homeAdmin(home, auth.Binding{Role: auth.RolePlatformAdmin, TenantID: tat}))
+	accounts := "/v1/tenants/" + tat + "/cloud-accounts"
+	st, body := inTAT.do("POST", accounts, map[string]any{"provider": "tencent", "external_id": "100000000001", "name": "payer", "ownership": "client", "read_only_role": clientRoles["tencent"]})
+	mustStatus(t, st, 201, body)
+	payer := accounts + "/" + body["id"].(string)
+	st, body = inTAT.do("PUT", payer+"/client-payer", map[string]any{"why": "pays its own bill"})
+	mustStatus(t, st, 200, body)
+	first := body["role_external_id"]
+
+	st, body = inTAT.do("POST", payer+"/client-payer/rotate-external-id", map[string]any{"why": "id lost"})
+	mustStatus(t, st, 200, body)
+	ext, _ := body["role_external_id"].(string)
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(ext) || ext == first {
+		t.Errorf("rotated role_external_id %q (first %v), want a new 32-hex id", ext, first)
+	}
+	viewer := c.as(auth.Principal{Subject: "user:v@tat", Kind: auth.KindHuman, TenantID: tat, Bindings: []auth.Binding{{Role: auth.RoleTenantViewer, TenantID: tat}}})
+	otherAdmin := c.as(homeAdmin(home, auth.Binding{Role: auth.RolePlatformAdmin, TenantID: other}))
+	for name, who := range map[string]client{"viewer": viewer, "other Tenant's admin": otherAdmin} {
+		for _, path := range []string{payer + "/client-payer/rotate-external-id", payer + "/unarchive"} {
+			if st, body := who.do("POST", path, map[string]any{"why": "x"}); st != 403 {
+				t.Errorf("%s POST %s = %d %v, want 403", name, path, st, body)
+			}
+		}
+	}
+
+	st, body = inTAT.do("POST", payer+"/archive", map[string]any{"why": "client left"})
+	mustStatus(t, st, 200, body)
+	st, body = inTAT.do("POST", payer+"/unarchive", map[string]any{"why": "client is back"})
+	mustStatus(t, st, 200, body)
+	if _, archived := body["archived_at"]; archived || body["ownership"] != "client" {
+		t.Errorf("unarchived payer = %v", body)
+	}
+}

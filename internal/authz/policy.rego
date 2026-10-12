@@ -27,6 +27,8 @@ rules := {
 	"cloud_account.create": {"platform_admin"},
 	"cloud_account.update": {"platform_admin"},
 	"cloud_account.archive": {"platform_admin"},
+	"cloud_account.unarchive": {"platform_admin"},
+	"cloud_account.rotate_external_id": {"platform_admin"},
 	"service.read": read_roles,
 	"service.create": {"platform_admin", "team_lead", "engineer"},
 	"service.update": {"platform_admin", "team_lead", "engineer"},

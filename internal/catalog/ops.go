@@ -464,6 +464,22 @@ func (s *Service) ArchiveCloudAccount(ctx context.Context, p auth.Principal, ten
 	return a, mapErr(err)
 }
 
+// UnarchiveCloudAccount brings an archived Cloud Account back as it was:
+// same id, ownership, read-only role and client payer row. It is how an
+// archived payer is re-onboarded (#213); registering the account again
+// conflicts, since (provider, external_id) stays unique across archived rows.
+func (s *Service) UnarchiveCloudAccount(ctx context.Context, p auth.Principal, tenantID, id, why string) (CloudAccount, error) {
+	var a CloudAccount
+	err := s.do(ctx, p, write{action: "cloud_account.unarchive", res: authz.Resource{Type: "cloud_account", ID: id, TenantID: tenantID},
+		actType: "keel.cloud_account.unarchived", operation: "UnarchiveCloudAccount", kind: activity.Update, why: why},
+		func(tx pgx.Tx) (string, error) {
+			err := tx.QueryRow(ctx, `UPDATE cloud_accounts SET archived_at = NULL WHERE id = $1 RETURNING `+accountCols, id).
+				Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.Ownership, &a.ReadOnlyRole, &a.ArchivedAt)
+			return id, err
+		})
+	return a, mapErr(err)
+}
+
 // ---------- Activities ----------
 
 // ListActivities reads a Tenant's Activity Log.

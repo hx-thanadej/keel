@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 
+	"github.com/hx-thanadej/keel/internal/auth"
+	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/cost"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
@@ -148,6 +152,21 @@ type fakeSTS struct {
 	actions              []string
 	identityOK, assumeOK bool
 	provider             string
+	// trusted, when set, is the only ExternalId the client's trust policy
+	// accepts; assumedWith is the ExternalId of the last AssumeRole.
+	trusted, assumedWith string
+}
+
+func (f *fakeSTS) trust(externalID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.trusted = externalID
+}
+
+func (f *fakeSTS) lastExternalID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.assumedWith
 }
 
 func (f *fakeSTS) set(identityOK, assumeOK bool) {
@@ -163,15 +182,22 @@ func (f *fakeSTS) calls() []string {
 }
 
 func (f *fakeSTS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
 	action := r.Header.Get("X-TC-Action")
+	var req struct{ ExternalId string }
 	if f.provider == "aws" {
-		body, _ := io.ReadAll(r.Body)
 		form, _ := url.ParseQuery(string(body))
-		action = form.Get("Action")
+		action, req.ExternalId = form.Get("Action"), form.Get("ExternalId")
+	} else {
+		_ = json.Unmarshal(body, &req)
 	}
 	f.mu.Lock()
 	f.actions = append(f.actions, action)
 	ok := map[string]bool{"GetCallerIdentity": f.identityOK, "AssumeRole": f.assumeOK}[action]
+	if action == "AssumeRole" {
+		f.assumedWith = req.ExternalId
+		ok = ok && (f.trusted == "" || f.trusted == req.ExternalId)
+	}
 	f.mu.Unlock()
 	if f.provider == "tencent" {
 		switch {
@@ -397,5 +423,68 @@ func TestOneProvidersKeelIdentityFailureLeavesTheOtherSyncing(t *testing.T) {
 	}
 	if at == nil {
 		t.Error("AWS payer last_assumed_at is unset though its role was assumed")
+	}
+}
+
+// TestSyncAfterRotationUsesTheNewExternalID: once a payer's ExternalId is
+// rotated, the very next sync assumes the client's role with the new id and
+// never the old one. Until the client's trust policy names the new id the
+// role refuses Keel; once it does, the sync assumes the role again.
+func TestSyncAfterRotationUsesTheNewExternalID(t *testing.T) {
+	c := newClientWorld(t, "aws")
+	ctx := context.Background()
+	az, err := authz.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old string
+	if err := c.st.InTenant(ctx, c.tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT role_external_id FROM client_payers WHERE cloud_account_id = $1`, c.account).Scan(&old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeSTS{provider: "aws"}
+	fake.set(true, true)
+	fake.trust(old)
+	sts := httptest.NewServer(fake)
+	defer sts.Close()
+	s3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>b</Name><KeyCount>0</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`)
+	}))
+	defer s3.Close()
+	sync := awsClientBillSync(&cost.Ingester{Store: c.st}, webIdentity{}, sts.URL, s3.URL)
+	run := func() {
+		t.Helper()
+		if _, err := sync.Run(ctx); err != nil && !strings.Contains(err.Error(), "holds no bill files") && !strings.Contains(err.Error(), "AccessDenied") {
+			t.Fatalf("sync = %v", err)
+		}
+	}
+	run()
+	if got := fake.lastExternalID(); got != old {
+		t.Fatalf("sync before rotation assumed with %q, want %q", got, old)
+	}
+
+	admin := auth.Principal{Subject: "user:admin@harmonyx.co", Kind: auth.KindHuman, TenantID: c.home, Home: true,
+		Bindings: []auth.Binding{{Role: auth.RolePlatformAdmin, TenantID: c.tenant}}}
+	rotated, err := catalog.New(c.st, az).RotateClientPayerExternalID(ctx, admin, c.tenant, c.account, "operator lost the id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if got := fake.lastExternalID(); got != rotated.RoleExternalID {
+		t.Errorf("sync after rotation assumed with %q, want the new %q", got, rotated.RoleExternalID)
+	}
+	title, detail := c.open(t, c.tenant, c.roleFP)
+	if title == "" || !strings.Contains(detail, rotated.RoleExternalID) || strings.Contains(detail, old) {
+		t.Errorf("trust policy still on the old id: Finding %q %s, want client_role_unusable naming only the new id", title, detail)
+	}
+
+	fake.trust(rotated.RoleExternalID)
+	run()
+	if got := fake.lastExternalID(); got != rotated.RoleExternalID {
+		t.Errorf("sync once the client trusts the new id assumed with %q", got)
+	}
+	if title, _ := c.open(t, c.tenant, c.roleFP); title != "" {
+		t.Errorf("client_role_unusable still open once the trust policy names the new id: %s", title)
 	}
 }

@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"regexp"
 	"slices"
 	"time"
@@ -33,7 +35,7 @@ type ClientPayer struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// RoleExternalID is the ExternalId Keel sends when assuming the payer's
 	// role. Keel generates it; it is returned only when the payer is first
-	// recorded, for the client's trust-policy condition.
+	// recorded or its id is rotated, for the client's trust-policy condition.
 	RoleExternalID string `json:"role_external_id,omitempty"`
 }
 
@@ -56,7 +58,7 @@ var clientPayerKinds = map[string]clientPayerKind{
 
 // SetClientPayer records or updates a client payer. An empty mode or region
 // takes the provider's default. Migration 00050 generates the role's
-// ExternalId, which no update changes.
+// ExternalId, which only RotateClientPayerExternalID changes.
 func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID, accountID string, in ClientPayer, why string) (ClientPayer, error) {
 	var out ClientPayer
 	var inserted bool
@@ -98,4 +100,30 @@ func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID
 			return accountID, err
 		})
 	return out, mapErr(err)
+}
+
+// RotateClientPayerExternalID gives an active client payer a new random
+// ExternalId and returns it this once (#213). The next bill sync assumes the
+// payer's role with it, so the client must put it in the role's trust policy;
+// until then the sync raises client_role_unusable naming the new id. The
+// Activity records the rotation, never either id.
+func (s *Service) RotateClientPayerExternalID(ctx context.Context, p auth.Principal, tenantID, accountID, why string) (ClientPayer, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ClientPayer{}, err
+	}
+	out := ClientPayer{RoleExternalID: hex.EncodeToString(b[:])}
+	err := s.do(ctx, p, write{action: "cloud_account.rotate_external_id", res: authz.Resource{Type: "cloud_account", ID: accountID, TenantID: tenantID},
+		actType: "keel.cloud_account.client_payer_external_id_rotated", operation: "RotateClientPayerExternalID", kind: activity.Update, why: why},
+		func(tx pgx.Tx) (string, error) {
+			err := tx.QueryRow(ctx, `UPDATE client_payers p SET role_external_id = $2, updated_at = now() FROM cloud_accounts a
+				WHERE p.cloud_account_id = $1 AND a.id = p.cloud_account_id AND a.archived_at IS NULL
+				RETURNING p.cloud_account_id::text, p.tenant_id::text, p.bucket, p.prefix, p.region, p.mode, p.kms_key_arn, p.updated_at`, accountID, out.RoleExternalID).
+				Scan(&out.CloudAccountID, &out.TenantID, &out.Bucket, &out.Prefix, &out.Region, &out.Mode, &out.KMSKeyARN, &out.UpdatedAt)
+			return accountID, err
+		})
+	if err != nil {
+		return ClientPayer{}, mapErr(err)
+	}
+	return out, nil
 }

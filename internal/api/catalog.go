@@ -329,6 +329,20 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 		writeJSON(w, http.StatusOK, out)
 		return nil
 	}))
+	mux.Handle("POST /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer/rotate-external-id", authed(a, []string{"tenant", "account"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Why string `json:"why"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		out, err := c.RotateClientPayerExternalID(r.Context(), p, r.PathValue("tenant"), r.PathValue("account"), in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, out)
+		return nil
+	}))
 	mux.Handle("GET /v1/tenants/{tenant}/cloud-accounts", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		out, err := c.ListCloudAccounts(r.Context(), p, r.PathValue("tenant"))
 		if err != nil {
@@ -351,6 +365,19 @@ func mountCatalog(mux Mux, c *catalog.Service, a auth.Authenticator) {
 			return err
 		}
 		out, err := c.ArchiveCloudAccount(r.Context(), p, r.PathValue("tenant"), r.PathValue("account"), in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, out)
+		return nil
+	}))
+
+	mux.Handle("POST /v1/tenants/{tenant}/cloud-accounts/{account}/unarchive", authed(a, []string{"tenant", "account"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct{ Why string }
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		out, err := c.UnarchiveCloudAccount(r.Context(), p, r.PathValue("tenant"), r.PathValue("account"), in.Why)
 		if err != nil {
 			return err
 		}
