@@ -155,3 +155,57 @@ func TestClientPayerChecksArePerProvider(t *testing.T) {
 		t.Error("after up: a Tencent bucket without appid was accepted")
 	}
 }
+
+// TestRoleExternalIDIsWritableOnlyInItsTenant: keel_app may write a payer's
+// role_external_id (rotation, #213), but row security keeps another Tenant
+// from touching it and the 32-hex check still holds. keel_app still cannot
+// move a payer to another account or Tenant.
+func TestRoleExternalIDIsWritableOnlyInItsTenant(t *testing.T) {
+	s := storetest.New(t)
+	ctx := context.Background()
+	su := storetest.Superuser(t, s)
+	tat, err := s.CreateTenant(ctx, "tat", "TAT", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.CreateTenant(ctx, "other", "Other", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var account, ext string
+	if err := su.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, 'tencent', '300000000001', 'payer', 'client', '{"role_arn": "qcs::cam::uin/300000000001:roleName/KeelReadOnly"}') RETURNING id`, tat).Scan(&account); err != nil {
+		t.Fatal(err)
+	}
+	if err := su.QueryRow(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, region) VALUES ($1, $2, 'tencent', 'ap-bangkok') RETURNING role_external_id`, account, tat).Scan(&ext); err != nil {
+		t.Fatal(err)
+	}
+	const fresh = "0123456789abcdef0123456789abcdef"
+	update := func(tenant, sql string, args ...any) (int64, error) {
+		var n int64
+		err := s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, sql, args...)
+			n = tag.RowsAffected()
+			return err
+		})
+		return n, err
+	}
+	if n, err := update(other, `UPDATE client_payers SET role_external_id = $1 WHERE cloud_account_id = $2`, fresh, account); err != nil || n != 0 {
+		t.Errorf("another Tenant's update = %d rows, %v; want 0 rows", n, err)
+	}
+	var pgErr *pgconn.PgError
+	if _, err := update(tat, `UPDATE client_payers SET role_external_id = 'chosen-by-hand' WHERE cloud_account_id = $1`, account); !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Errorf("non-hex role_external_id = %v, want a check violation", err)
+	}
+	for _, col := range []string{"tenant_id", "cloud_account_id", "provider"} {
+		if _, err := update(tat, `UPDATE client_payers SET `+col+` = `+col+` WHERE cloud_account_id = $1`, account); !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Errorf("keel_app update of %s = %v, want insufficient privilege", col, err)
+		}
+	}
+	if n, err := update(tat, `UPDATE client_payers SET role_external_id = $1 WHERE cloud_account_id = $2`, fresh, account); err != nil || n != 1 {
+		t.Fatalf("own Tenant's rotation = %d rows, %v", n, err)
+	}
+	var got string
+	if err := su.QueryRow(ctx, `SELECT role_external_id FROM client_payers WHERE cloud_account_id = $1`, account).Scan(&got); err != nil || got != fresh {
+		t.Errorf("role_external_id = %q, %v; want %q (was %q)", got, err, fresh, ext)
+	}
+}

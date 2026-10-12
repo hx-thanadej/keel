@@ -94,7 +94,8 @@ Keel never does these:
    `per-day`); AWS `region` `us-east-1`, `mode` `export-folder`. The
    **first** PUT returns `role_external_id`, a 32-character hex value Keel
    generates. Later PUTs never return it and no API reads it back, so send it
-   to the client now. Nobody can choose or change it (#213).
+   to the client now. Nobody can choose it. If it is lost before the client
+   saves it, issue a new one (see "Rotate the ExternalId" below).
 4. Give Keel's base role `sts:AssumeRole` on the client's role ARN. This is a
    change in Keel's own account, not the client's.
 
@@ -261,10 +262,62 @@ its hint names `client_payers.mode` and the `PUT .../client-payer` route.
 3. The client deletes the role. Keel never does.
 4. Remove `sts:AssumeRole` on that role from Keel's base role.
 
-**ExternalId rotation is not supported.** Keel cannot issue a new
-`role_external_id`, and an archived payer cannot be registered again because
-`(provider, external_id)` is unique even across archived accounts. Tracked
-in #213.
+## 6. Rotate the ExternalId
+
+Rotate when the id was lost before the client saved it, when it may have
+reached someone it should not have, or when re-onboarding a client whose
+role was deleted.
+
+1. A platform admin bound in the client's Tenant calls
+   `POST /v1/tenants/{tenant}/cloud-accounts/{account}/client-payer/rotate-external-id`
+   with `{"why": "..."}`. The action is `cloud_account.rotate_external_id`,
+   a permission of its own, not part of `cloud_account.update`. The response
+   carries the new `role_external_id` once; no call reads it back. Keel draws
+   it from a CSPRNG (128 bits). It works only on an active payer.
+2. The Tenant's Activity Log records
+   `keel.cloud_account.client_payer_external_id_rotated` with the actor and
+   `why`. It never carries the old or the new id. A refused attempt is
+   recorded as `keel.cloud_account.rotate_external_id.denied`.
+3. Send the new id to the client. They replace the trust policy's
+   `sts:ExternalId` (AWS) or `sts:external_id` (Tencent) value with it.
+
+The old id stops working at once. The next hourly sync assumes the role
+with the new id, so until the client updates the trust policy the role
+refuses Keel and `client_role_unusable` opens in the client's Tenant. Its
+`detail.configure` names the new id, so a Tenant reader can also read it
+there while the Finding is open. It resolves on the next successful
+AssumeRole. Bills wait in the client's bucket until that sync.
+
+Keel keeps no grace period in which both ids work. A rotation is usually
+done because the old id should stop working, and a grace window would keep
+it working. It would also need a second column and a second AssumeRole per
+failed sync. The cost of no grace is a sync gap of at most the time the
+client takes to edit one condition, which the Finding reports. To avoid
+even that gap, ask the client to accept both values in the condition
+(`StringEquals` takes a list) right after you rotate, then drop the old one.
+
+## 7. Re-onboard an archived payer
+
+An archived Cloud Account comes back with
+`POST /v1/tenants/{tenant}/cloud-accounts/{account}/unarchive` and
+`{"why": "..."}` (`cloud_account.unarchive`, platform admin only, recorded
+as `keel.cloud_account.unarchived`). The account keeps its id, its
+ownership, its read-only role, its client payer record and its ExternalId,
+so its cost history and Activities stay attributed to it, and the
+client-owned guards hold as before. Sync visits it again from the next
+run.
+
+1. Unarchive the payer and each member account you archived in section 5.
+2. If the client deleted the role, have them recreate it (section 2). If you
+   no longer hold the ExternalId, rotate it (section 6) and send the new one.
+3. Restore Keel's `sts:AssumeRole` on the role (section 1, step 4).
+4. Verify as in section 4.
+
+Registering the account again with `POST .../cloud-accounts` still fails
+with 409: `(provider, external_id)` is unique across archived rows too.
+That keeps exactly one Cloud Account per provider account, active or not,
+so an account cannot be active twice or move into another Tenant by
+re-registration. Moving a payer to another Tenant is not supported.
 
 ## Not yet supported
 
@@ -277,4 +330,3 @@ in #213.
   steps for them yet.
 - **Findings, Budgets and rightsizing from client organisations** (#182,
   #183 follow-ups). Only bills are read today.
-- **ExternalId rotation and re-onboarding** (#213).
