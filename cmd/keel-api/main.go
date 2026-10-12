@@ -1082,9 +1082,9 @@ func billCredentials(base common.Provider, payer, role, region string) common.Pr
 // its client's read-only role and into its own Tenant (ADR-0018): Tencent
 // payers (#182) and AWS management accounts (#183). Client payers are data:
 // client_payers rows on client-owned Cloud Accounts. A broken AWS identity
-// (unloadable config, or access keys instead of a keyless source) fails the
-// AWS sync's Ready check once per run with payers, as Keel's fault, and
-// never stops the Tencent sync.
+// (unloadable config, access keys instead of a keyless source, or one STS
+// rejects) fails the AWS sync's Ready check once per run with payers, as
+// Keel's fault, and never stops the Tencent sync.
 func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSync {
 	own := func(env string) []string {
 		if v := os.Getenv(env); v != "" {
@@ -1097,11 +1097,7 @@ func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSyn
 	if base, err := awsadapter.Keyless(ctx); err != nil {
 		aws.Ready = func(context.Context) error { return fmt.Errorf("loading Keel's AWS identity: %w", err) }
 	} else {
-		aws.Connect = awsClientPayerConnect(base, "", "")
-		aws.Ready = func(ctx context.Context) error {
-			_, err := base.Retrieve(ctx)
-			return err
-		}
+		aws = awsClientBillSync(in, base, "", "")
 	}
 	return []*cost.ClientBillSync{
 		tencentClientBillSync(in, tencent.Credentials(), ""),
@@ -1109,10 +1105,31 @@ func clientBillSyncs(ctx context.Context, st *store.Store) []*cost.ClientBillSyn
 	}
 }
 
+// awsClientBillSync reads AWS client payers as their read-only roles,
+// assumed from Keel's keyless identity. Ready has STS accept that identity
+// first, so Keel's own rejected credentials are never blamed on a client's
+// role. stsEndpoint and s3Endpoint override the AWS endpoints in tests.
+func awsClientBillSync(in *cost.Ingester, base awsadapter.Identity, stsEndpoint, s3Endpoint string) *cost.ClientBillSync {
+	var own []string
+	if v := os.Getenv("KEEL_AWS_PAYER_ACCOUNT"); v != "" {
+		own = []string{v}
+	}
+	return &cost.ClientBillSync{Ingester: in, Provider: "aws", OwnPayers: own, Connect: awsClientPayerConnect(base, stsEndpoint, s3Endpoint),
+		Ready: func(ctx context.Context) error {
+			if _, err := base.Retrieve(ctx); err != nil {
+				return fmt.Errorf("loading Keel's AWS identity: %w", err)
+			}
+			if err := awsadapter.CallerIdentity(ctx, base, stsEndpoint); err != nil {
+				return fmt.Errorf("STS rejected Keel's AWS identity: %w", err)
+			}
+			return nil
+		}}
+}
+
 // tencentClientBillSync reads Tencent client payers as their read-only roles,
-// assumed from Keel's base identity. Ready loads that identity first, so
-// Keel's own missing credentials are never blamed on a client's role.
-// stsEndpoint overrides the STS host in tests.
+// assumed from Keel's base identity. Ready loads that identity and has STS
+// accept it first, so Keel's own missing or rejected credentials are never
+// blamed on a client's role. stsEndpoint overrides the STS host in tests.
 func tencentClientBillSync(in *cost.Ingester, base common.Provider, stsEndpoint string) *cost.ClientBillSync {
 	var own []string
 	if v := os.Getenv("KEEL_TENCENT_PAYER_UIN"); v != "" {
@@ -1120,8 +1137,12 @@ func tencentClientBillSync(in *cost.Ingester, base common.Provider, stsEndpoint 
 	}
 	return &cost.ClientBillSync{Ingester: in, Provider: "tencent", OwnPayers: own, Connect: clientPayerConnect(base, stsEndpoint),
 		Ready: func(context.Context) error {
-			if _, err := base.GetCredential(); err != nil {
+			cred, err := base.GetCredential()
+			if err != nil {
 				return fmt.Errorf("loading Keel's Tencent identity: %w", err)
+			}
+			if err := tencent.CallerIdentity(cred, envOr("KEEL_TENCENT_REGION", "ap-bangkok"), stsEndpoint); err != nil {
+				return fmt.Errorf("STS rejected Keel's Tencent identity: %w", err)
 			}
 			return nil
 		}}
