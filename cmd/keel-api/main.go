@@ -48,6 +48,8 @@
 //	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
+//	KEEL_GITHUB_WEBHOOK_SECRET  signs the organisation webhook at POST /v1/webhooks/github: secret-scanning
+//	                    alerts, and governance events when KEEL_GITHUB_OWNER is an organisation
 //	KEEL_PDPA_REGIONS   default data region set for Tenants with no PDPA settings (default ap-bangkok,ap-southeast-7)
 //	KEEL_DB_REGION      region of Keel's Postgres; unset, each PDPA residency run reports the database as not checked
 //	KEEL_GCP_BILL_BUCKET_REGION    region of KEEL_GCP_BILL_BUCKET; required with it (PDPA residency)
@@ -381,19 +383,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
 	}
 	if tok := os.Getenv("KEEL_GITHUB_ADMIN_TOKEN"); tok != "" && os.Getenv("KEEL_GITHUB_OWNER") != "" {
-		var checks []string
-		for _, c := range strings.Split(os.Getenv("KEEL_GITHUB_REQUIRED_CHECKS"), ",") {
-			if c = strings.TrimSpace(c); c != "" {
-				checks = append(checks, c)
-			}
-		}
-		policy := githubgov.Default(checks)
-		for _, p := range strings.Split(os.Getenv("KEEL_GITHUB_ALLOWED_ACTIONS"), ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				policy.Actions.AllowedPatterns = append(policy.Actions.AllowedPatterns, p)
-			}
-		}
-		gov := githubgov.Reconciler{Store: st, Policy: policy, Remediate: os.Getenv("KEEL_GITHUB_REMEDIATE") == "1",
+		gov := githubgov.Reconciler{Store: st, Policy: githubPolicy(), Remediate: os.Getenv("KEEL_GITHUB_REMEDIATE") == "1",
 			API: githubgov.GitHub{Client: ghapi.Client{Token: tok}, Login: os.Getenv("KEEL_GITHUB_OWNER"), Org: os.Getenv("KEEL_GITHUB_ORG") == "1"}}
 		go every(ctx, time.Hour, "github governance", func(ctx context.Context) error {
 			rep, err := gov.Run(ctx)
@@ -522,6 +512,9 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	if len(lk.WebhookSecret) > 0 {
 		deps.Webhooks = &api.WebhookDeps{Leaks: lk}
+		if owner := os.Getenv("KEEL_GITHUB_OWNER"); owner != "" && os.Getenv("KEEL_GITHUB_ORG") == "1" {
+			deps.Webhooks.Governance = &githubgov.Receiver{Store: st, Owner: owner, Policy: githubPolicy()}
+		}
 	}
 	excs := exceptions.New(st)
 	engine, stopJobs, err := startFlows(ctx, st, defs, excs, acc, lk, rep)
@@ -637,6 +630,24 @@ func every(ctx context.Context, d time.Duration, name string, fn func(context.Co
 		case <-t.C:
 		}
 	}
+}
+
+// githubPolicy is keel-github@1 with KEEL_GITHUB_REQUIRED_CHECKS and
+// KEEL_GITHUB_ALLOWED_ACTIONS.
+func githubPolicy() githubgov.Policy {
+	var checks []string
+	for _, c := range strings.Split(os.Getenv("KEEL_GITHUB_REQUIRED_CHECKS"), ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			checks = append(checks, c)
+		}
+	}
+	policy := githubgov.Default(checks)
+	for _, p := range strings.Split(os.Getenv("KEEL_GITHUB_ALLOWED_ACTIONS"), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			policy.Actions.AllowedPatterns = append(policy.Actions.AllowedPatterns, p)
+		}
+	}
+	return policy
 }
 
 // templateCreator configures Service Templates (#92) from
