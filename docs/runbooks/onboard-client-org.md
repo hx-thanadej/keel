@@ -4,7 +4,9 @@ Some Tenants own their cloud organisation and pay its bill
 ([ADR-0018](../adr/0018-client-owned-organisations-read-only.md)). Keel is
 read-only there. This runbook is for the Keel operator and the client's cloud
 admin. It covers what main implements today: bill ingestion from a client's
-**Tencent Cloud payer** (#182) and **AWS management account** (#183).
+**Tencent Cloud payer** (#182) and **AWS management account** (#183), and,
+on AWS only, Budget status, security Findings and Rightsizing
+Recommendations read through the same role (#183).
 [connect-billing.md](connect-billing.md) holds the full provider detail; this
 page is the onboarding order and the client's security-review summary.
 
@@ -15,11 +17,15 @@ account:
 
 - FOCUS bill files from the client's Bill Storage bucket (Tencent) or Data
   Exports folder (AWS);
-- on Tencent, the invoice totals (`finance:DescribeBill*`) used to reconcile.
+- on Tencent, the invoice totals (`finance:DescribeBill*`) used to reconcile;
+- on AWS, the management account's Budgets (`DescribeBudgets`), active
+  Security Hub findings (`GetFindings`, which includes AWS Config rule
+  findings when the client has Security Hub's Config integration on) and
+  Cost Optimization Hub recommendations (`ListRecommendations`, which
+  carries Compute Optimizer's rightsizing).
 
-Nothing else on main uses the role yet. Budgets, Security Hub, Config,
-Compute Optimizer, Advisor and Cloud Monitor are not read from client
-organisations.
+Tencent Budgets, Advisor and Cloud Monitor are not read from client
+organisations yet (#182).
 
 Keel never does these:
 
@@ -37,14 +43,20 @@ Keel never does these:
   Tencent also accepts environment and profile keys
   (`tencent.Credentials()`), so a dev Keel may run on keys. The client never
   hands Keel a secret; `read_only_role` stores only a role ARN.
-- **No reads outside the export on AWS.** Every AWS session carries a
-  session policy built from the payer's record. It allows `s3:ListBucket` on
-  the bucket only for the recorded prefix, `s3:GetObject` only under it, and
-  `kms:Decrypt` only on the recorded key via S3 in the bucket's region. AWS
-  grants the intersection, so an over-broad role still reads only the export.
-- **No spend leaves the Tenant.** A client payer's lines are kept only for
+- **No reads beyond the listed ones on AWS.** Every AWS session carries a
+  session policy. The bill session's is built from the payer's record. It
+  allows `s3:ListBucket` on the bucket only for the recorded prefix,
+  `s3:GetObject` only under it, and `kms:Decrypt` only on the recorded key
+  via S3 in the bucket's region. The reads session's allows only
+  `budgets:ViewBudget`, `securityhub:GetFindings` and
+  `cost-optimization-hub:ListRecommendations` (`aws.ReadActions`). AWS grants
+  the intersection, so an over-broad role still does only these reads.
+- **Nothing leaves the Tenant.** A client payer's lines are kept only for
   that Tenant's registered client-owned accounts. Every other line is dropped
-  and counted in `dropped_lines` and `dropped_billed`.
+  and counted in `dropped_lines` and `dropped_billed`. Security findings and
+  recommendations follow the same rule: one on any other account is dropped
+  and counted in the `client reads` log line's `dropped`, never sent to the
+  home Tenant.
 
 ## 1. Keel operator: prepare
 
@@ -133,10 +145,29 @@ Keel never does these:
      "Version": "2012-10-17",
      "Statement": [
        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::<bucket>"},
-       {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::<bucket>/<prefix>*"}
+       {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::<bucket>/<prefix>*"},
+       {"Effect": "Allow", "Action": ["budgets:ViewBudget", "securityhub:GetFindings", "cost-optimization-hub:ListRecommendations"], "Resource": "*"}
      ]
    }
    ```
+
+   The last statement is for the non-bill reads. Each action is the one the
+   Service Authorization Reference names for the call Keel makes, and each
+   is Read or List access: `DescribeBudgets` needs `budgets:ViewBudget`
+   ([AWS Budgets](https://docs.aws.amazon.com/service-authorization/latest/reference/list_budgets.html)),
+   `GetFindings` needs `securityhub:GetFindings`
+   ([Security Hub](https://docs.aws.amazon.com/service-authorization/latest/reference/list_securityhub.html)),
+   and `ListRecommendations` needs `cost-optimization-hub:ListRecommendations`
+   ([Cost Optimization Hub](https://docs.aws.amazon.com/service-authorization/latest/reference/list_cost-optimization-hub.html)). Leave the statement off
+   to have Keel read bills only; each read it cannot make is logged as
+   `ALERT client reads failed` and the other reads carry on.
+
+   Keel reads Security Hub in the payer's recorded `region`, so aggregate
+   findings into that region. It sees what Security Hub in the management
+   account sees: when the Security Hub administrator is a different account,
+   only the management account's own findings arrive. Cost Optimization Hub
+   and Compute Optimizer must be enrolled for the organisation, or the list
+   is empty.
 
 3. **KMS (only if the bucket uses SSE-KMS).** Add this statement, make sure
    the key policy lets the role use the key, and give Keel the key ARN (not
@@ -172,7 +203,8 @@ Keel never does these:
    ```
 
    connect-billing.md also lists `monitor:` and `advisor:` read actions for
-   future reads. Nothing on main uses them, so leave them off until it does.
+   future reads (#182). Nothing on main uses them, so leave them off until it
+   does.
 
 The client then sends Keel the bucket, prefix, region and, on AWS, any KMS
 key ARN. The operator records them with the same `PUT .../client-payer`,
@@ -220,7 +252,24 @@ environment variable; client payers are data.
    with `dropped_lines`, `dropped_billed` and `reconcile_status`, at
    `GET /v1/tenants/{home}/cost-loads`. AWS has no invoice source, so AWS
    client loads are not reconciled against an invoice.
-5. **Keel's own side.** Before trying any client role, each run checks
+5. **AWS reads.** Right after each AWS bill sync, Keel reads every payer that
+   sync visited through a second session of the same role, and logs one
+   `client reads` line per payer with `budgets`, `budgets_over`, `findings`,
+   `recommendations` and `dropped`. In the client's Tenant:
+   - `GET /v1/tenants/{tenant}/findings?kind=cloud_budget` lists one Finding
+     per AWS budget whose spend is over its limit (high) or whose forecast
+     is (medium). A budget under both raises nothing. Keel stores no other
+     budget status.
+   - `GET /v1/tenants/{tenant}/findings?kind=cloud_security` lists one
+     Finding per active Security Hub finding (Critical, High, Medium or Low,
+     workflow New or Notified) on one of the Tenant's client-owned accounts,
+     with that account's Project and Environment.
+   - Rightsizing Recommendations appear with the Tenant's others, source
+     `native:aws_coh`.
+
+   A `cloud_budget` or `cloud_security` Finding resolves on the first read
+   that no longer reports it. A read that fails resolves nothing.
+6. **Keel's own side.** Before trying any client role, each run checks
    Keel's own identity for that provider once: it must load (on AWS, from a
    keyless source) and STS must accept it (`GetCallerIdentity`). If either
    fails, keel-api logs `ALERT client bill sync failed` for the provider
@@ -228,8 +277,8 @@ environment variable; client payers are data.
    Tenant (`GET /v1/tenants/{home}/findings?kind=keel_identity_unusable`).
    Its `detail.reason` says whether the identity did not load or STS
    rejected it (expired, revoked or untrusted credentials). No client role is
-   tried, no client Finding is raised and no client's "Last successful
-   assume" moves. The Finding resolves on the next run whose identity check
+   tried, for bills or for the AWS reads, no client Finding is raised and no
+   client's "Last successful assume" moves. The Finding resolves on the next run whose identity check
    passes, or once the provider has no client payers left. The other
    provider's sync carries on. An AssumeRole refused after STS accepted
    Keel's identity is a `client_role_unusable` in the client's Tenant. That
@@ -348,5 +397,5 @@ re-registration. Moving a payer to another Tenant is not supported.
   applies. Nothing assumes those identities, and `PUT .../client-payer`
   refuses any provider but `tencent` and `aws`. There are no onboarding
   steps for them yet.
-- **Findings, Budgets and rightsizing from client organisations** (#182,
-  #183 follow-ups). Only bills are read today.
+- **Tencent Budgets, Advisor findings and rightsizing from client payers**
+  (#182). Only Tencent bills are read today.

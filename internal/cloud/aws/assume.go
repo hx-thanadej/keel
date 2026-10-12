@@ -138,6 +138,20 @@ func sessionPolicy(partition string, e Export) (string, error) {
 // only through S3 with the export's key) through Keel. stsEndpoint
 // overrides the STS endpoint, for tests.
 func ReadOnlyRole(base Identity, arn, account, externalID string, export Export, stsEndpoint string) (*ClientRole, error) {
+	m, err := clientRoleARN(arn, account, externalID)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := sessionPolicy(m[1], export)
+	if err != nil {
+		return nil, err
+	}
+	return assume(base, arn, externalID, policy, export.Region, stsEndpoint), nil
+}
+
+// clientRoleARN checks that arn is a role in account and that Keel has an
+// ExternalId for it, and returns arn's partition and account.
+func clientRoleARN(arn, account, externalID string) ([]string, error) {
 	m := roleARN.FindStringSubmatch(arn)
 	if m == nil {
 		return nil, fmt.Errorf("read-only role %q is not arn:aws:iam::<account>:role/<name>", arn)
@@ -148,17 +162,17 @@ func ReadOnlyRole(base Identity, arn, account, externalID string, export Export,
 	if externalID == "" {
 		return nil, fmt.Errorf("read-only role %s has no ExternalId", arn)
 	}
-	policy, err := sessionPolicy(m[1], export)
-	if err != nil {
-		return nil, err
-	}
-	p := stscreds.NewAssumeRoleProvider(stsWith(base, export.Region, stsEndpoint), arn, func(o *stscreds.AssumeRoleOptions) {
+	return m, nil
+}
+
+func assume(base Identity, arn, externalID, policy, region, stsEndpoint string) *ClientRole {
+	p := stscreds.NewAssumeRoleProvider(stsWith(base, region, stsEndpoint), arn, func(o *stscreds.AssumeRoleOptions) {
 		o.RoleSessionName = "keel"
 		o.ExternalID = &externalID
 		o.Policy = &policy
 		o.Duration = time.Hour
 	})
-	return &ClientRole{creds: sdk.NewCredentialsCache(p)}, nil
+	return &ClientRole{creds: sdk.NewCredentialsCache(p)}
 }
 
 // Get returns the session's (access key id, secret, session token),

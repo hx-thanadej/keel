@@ -228,9 +228,13 @@ The role needs exactly these actions:
   ([Using SSE-KMS, Permissions](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html)).
   A bucket on the default SSE-S3 needs no KMS permission.
 
-Budgets, Security Hub and Config findings, and Compute Optimizer are not read
-yet (#183 follow-up), so the role grants none of their actions. Add them
-when Keel reads them, not before.
+Keel also reads Budgets, Security Hub findings (which include Config rule
+findings) and Cost Optimization Hub recommendations (which include Compute
+Optimizer's) with the same role, in a session limited to
+`budgets:ViewBudget`, `securityhub:GetFindings` and
+`cost-optimization-hub:ListRecommendations`. Add those three actions to the
+role for them; [onboard-client-org.md](onboard-client-org.md#aws-management-account)
+has the full policy.
 
 1. **The client sets up the export.** In the management account, open
    Billing and Cost Management, Data Exports, Create export

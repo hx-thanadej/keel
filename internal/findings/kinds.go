@@ -40,6 +40,8 @@ var (
 	Breakglass            = kind("breakglass")
 	CIIdentity            = kind("ci_identity")
 	ClientRoleUnusable    = kind("client_role_unusable")
+	CloudBudget           = kind("cloud_budget")
+	CloudSecurity         = kind("cloud_security")
 	CodeScan              = kind("code_scan")
 	CostAnomaly           = kind("cost_anomaly")
 	CRAReport             = kind("cra_report")

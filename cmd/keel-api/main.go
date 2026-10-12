@@ -111,6 +111,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/catalogsync"
 	"github.com/hx-thanadej/keel/internal/ciidentity"
+	"github.com/hx-thanadej/keel/internal/clientreads"
 	"github.com/hx-thanadej/keel/internal/cloud/alibaba"
 	awsadapter "github.com/hx-thanadej/keel/internal/cloud/aws"
 	"github.com/hx-thanadej/keel/internal/cloud/azure"
@@ -436,7 +437,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	go clientBillSyncLoop(ctx, evaluator, clientBillSyncs(ctx, st, ""))
+	go clientBillSyncLoop(ctx, evaluator, clientBillSyncs(ctx, st, ""), clientReads(ctx, st))
 	if err := startAWSBillSync(ctx, st, evaluator); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
@@ -1221,23 +1222,11 @@ func tencentClientBillSync(in *cost.Ingester, base common.Provider, stsEndpoint 
 }
 
 // clientBillSyncLoop runs every client payer sync hourly.
-func clientBillSyncLoop(ctx context.Context, ev budget.Evaluator, syncs []*cost.ClientBillSync) {
+func clientBillSyncLoop(ctx context.Context, ev budget.Evaluator, syncs []*cost.ClientBillSync, reads map[string]*clientreads.Sync) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
-		loaded := false
-		for _, cs := range syncs {
-			runs, err := cs.Run(ctx)
-			if err != nil {
-				slog.Error("ALERT client bill sync failed", "provider", cs.Provider, "err", err)
-			}
-			for _, r := range runs {
-				slog.Info("client bill sync", "provider", cs.Provider, "tenant", r.Payer.TenantID, "payer", r.Payer.PayerID, "no_delivery", r.NoDelivery,
-					"new_files", r.Report.NewFiles, "loads", len(r.Report.Loads), "not_focus", r.Report.NotFOCUS, "blocked", r.Report.Blocked)
-				loaded = loaded || len(r.Report.Loads) > 0
-			}
-		}
-		if loaded {
+		if syncClients(ctx, syncs, reads) {
 			evaluate(ctx, ev)
 		}
 		select {
@@ -1246,6 +1235,70 @@ func clientBillSyncLoop(ctx context.Context, ev budget.Evaluator, syncs []*cost.
 		case <-t.C:
 		}
 	}
+}
+
+// syncClients runs each provider's client bill sync, then its client reads
+// for the payers that sync visited. A sync stopped by Keel's own identity
+// visits no payer, so no client role is tried for reads either. It reports
+// whether any bill loaded.
+func syncClients(ctx context.Context, syncs []*cost.ClientBillSync, reads map[string]*clientreads.Sync) bool {
+	loaded := false
+	for _, cs := range syncs {
+		runs, err := cs.Run(ctx)
+		if err != nil {
+			slog.Error("ALERT client bill sync failed", "provider", cs.Provider, "err", err)
+		}
+		var payers []cost.ClientPayer
+		for _, r := range runs {
+			slog.Info("client bill sync", "provider", cs.Provider, "tenant", r.Payer.TenantID, "payer", r.Payer.PayerID, "no_delivery", r.NoDelivery,
+				"new_files", r.Report.NewFiles, "loads", len(r.Report.Loads), "not_focus", r.Report.NotFOCUS, "blocked", r.Report.Blocked)
+			loaded = loaded || len(r.Report.Loads) > 0
+			payers = append(payers, r.Payer)
+		}
+		cr := reads[cs.Provider]
+		if cr == nil || len(payers) == 0 {
+			continue
+		}
+		reports, err := cr.Run(ctx, payers)
+		if err != nil {
+			slog.Error("ALERT client reads failed", "provider", cs.Provider, "err", err)
+		}
+		for _, r := range reports {
+			slog.Info("client reads", "provider", cs.Provider, "tenant", r.Payer.TenantID, "payer", r.Payer.PayerID, "budgets", r.Budgets,
+				"budgets_over", r.BudgetsOver, "findings", r.Findings, "recommendations", r.Recommendations, "dropped", r.Dropped)
+		}
+	}
+	return loaded
+}
+
+// clientReads reads client payers' Budgets, security Findings and
+// Rightsizing Recommendations through their read-only roles, per provider:
+// AWS management accounts (#183). Without a keyless AWS identity there is
+// nothing to read with; the AWS bill sync already reports that.
+func clientReads(ctx context.Context, st *store.Store) map[string]*clientreads.Sync {
+	base, err := awsadapter.Keyless(ctx)
+	if err != nil {
+		return nil
+	}
+	return map[string]*clientreads.Sync{"aws": awsClientReads(st, base, "", "")}
+}
+
+// awsClientReads reads each AWS client management account as its
+// read-only role, assumed from Keel's keyless identity with the payer's
+// ExternalId and a session limited to awsadapter.ReadActions. It assumes the
+// role up front, so a role that refuses Keel fails before any read.
+// stsEndpoint and endpoint override the AWS endpoints in tests.
+func awsClientReads(st *store.Store, base awsadapter.Identity, stsEndpoint, endpoint string) *clientreads.Sync {
+	return &clientreads.Sync{Store: st, Provider: "aws", Connect: func(p cost.ClientPayer) (clientreads.Reader, error) {
+		role, err := awsadapter.ReadsRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, stsEndpoint)
+		if err != nil {
+			return nil, &cost.RoleError{Err: err}
+		}
+		if _, _, _, err := role.Get(); err != nil {
+			return nil, &cost.RoleError{Err: err}
+		}
+		return awsadapter.NewClientReads(role, p.PayerID, p.Region, endpoint), nil
+	}}
 }
 
 // clientPayerConnect gives read-only access to a client payer's bills and
