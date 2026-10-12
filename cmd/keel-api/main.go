@@ -1273,14 +1273,57 @@ func syncClients(ctx context.Context, syncs []*cost.ClientBillSync, reads map[st
 
 // clientReads reads client payers' Budgets, security Findings and
 // Rightsizing Recommendations through their read-only roles, per provider:
-// AWS management accounts (#183). Without a keyless AWS identity there is
-// nothing to read with; the AWS bill sync already reports that.
+// Tencent payers (#182) and AWS management accounts (#183). Without a
+// keyless AWS identity there is nothing to read AWS with; the AWS bill sync
+// already reports that.
 func clientReads(ctx context.Context, st *store.Store) map[string]*clientreads.Sync {
-	base, err := awsadapter.Keyless(ctx)
-	if err != nil {
-		return nil
+	reads := map[string]*clientreads.Sync{"tencent": tencentClientReads(st, tencent.Credentials(), "", "")}
+	if base, err := awsadapter.Keyless(ctx); err == nil {
+		reads["aws"] = awsClientReads(st, base, "", "")
 	}
-	return map[string]*clientreads.Sync{"aws": awsClientReads(st, base, "", "")}
+	return reads
+}
+
+// tencentClientReads reads each Tencent client payer as its read-only
+// role, assumed from Keel's base identity with the payer's ExternalId and a
+// session limited to tencent.ReadActions: Budgets, Smart Advisor risks, and
+// Cloud Monitor and CVM types for rightsizing the payer's own instances.
+// Only the CVM catalogue, Tencent's public price list, is read as Keel. It
+// assumes the role up front, so a role that refuses Keel fails before any
+// read. stsEndpoint and endpoint override the Tencent hosts in tests.
+func tencentClientReads(st *store.Store, base common.Provider, stsEndpoint, endpoint string) *clientreads.Sync {
+	return &clientreads.Sync{Store: st, Provider: "tencent", Connect: func(p cost.ClientPayer) (clientreads.Reader, error) {
+		role, err := tencent.ReadsRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Region)
+		if err != nil {
+			return nil, &cost.RoleError{Err: err}
+		}
+		role.Endpoint = stsEndpoint
+		if _, err := role.GetCredential(); err != nil {
+			return nil, &cost.RoleError{Err: err}
+		}
+		r, err := tencent.NewClientReads(role, p.PayerID, p.Region, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		catalog, err := tencent.NewCVM(p.Region, base, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		return tencentReader{r, clientreads.CVMRightsizing{Store: st, Tenant: p.TenantID, Payer: p.PayerID, Region: p.Region,
+			Monitor: r.Monitor(), Inventory: r.Inventory(), Catalog: tencent.Catalog{API: catalog}}}, nil
+	}}
+}
+
+// tencentReader is a Tencent payer's clientreads.Reader: Budgets and
+// Smart Advisor findings from the payer, Recommendations from Keel's VM
+// engine over what the payer's Cloud Monitor reports.
+type tencentReader struct {
+	*tencent.ClientReads
+	cvm clientreads.CVMRightsizing
+}
+
+func (r tencentReader) Recommendations(ctx context.Context) ([]rightsize.Recommendation, error) {
+	return r.cvm.Recommendations(ctx)
 }
 
 // awsClientReads reads each AWS client management account as its
@@ -1661,14 +1704,14 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 	}
 	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
 	base := tencent.Credentials()
-	catAPI, err := tencent.NewCVM(region, base)
+	catAPI, err := tencent.NewCVM(region, base, "")
 	if err != nil {
 		slog.Error("cvm catalogue", "err", err)
 		return
 	}
 	vm := rightsize.VMEngine{Service: rightsize.Service{Store: st}, Catalog: tencent.Catalog{API: catAPI}, Region: region,
 		Inventory: func(account string) rightsize.Inventory {
-			api, err := tencent.NewCVM(region, &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region})
+			api, err := tencent.NewCVM(region, &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region}, "")
 			if err != nil {
 				return failingInventory{err}
 			}

@@ -428,6 +428,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/tchap/go-patricia/v2 v2.3.3 h1:xfNEsODumaEcCcY3gI0hYPZ/PcpVv5ju6RMAhgwZDDc=
 github.com/tchap/go-patricia/v2 v2.3.3/go.mod h1:VZRHKAb53DLaG+nA9EaYYiaEx6YztwDlLElMsnSHD4k=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/advisor v1.3.37 h1:vywXw9k0AkKYKvsNSvcrhrsphh5zntrNXtIrjmxUosw=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/advisor v1.3.37/go.mod h1:aUkwCIWA45p5MBiJXVp9xb9lxYAi8UFYkwgBFS45QSo=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182 h1:N3aUDk/2Vk46JXHRRujkwgTpYrj/gKAhkLquezRcAk4=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing v1.3.182/go.mod h1:rwlA+clAU4TRk++lBnC1OMuQpa1da5v3RGBTIltpNQ4=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cam v1.3.186 h1:tTKvyBO81A3eQ9BBgP3mAbJkGZyLk3hm4sLOxPLSjRQ=
@@ -439,6 +441,7 @@ github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb v1.3.187/go.mod h1:
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cloudaudit v1.3.40 h1:bhPBpfz0w3mdVyEolvXrtELUf+gE00O0WnAYIHZq70s=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cloudaudit v1.3.40/go.mod h1:taTki0q8SHBIUFhjtnDA5UkiVic/WaPQzTqoXeGH3Ns=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.1.11/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.37/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.40/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.175/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
 github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.179/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=

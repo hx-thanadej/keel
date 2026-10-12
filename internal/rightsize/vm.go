@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"sort"
 	"time"
 
@@ -38,6 +39,10 @@ type VMEngine struct {
 	Inventory func(account string) Inventory
 	Region    string
 	Now       func() time.Time
+	// Client evaluates only instances in client-owned accounts (ADR-0018),
+	// read through the client's role. Otherwise those are skipped: Keel's
+	// own roles do not reach a client's organisation.
+	Client bool
 }
 
 const (
@@ -79,14 +84,36 @@ func (e VMEngine) Run(ctx context.Context) (VMResult, error) {
 		return res, err
 	}
 	for _, t := range tenants {
-		if err := e.tenant(ctx, t, types, &res); err != nil {
+		recs, err := e.recommend(ctx, t, types, &res)
+		if err != nil {
 			return res, fmt.Errorf("tenant %s: %w", t, err)
+		}
+		for _, r := range recs {
+			_, changed, err := e.Service.Upsert(ctx, t, r)
+			if err != nil {
+				return res, fmt.Errorf("tenant %s: %w", t, err)
+			}
+			if changed {
+				res.Raised++
+			} else {
+				res.Kept++
+			}
 		}
 	}
 	return res, nil
 }
 
-func (e VMEngine) tenant(ctx context.Context, tenant string, types []InstanceType, res *VMResult) error {
+// Recommend evaluates one Tenant's instances and returns its
+// Recommendations without storing them.
+func (e VMEngine) Recommend(ctx context.Context, tenant string) ([]Recommendation, error) {
+	types, err := e.Catalog.Types(ctx, e.Region)
+	if err != nil {
+		return nil, fmt.Errorf("instance catalogue: %w", err)
+	}
+	return e.recommend(ctx, tenant, types, &VMResult{Skipped: map[string]int{}})
+}
+
+func (e VMEngine) recommend(ctx context.Context, tenant string, types []InstanceType, res *VMResult) ([]Recommendation, error) {
 	now := time.Now
 	if e.Now != nil {
 		now = e.Now
@@ -162,7 +189,26 @@ func (e VMEngine) tenant(ctx context.Context, tenant string, types []InstanceTyp
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	accounts := []string{}
+	for _, u := range uses {
+		accounts = append(accounts, u.account)
+	}
+	rows, err := e.Service.Store.AppPool().Query(ctx, `SELECT external_id FROM account_owners('tencent', $1) WHERE ownership = 'client'`, accounts)
+	if err != nil {
+		return nil, err
+	}
+	clients, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	for id, u := range uses {
+		if slices.Contains(clients, u.account) != e.Client {
+			res.Skipped["other_ownership"]++
+			delete(uses, id)
+		}
 	}
 
 	byAcct := map[string][]string{}
@@ -176,7 +222,7 @@ func (e VMEngine) tenant(ctx context.Context, tenant string, types []InstanceTyp
 		}
 		got, err := e.Inventory(acct).InstanceTypes(ctx, e.Region, ids)
 		if err != nil {
-			return fmt.Errorf("inventory %s: %w", acct, err)
+			return nil, fmt.Errorf("inventory %s: %w", acct, err)
 		}
 		for k, v := range got {
 			current[k] = v
@@ -187,6 +233,7 @@ func (e VMEngine) tenant(ctx context.Context, tenant string, types []InstanceTyp
 		byName[t.Name] = t
 	}
 
+	var recs []Recommendation
 	for id, u := range uses {
 		days := len(u.days)
 		cur, ok := byName[current[id]]
@@ -245,15 +292,7 @@ func (e VMEngine) tenant(ctx context.Context, tenant string, types []InstanceTyp
 			Evidence:    evidence, MonthlySavings: new(big.Rat).SetFloat64(saving).FloatString(2), Currency: currency, SavingsBasis: "effective",
 			Confidence: math.Round(math.Min(1, float64(days)/span)*100) / 100,
 			Risk:       map[string]any{"performance": "medium", "restart": true, "reversible": true, "migration_effort": map[bool]string{true: "medium", false: "low"}[action == "change_family"]}}
-		_, changed, err := e.Service.Upsert(ctx, tenant, r)
-		if err != nil {
-			return err
-		}
-		if changed {
-			res.Raised++
-		} else {
-			res.Kept++
-		}
+		recs = append(recs, r)
 	}
-	return nil
+	return recs, nil
 }
