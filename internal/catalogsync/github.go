@@ -11,13 +11,12 @@ import (
 )
 
 // GitHub reads repositories of one user or organisation over the REST API.
-// Token needs read-only "contents" and "metadata" (a GitHub App installation
-// token or a fine-grained token).
+// Client authenticates with read-only contents and metadata (a GitHub App
+// installation token source's client).
 type GitHub struct {
 	BaseURL string // default https://api.github.com
 	Owner   string
 	Org     bool // Owner is an organisation (else a user)
-	Token   string
 	Client  *http.Client
 }
 
@@ -32,9 +31,6 @@ func (g *GitHub) get(ctx context.Context, path string, v any) (int, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if g.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+g.Token)
-	}
 	c := g.Client
 	if c == nil {
 		c = http.DefaultClient

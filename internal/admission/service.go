@@ -137,7 +137,7 @@ func (s Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
 
 func (s Service) deliver(ctx context.Context, t target, doc []byte, hash string) (string, error) {
 	if s.Git == nil {
-		return "", errors.New("admission delivery needs KEEL_GITHUB_WRITE_TOKEN")
+		return "", errors.New("admission delivery needs the GitHub App (KEEL_GITHUB_APP_ID)")
 	}
 	tmpl := s.PathTemplate
 	if tmpl == "" {

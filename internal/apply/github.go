@@ -14,11 +14,11 @@ import (
 )
 
 // GitHub is the write side Keel needs: read a tree and files, create a
-// branch, commit a file, open and inspect pull requests. The token needs
-// contents:write and pull_requests:write on the Service repositories.
+// branch, commit a file, open and inspect pull requests. Client
+// authenticates, with contents:write and pull_requests:write on the Service
+// repositories (a GitHub App installation token source's client).
 type GitHub struct {
 	BaseURL string // default https://api.github.com
-	Token   string
 	Client  *http.Client
 }
 
@@ -38,9 +38,6 @@ func (g GitHub) do(ctx context.Context, method, path string, in, out any) error 
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if g.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+g.Token)
-	}
 	c := g.Client
 	if c == nil {
 		c = http.DefaultClient

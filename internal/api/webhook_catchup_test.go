@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -46,6 +47,7 @@ type fakeHookAPI struct {
 	attempts []fakeAttempt
 	payloads map[string][2]string // guid -> event, body
 	resent   []string             // guids redelivered, in order
+	minted   []map[string]string  // permissions of each installation token
 }
 
 func (f *fakeHookAPI) deliver(guid, event, body string, at time.Time, reachKeel bool, redelivery bool) {
@@ -77,8 +79,15 @@ func (f *fakeHookAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/9/access_tokens" {
+		var body struct {
+			Permissions map[string]string `json:"permissions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.minted = append(f.minted, body.Permissions)
+		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
-		_, _ = fmt.Fprintf(w, `{"token":%q}`, catchupToken)
+		_, _ = fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, catchupToken, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 		return
 	}
 	if r.Header.Get("Authorization") != "Bearer "+catchupToken {
@@ -171,9 +180,7 @@ func TestWebhookCatchupRedeliversMissedDeliveriesOnce(t *testing.T) {
 	}
 	app := ghapi.App{BaseURL: github.URL, ID: "123", Installation: 9, Owner: "acme", Key: key}
 	job := githubgov.Catchup{Store: s, Org: "acme", HookID: 42, BaseURL: github.URL, Window: 24 * time.Hour,
-		Token: func(ctx context.Context) (string, error) {
-			return app.Token(ctx, map[string]string{"organization_hooks": "write"})
-		}}
+		Token: app.Source(ghapi.Permissions{"organization_hooks": "write"}).Token}
 
 	res, err := job.Run(ctx)
 	if err != nil {
@@ -207,6 +214,9 @@ func TestWebhookCatchupRedeliversMissedDeliveriesOnce(t *testing.T) {
 	}
 	if res.Redelivered != 0 || len(gh.resent) != 3 {
 		t.Fatalf("second run redelivered %d (total %v), want none", res.Redelivered, gh.resent)
+	}
+	if len(gh.minted) != 1 || !maps.Equal(gh.minted[0], map[string]string{"organization_hooks": "write"}) {
+		t.Fatalf("installation tokens minted %v, want one reused across runs with only organization_hooks:write", gh.minted)
 	}
 
 	broken := job

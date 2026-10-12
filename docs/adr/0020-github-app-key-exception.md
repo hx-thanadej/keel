@@ -18,9 +18,10 @@ Actions. A GitHub OIDC token is issued only to a workflow run, and GitHub
 accepts no federated identity from another issuer. Keel runs as a server, so
 anything it does to GitHub needs a secret it holds.
 
-Keel already holds three long-lived personal access tokens:
+Keel held three long-lived personal access tokens:
 `KEEL_GITHUB_ADMIN_TOKEN`, `KEEL_GITHUB_WRITE_TOKEN` and `KEEL_GITHUB_TOKEN`.
-Each is tied to a person and carries every scope its owner chose.
+Each was tied to a person and carried every scope its owner chose. Since
+#231 Keel reads none of them; every GitHub caller uses the App.
 
 The webhook catch-up job (#226) needs to write to GitHub, to ask it to
 redeliver missed organisation webhook deliveries. It authenticates as a
@@ -33,8 +34,9 @@ The GitHub App private key is a documented exception to ADR-0007.
 
 - The key only signs a JWT that lives under ten minutes. Keel trades that
   JWT for an installation token that lives one hour and asks only for the
-  permission the caller needs. The catch-up job asks only for
-  `organization_hooks: write`.
+  permissions the caller needs. Each caller has its own token source, which
+  reuses its token until five minutes before it expires. The table under
+  Consequences lists every caller's permissions.
 - Before it mints a token, Keel checks that the installation is on
   `KEEL_GITHUB_OWNER`. It refuses otherwise, so a wrong installation id
   never yields a token for another organisation.
@@ -69,7 +71,31 @@ The GitHub App private key is a documented exception to ADR-0007.
   narrowest permission each mint asks for, on one organisation.
 - Rotation is an operator task on a schedule. Nothing in Keel enforces the
   90 days.
-- Keel still holds the three personal access tokens, which are the larger
-  risk. Moving them to App installation tokens is tracked in
-  [#231](https://github.com/hx-thanadej/keel/issues/231). Until then the
-  exception sits beside them, not in place of them.
+- No personal access token remains in Keel's code or configuration
+  ([#231](https://github.com/hx-thanadej/keel/issues/231)). Keel refuses to
+  start when a GitHub integration is configured (`KEEL_GITHUB_OWNER`,
+  `KEEL_GITHUB_WEBHOOK_SECRET` or `KEEL_TEMPLATES`) without the App. The
+  three tokens are revoked by an operator after the App change deploys
+  ([delivery.md](../runbooks/delivery.md#moving-from-personal-access-tokens)).
+- The App holds the union of the permissions below, so the key now guards
+  organisation administration and repository writes, not one webhook
+  permission. That makes the KMS-signing option above worth revisiting.
+- Each caller's installation token asks for only its row. The levels are
+  GitHub's for each endpoint, from
+  [Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps).
+  Every caller reads repositories chosen at run time (Services' repositories,
+  new template repositories, every repository for sync and governance), so
+  no token is narrowed to a fixed repository list.
+
+| Caller | Replaced | Endpoints | Installation token permissions |
+| --- | --- | --- | --- |
+| Rightsizing pull requests (`apply`) | `KEEL_GITHUB_WRITE_TOKEN` | `GET /repos/{o}/{r}` (metadata read); `GET .../git/trees/{sha}`, `GET .../contents/{path}`, `GET .../git/ref/{ref}` (contents read); `POST .../git/refs`, `PUT .../contents/{path}` (contents write); `POST .../pulls` (pull requests write); `GET .../pulls/{n}` (pull requests read) | `contents: write`, `pull_requests: write`, `metadata: read` |
+| Admission-policy pull requests | `KEEL_GITHUB_WRITE_TOKEN` | same as rightsizing | same as rightsizing |
+| Promotion pull requests and PR status sync | `KEEL_GITHUB_WRITE_TOKEN` | same as rightsizing | same as rightsizing |
+| GitHub governance reconcile (`githubgov`) | `KEEL_GITHUB_ADMIN_TOKEN` | `GET /orgs/{org}` plan (organization plan read); `GET`/`PATCH /orgs/{org}/properties/schema` (custom properties read / admin); `GET /orgs/{org}/properties/values` (custom properties read); `GET`/`POST`/`PUT /orgs/{org}/rulesets[/{id}]` (organization administration write, also for GET); `GET`/`PUT /orgs/{org}/actions/oidc/customization/sub` and `/orgs/{org}/actions/permissions[/selected-actions\|/workflow\|/fork-pr-contributor-approval]` (organization administration read / write); `GET /orgs/{org}/repos`, `GET /repos/{o}/{r}/rulesets[/{id}]` (metadata read); `POST`/`PUT /repos/{o}/{r}/rulesets[/{id}]`, `PATCH /repos/{o}/{r}` (administration write) | organisation: `organization_administration: write`, `organization_custom_properties: read`, `organization_plan: read`, `metadata: read`. With `KEEL_GITHUB_REMEDIATE=1` also `administration: write` and `organization_custom_properties: admin`. A user owner gets `metadata: read`, plus `administration: write` when remediating |
+| GitHub alert sync (`ghalerts`) | `KEEL_GITHUB_ADMIN_TOKEN` | `GET /repos/{o}/{r}/code-scanning/alerts` (code scanning alerts read); `GET .../dependabot/alerts` (Dependabot alerts read); `GET .../secret-scanning/alerts` (secret scanning alerts read) | `security_events: read`, `vulnerability_alerts: read`, `secret_scanning_alerts: read` |
+| Secret-scanning webhook (`leaks`) | `KEEL_GITHUB_ADMIN_TOKEN` | `GET /repos/{o}/{r}/secret-scanning/alerts/{n}` | `secret_scanning_alerts: read` |
+| Service Templates (`templates`) | `KEEL_GITHUB_ADMIN_TOKEN` | `GET /repos/{o}/{r}` (metadata read); `GET .../git/ref/{ref}` (contents read); `POST /repos/{t}/{r}/generate` (administration write, contents read); `GET`/`PUT .../contents/{path}` (contents read / write); `PATCH /orgs/{org}/properties/values` (custom properties write); `PATCH /repos/{o}/{r}` (administration write); `PUT /orgs/{org}/teams/{team}/repos/{o}/{r}` (members read, administration write) | `administration: write`, `contents: write`, `metadata: read`, `organization_custom_properties: write`, `members: read` |
+| Decision index (`decisions`) | `KEEL_GITHUB_TOKEN` | `GET /repos/{o}/{r}/contents/{path}` | `contents: read` |
+| Catalog sync (`catalogsync`) | `KEEL_GITHUB_TOKEN` | `GET /orgs/{org}/repos` or `/users/{u}/repos` (metadata read); `GET /repos/{o}/{r}/contents/{path}` (contents read) | `contents: read`, `metadata: read` |
+| Webhook catch-up (`githubgov.Catchup`) | none (App since #226) | `GET /orgs/{org}/hooks/{id}/deliveries` (webhooks read); `POST .../deliveries/{id}/attempts` (webhooks write) | `organization_hooks: write` |

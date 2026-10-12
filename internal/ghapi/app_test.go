@@ -80,7 +80,7 @@ func TestAppTokenSignsJWTAndNarrowsPermissions(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		app := ghapi.App{BaseURL: srv.URL, ID: "123", Installation: 77, Owner: "acme", Key: parsed, Now: func() time.Time { return now }}
-		tok, err := app.Token(t.Context(), map[string]string{"organization_hooks": "write"})
+		tok, err := app.Source(ghapi.Permissions{"organization_hooks": "write"}).Token(t.Context())
 		if err != nil || tok != "ghs_installation" {
 			t.Fatalf("%s: token %q, %v", name, tok, err)
 		}
@@ -120,7 +120,7 @@ func TestAppRefusesAnInstallationOnAnotherAccount(t *testing.T) {
 		{BaseURL: srv.URL, ID: "123", Installation: 77, Key: key},
 		{BaseURL: srv.URL, ID: "123", Installation: 78, Owner: "acme", Key: key},
 	} {
-		tok, err := app.Token(t.Context(), map[string]string{"organization_hooks": "write"})
+		tok, err := app.Source(ghapi.Permissions{"organization_hooks": "write"}).Token(t.Context())
 		if err == nil || tok != "" {
 			t.Errorf("installation %d owner %q: token %q, %v; want refused", app.Installation, app.Owner, tok, err)
 		}

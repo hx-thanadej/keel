@@ -96,7 +96,7 @@ func mountRightsize(mux Mux, a auth.Authenticator, d RightsizeDeps) {
 			return err
 		}
 		if d.Applier == nil {
-			return errors.Join(catalog.ErrInvalid, errors.New("pull requests are not configured (KEEL_GITHUB_WRITE_TOKEN)"))
+			return errors.Join(catalog.ErrInvalid, errors.New("pull requests are not configured (the GitHub App, KEEL_GITHUB_APP_ID)"))
 		}
 		url, err := d.Applier.Apply(r.Context(), tenant, r.PathValue("recommendation"), actor(p))
 		if err != nil {

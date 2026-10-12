@@ -2,9 +2,11 @@
 
 ## GitHub organisation
 
-- `KEEL_GITHUB_ADMIN_TOKEN` (org administration + repository administration)
-  lets the daily reconcile enforce `keel-github@1`: custom properties
-  (`keel-tenant`, `keel-project`, `keel-tier`), a default-branch ruleset (1
+Every GitHub integration authenticates as the Keel GitHub App
+([below](#the-keel-github-app)). Keel holds no personal access token.
+
+- With `KEEL_GITHUB_OWNER` set, the hourly reconcile enforces
+  `keel-github@1`: custom properties (`keel-tenant`, `keel-project`, `keel-tier`), a default-branch ruleset (1
   review, CODEOWNERS, `KEEL_GITHUB_REQUIRED_CHECKS`) and a stricter one for
   `keel-tier=prod` (2 reviews, last-push approval), the OIDC subject-claim
   template, and the Actions policy (SHA pinning, read-only `GITHUB_TOKEN`,
@@ -13,6 +15,92 @@
   `KEEL_GITHUB_ORG=1` when `KEEL_GITHUB_OWNER` is an organisation.
 - Some of this needs a paid plan (#8): on GitHub Free, rulesets on private
   repositories are unavailable and are reported, not enforced.
+
+### The Keel GitHub App
+
+Keel signs a short JWT with the App's private key and trades it for one-hour
+installation tokens (ADR-0020). Each caller mints its own token, asking only
+for that caller's permissions, and reuses it until five minutes before it
+expires. Before each mint Keel checks that the installation is on
+`KEEL_GITHUB_OWNER`; when it is on another account the mint fails with
+`installation <id> is on "<login>", not "<owner>"`. Each GitHub call times
+out after 30 seconds.
+
+Grant the App exactly these permissions. A token can never carry more than
+the App holds, and each caller asks for less (the per-caller table is in
+[ADR-0020](../adr/0020-github-app-key-exception.md#consequences)).
+
+| Permission | Access | Used by |
+| --- | --- | --- |
+| Repository: Administration | Read and write | governance remediation, Service Templates |
+| Repository: Contents | Read and write | rightsizing, admission-policy and promotion pull requests, Service Templates, decision index, catalog sync |
+| Repository: Metadata | Read | everything (GitHub grants it to every App) |
+| Repository: Pull requests | Read and write | rightsizing, admission-policy and promotion pull requests |
+| Repository: Code scanning alerts | Read | alert sync |
+| Repository: Dependabot alerts | Read | alert sync |
+| Repository: Secret scanning alerts | Read | alert sync, secret-scanning webhook |
+| Organization: Administration | Read and write | governance (GitHub lists organisation rulesets only to write) |
+| Organization: Custom properties | Admin | governance (schema, admin with `KEEL_GITHUB_REMEDIATE=1`), Service Templates (values) |
+| Organization: Members | Read | Service Templates (team access) |
+| Organization: Plan | Read | governance |
+| Organization: Webhooks | Read and write | webhook catch-up |
+
+Set it up as an organisation owner:
+
+1. Create a GitHub App owned by the organisation (**Settings > Developer
+   settings > GitHub Apps**). Turn its own webhook off. Grant the
+   permissions in the table and nothing else.
+2. Generate a private key and install the App on the organisation only,
+   with access to **All repositories**. Templates create repositories, and
+   sync and governance read every repository, so a fixed list goes stale.
+3. Set `KEEL_GITHUB_APP_ID` to the App ID (or Client ID), and
+   `KEEL_GITHUB_APP_INSTALLATION_ID` to the number at the end of the
+   installation's settings URL. Store the PEM key in
+   `KEEL_GITHUB_APP_PRIVATE_KEY` with Keel's other secrets.
+
+Keel refuses to start when `KEEL_GITHUB_OWNER`, `KEEL_GITHUB_WEBHOOK_SECRET`
+or `KEEL_TEMPLATES` is set and any of the three App settings is missing or
+malformed, and when the App is set without `KEEL_GITHUB_OWNER`. The error
+names the missing settings.
+
+#### Rotating the GitHub App key
+
+Rotate the key every 90 days, and at once when it may have been exposed
+(ADR-0020). GitHub lets the App hold more than one key, so there is no
+downtime.
+
+1. In the App's settings, under **Private keys**, choose **Generate a
+   private key**. The old key keeps working.
+2. Replace `KEEL_GITHUB_APP_PRIVATE_KEY` in the secret store with the new
+   PEM and redeploy Keel.
+3. Confirm the next `github governance` or `github webhook catch-up` log
+   line has no error. Both run once at start.
+4. Delete the old key in the App's settings. GitHub lists each key with
+   the date it was added. Keep the newest.
+5. Delete the downloaded PEM file.
+
+On suspected exposure, delete the exposed key in step 4 even before step 3
+succeeds. Every GitHub integration fails until the new key is deployed.
+
+### Moving from personal access tokens
+
+Keel before #231 read `KEEL_GITHUB_ADMIN_TOKEN`, `KEEL_GITHUB_WRITE_TOKEN`
+and `KEEL_GITHUB_TOKEN`. It now ignores them. In this order:
+
+1. Add the permissions in the table above to the existing Keel App, exactly
+   those. GitHub then asks the organisation to accept the new permissions on
+   the installation (**Settings > GitHub Apps > Keel > Review request**). An
+   organisation owner accepts. Until then mints that ask for a new
+   permission fail.
+2. Deploy the Keel version that carries #231 with the App settings in place.
+3. Confirm, in the first hour, a log line with no error from each job you
+   run: `github governance`, `github alerts`, `decision records`,
+   `github webhook catch-up`, and the catalog sync. Open one rightsizing or
+   promotion pull request if you use them.
+4. Revoke the three personal access tokens in their owners' GitHub settings
+   (**Settings > Developer settings > Personal access tokens**), then delete
+   `KEEL_GITHUB_ADMIN_TOKEN`, `KEEL_GITHUB_WRITE_TOKEN` and
+   `KEEL_GITHUB_TOKEN` from the secret store and the deployment environment.
 
 ### Governance webhook (Free and Team)
 
@@ -87,55 +175,17 @@ fresh signature. It becomes one Activity, and a Finding if it weakens a
 protection. Keel resends one delivery per second and stops the run on `403`
 or `429`. Each run logs `github webhook catch-up` with the counts.
 
-The job authenticates as a GitHub App installation. It never uses a personal
-access token. The App private key is a long-lived secret, accepted as an
-exception to ADR-0007 in
-[ADR-0020](../adr/0020-github-app-key-exception.md). Each run checks that the
-installation is on `KEEL_GITHUB_OWNER`, then mints a one-hour installation
-token limited to `organization_hooks: write`. Each GitHub call times out after
-30 seconds. With it Keel lists the deliveries and POSTs to
-`/orgs/{org}/hooks/{hook_id}/deliveries/{id}/attempts` for Keel's own hook.
-It writes nothing else to GitHub. Set it up as an organisation owner:
-
-1. Create a GitHub App owned by the organisation (**Settings > Developer
-   settings > GitHub Apps**). Turn its own webhook off. Under
-   **Organization permissions** set **Webhooks** to **Read and write** and
-   grant nothing else.
-2. Generate a private key and install the App on the organisation only.
-3. Find the hook id. It is the number at the end of the webhook's URL under
-   **Settings > Webhooks**, or `gh api /orgs/<org>/hooks --jq '.[] |
-   [.id, .config.url]'`.
-4. Set `KEEL_GITHUB_WEBHOOK_HOOK_ID` to the hook id, `KEEL_GITHUB_APP_ID`
-   to the App ID (or Client ID), and `KEEL_GITHUB_APP_INSTALLATION_ID` to
-   the number at the end of the installation's settings URL. Store the PEM
-   key in `KEEL_GITHUB_APP_PRIVATE_KEY` with Keel's other secrets.
+The job authenticates as the [Keel GitHub App](#the-keel-github-app) with a
+token limited to `organization_hooks: write`. With it Keel lists the
+deliveries and POSTs to `/orgs/{org}/hooks/{hook_id}/deliveries/{id}/attempts`
+for Keel's own hook. It writes nothing else to GitHub. To turn it on, set
+`KEEL_GITHUB_WEBHOOK_HOOK_ID` to the hook id. It is the number at the end of
+the webhook's URL under **Settings > Webhooks**, or `gh api
+/orgs/<org>/hooks --jq '.[] | [.id, .config.url]'`.
 
 Without `KEEL_GITHUB_WEBHOOK_HOOK_ID`, Keel logs `github webhook catch-up
 disabled` at start and redelivers nothing. A failed delivery then stays
-missed until the next reconcile reports the drift. Keel refuses to start
-when the hook id is set but any of the three App settings is missing or
-malformed. When the installation is on another account, each run fails with
-`installation <id> is on "<login>", not "<owner>"` and mints no token.
-
-#### Rotating the GitHub App key
-
-Rotate the key every 90 days, and at once when it may have been exposed
-(ADR-0020). GitHub lets the App hold more than one key, so there is no
-downtime.
-
-1. In the App's settings, under **Private keys**, choose **Generate a
-   private key**. The old key keeps working.
-2. Replace `KEEL_GITHUB_APP_PRIVATE_KEY` in the secret store with the new
-   PEM and redeploy Keel.
-3. Confirm the next `github webhook catch-up` log line has no error. It runs
-   once at start.
-4. Delete the old key in the App's settings. GitHub lists each key with
-   the date it was added. Keep the newest.
-5. Delete the downloaded PEM file.
-
-On suspected exposure, delete the exposed key in step 4 even before step 3
-succeeds. The catch-up job fails until the new key is deployed, and the
-hourly reconcile still reports drift meanwhile.
+missed until the next reconcile reports the drift.
 
 ## Service Templates
 
@@ -144,7 +194,7 @@ the `KEEL_GITHUB_OWNER` organisation). Creating a Service
 renders the template into a new repository with `catalog-info.yaml`,
 CODEOWNERS, `.sops.yaml` (`KEEL_SOPS_AGE_PROD`/`_NONPROD`) and a caller of the
 reusable build workflow (`KEEL_REUSABLE_WORKFLOW`, see `deploy/README.md`).
-Uses `KEEL_GITHUB_ADMIN_TOKEN`.
+Uses the [Keel GitHub App](#the-keel-github-app).
 
 ## Images
 
@@ -162,6 +212,6 @@ open critical Findings without an Exception, and every image must have a
 passing VSA; Environments marked as requiring approval also need one. Keel watches Argo CD
 (`KEEL_ARGOCD_URL`, `KEEL_ARGOCD_TOKEN` read-only, `KEEL_ARGOCD_APP` pattern)
 every two minutes: merged → deployed; *Degraded* after deploy marks the
-deployment failed, which feeds DORA. Promotion pull requests use
-`KEEL_GITHUB_WRITE_TOKEN`. So do admission-policy and rightsizing pull
-requests.
+deployment failed, which feeds DORA. Promotion pull requests use the
+[Keel GitHub App](#the-keel-github-app). So do admission-policy and
+rightsizing pull requests.
