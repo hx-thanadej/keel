@@ -54,7 +54,7 @@ var notTenantScoped = map[string]string{
 	"GET /auth/callback":                        "pre-authentication",
 	"POST /auth/logout":                         "acts on caller's own session",
 	"GET /auth/me":                              "returns caller's own principal",
-	"POST /v1/webhooks/github":                  "authenticated by HMAC signature; leaks_test covers signature and replay",
+	"POST /v1/webhooks/github":                  "authenticated by HMAC signature; webhooks_test and leaks_test cover signature, size and replay",
 	"GET /v1/breakglass":                        "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
 	"POST /v1/breakglass":                       "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",
 	"POST /v1/breakglass/{identity}/drill":      "platform data in the home Tenant; policy-gated (TestBreakGlassIsHomeOnly)",

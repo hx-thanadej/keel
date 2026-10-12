@@ -295,24 +295,15 @@ var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:github-gover
 // organisation-level and unowned items go to the home Tenant) and resolves
 // the ones no longer present.
 func (r Reconciler) record(ctx context.Context, rep Report) error {
-	var home *string
-	if err := r.Store.AppPool().QueryRow(ctx, `SELECT home_tenant_id()::text`).Scan(&home); err != nil {
+	home, err := tenantFor(ctx, r.Store, "")
+	if err != nil {
 		return err
 	}
-	if home == nil {
-		return fmt.Errorf("no home tenant")
-	}
-	byTenant := map[string][]Item{*home: nil}
+	byTenant := map[string][]Item{home: nil}
 	for _, it := range rep.Items {
-		t := *home
-		if it.Tenant != "" {
-			var id *string
-			if err := r.Store.AppPool().QueryRow(ctx, `SELECT tenant_id_by_slug($1)::text`, it.Tenant).Scan(&id); err != nil {
-				return err
-			}
-			if id != nil {
-				t = *id
-			}
+		t, err := tenantFor(ctx, r.Store, it.Tenant)
+		if err != nil {
+			return err
 		}
 		byTenant[t] = append(byTenant[t], it)
 	}
@@ -365,7 +356,7 @@ func (r Reconciler) record(ctx context.Context, rep Report) error {
 					}
 				}
 			}
-			if tenant != *home {
+			if tenant != home {
 				return nil
 			}
 			fixed := 0

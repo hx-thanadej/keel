@@ -8,6 +8,7 @@ package githubgov
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 
 	"github.com/hx-thanadej/keel/internal/ciidentity"
@@ -211,4 +212,77 @@ func sortLists(x any) any {
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// Covers reports whether have enforces at least what want does: it is active
+// with no bypass, keeps every rule of want, keeps every flag want turns on,
+// requires at least as many reviews, keeps every required check, and targets
+// at least the branches and repositories want targets. Extra rules, higher
+// counts and wider targets still cover. Same is the reconciler's stricter
+// test: it restores the exact ruleset.
+func Covers(have, want Ruleset) bool {
+	if have.Enforcement != want.Enforcement || have.Target != want.Target || len(have.BypassActors) != 0 {
+		return false
+	}
+	byType := map[string]Rule{}
+	for _, r := range have.Rules {
+		byType[r.Type] = r
+	}
+	for _, w := range want.Rules {
+		h, ok := byType[w.Type]
+		if !ok || !atLeast("", normal(h.Parameters), normal(w.Parameters)) {
+			return false
+		}
+	}
+	return atLeast("", normal(have.Conditions), normal(want.Conditions))
+}
+
+// normal round-trips v through JSON so numbers are float64 and lists []any.
+func normal(v any) any {
+	var x any
+	_ = json.Unmarshal(mustJSON(v), &x)
+	return x
+}
+
+// atLeast compares JSON values under key: true flags must stay true, numbers
+// must not drop, lists must keep every element (an "exclude" list must not
+// gain one), and anything else must be equal.
+func atLeast(key string, have, want any) bool {
+	switch w := want.(type) {
+	case nil:
+		return true
+	case bool:
+		return !w || have == true
+	case float64:
+		h, ok := have.(float64)
+		return ok && h >= w
+	case []any:
+		h, _ := have.([]any)
+		if key == "exclude" {
+			return containsAll(w, h)
+		}
+		return containsAll(h, w)
+	case map[string]any:
+		h, ok := have.(map[string]any)
+		if !ok {
+			return false
+		}
+		for k, v := range w {
+			if !atLeast(k, h[k], v) {
+				return false
+			}
+		}
+		return true
+	}
+	return canon(have) == canon(want)
+}
+
+// containsAll: every element of sub is covered by some element of set.
+func containsAll(set, sub []any) bool {
+	for _, x := range sub {
+		if !slices.ContainsFunc(set, func(y any) bool { return atLeast("", y, x) }) {
+			return false
+		}
+	}
+	return true
 }

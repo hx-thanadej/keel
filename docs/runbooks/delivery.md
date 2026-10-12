@@ -14,6 +14,61 @@
 - Some of this needs a paid plan (#8): on GitHub Free, rulesets on private
   repositories are unavailable and are reported, not enforced.
 
+### Governance webhook (Free and Team)
+
+GitHub offers the organisation audit-log API only on Enterprise Cloud. On
+Free and Team, Keel learns about governance changes from the organisation
+webhook it already uses for secret-scanning alerts ([access.md](access.md)).
+The hourly reconcile stays the source of truth, so a lost delivery is caught
+on the next run.
+
+Keel needs `KEEL_GITHUB_WEBHOOK_SECRET`, `KEEL_GITHUB_OWNER` and
+`KEEL_GITHUB_ORG=1`. No token is involved. Set it up as an organisation
+owner under **Settings > Webhooks**. If the secret-scanning webhook exists,
+edit it rather than adding a second one.
+
+1. Payload URL: `https://<keel host>/v1/webhooks/github`.
+2. Content type: `application/json`.
+3. Secret: the value of `KEEL_GITHUB_WEBHOOK_SECRET`. Generate it with
+   `openssl rand -hex 32` and store it with Keel's other secrets.
+4. Choose **Let me select individual events** and tick: Branch protection
+   configurations, Branch protection rules, Collaborator add, remove, or
+   changed (`member`), Memberships, Organizations, Repositories, Repository
+   rulesets, Secret scanning alerts, Security and analyses, Teams, and
+   Visibility changes (`public`).
+5. Save. GitHub sends a `ping`, which Keel answers with `202`.
+
+Keel answers each delivery this way:
+
+- `413` when the body is over 1 MiB and `401` when the
+  `X-Hub-Signature-256` HMAC does not match. Nothing is recorded.
+- `200 duplicate` for a delivery id it has already processed. The
+  `webhook_deliveries` primary key enforces this, so a redelivery never
+  records twice.
+- `202 ignored` for an event from any organisation other than
+  `KEEL_GITHUB_OWNER`. Nothing is recorded.
+- `202 accepted` otherwise. Each event becomes an Activity of type
+  `github.<event>.<action>` with source `github/org-webhook`. The Activity
+  goes to the Tenant named by the repository's `keel-tenant` property, or
+  to the home Tenant for organisation-level events and unlabelled
+  repositories.
+
+These changes also raise a `github_governance` Finding on the Repository.
+It uses the reconciler's fingerprint, so the next reconcile updates it or
+resolves it.
+
+| Event | Weakens a protection Keel owns when |
+| --- | --- |
+| `repository_ruleset` | a `keel-github@1` ruleset (`keel-default-branch`, `keel-prod-tier`) is deleted, or after the change it no longer covers the policy: enforcement is not `active`, a bypass actor is added, a rule is removed, the required review count drops, a review flag the policy sets is turned off, a required check is removed, or a target branch or repository is excluded or dropped |
+| `security_and_analysis` | secret scanning or push protection goes from `enabled` to anything else |
+
+Stricter changes raise no Finding. Examples are more reviews, extra rules,
+extra checks and wider targets. Rulesets Keel does not own also raise no
+Finding. Classic branch protection, visibility, collaborators, teams and
+membership are not protections Keel owns, so they are recorded as Activities
+only. Keel does not yet redeliver a delivery that failed (#226). The next
+reconcile reports the drift.
+
 ## Service Templates
 
 `KEEL_TEMPLATES` lists templates (`name=owner/repo@sha,…`, repositories in

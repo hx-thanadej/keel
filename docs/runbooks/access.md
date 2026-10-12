@@ -36,7 +36,8 @@ Point the GitHub organisation's secret-scanning webhook at
 `POST /v1/webhooks/github` (`KEEL_GITHUB_WEBHOOK_SECRET`). Keel finds the
 owner of a leaked Tencent key, disables it at once and opens a critical
 Finding; the secret is never stored. No replacement key is issued: the owner
-moves to workload identity.
+moves to workload identity. The same webhook also carries governance events
+([delivery.md](delivery.md#governance-webhook-free-and-team)).
 
 ## Workload secrets
 
