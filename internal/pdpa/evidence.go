@@ -22,14 +22,15 @@ var ResidencyCoverage = Coverage{
 		"Each Cloud Account with no regional billed usage in that window, from the regions of its last 35 billed days (marked last known)",
 		"The Activity Log archive bucket",
 		"The Tencent, AWS, Alibaba and GCP bill buckets and the Azure bill export, when configured",
+		"Each active client payer's bill bucket (ADR-0018), in its client's Tenant, at the region stored with the payer",
 		"Keel's Postgres, at KEEL_DB_REGION",
 	},
 	NotCovered: []string{
 		"Keel's Postgres when KEEL_DB_REGION is unset, and its backups or replicas outside that region; each run's Activity names the database as not checked",
 		"Cloud Accounts never billed with a region; each run's Activity names them as not checked",
-		"Archived Cloud Accounts",
+		"Archived Cloud Accounts, and the bill buckets of archived client payers",
+		"Client payers whose bill delivery is not set up yet (no bucket)",
 		"Billed usage with no region (global services)",
-		"Client payer bill buckets (client_payers rows)",
 		"Data a Tenant's workloads send outside its Cloud Accounts, such as to SaaS",
 	},
 }

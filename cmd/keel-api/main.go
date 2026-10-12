@@ -55,7 +55,7 @@
 //	KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID, KEEL_GITHUB_APP_PRIVATE_KEY (PEM)  the App and its
 //	                    installation on KEEL_GITHUB_OWNER; Keel mints a one-hour installation token per run
 //	KEEL_PDPA_REGIONS   default data region set for Tenants with no PDPA settings (default ap-bangkok,ap-southeast-7)
-//	KEEL_DB_REGION      region of Keel's Postgres; unset, each PDPA residency run reports the database as not checked
+//	KEEL_DB_REGION      region of Keel's Postgres; unset, each PDPA residency run reports the database as not checked; see docs/runbooks/deploy-regions.md
 //	KEEL_GCP_BILL_BUCKET_REGION    region of KEEL_GCP_BILL_BUCKET; required with it (PDPA residency)
 //	KEEL_AZURE_BILL_EXPORT_REGION  region of the KEEL_AZURE_BILL_STORAGE_ACCOUNT holding the bill export; required with KEEL_AZURE_BILL_CONTAINER
 //	KEEL_TENCENT_ORG_REGION  enables Tencent organisation discovery (e.g. ap-bangkok);
