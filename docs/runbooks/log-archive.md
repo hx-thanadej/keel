@@ -223,6 +223,9 @@ KEEL_ARCHIVE_ENDPOINT=cos.ap-bangkok.myqcloud.com
 KEEL_ARCHIVE_REGION=ap-bangkok
 ```
 
+`KEEL_ARCHIVE_REGION` is required for a COS archive too: the PDPA residency
+check places the archive there, and Keel refuses to start without it.
+
 An upgrade that leaves `KEEL_ARCHIVE_PROVIDER` unset selects `aws`. With a
 COS endpoint still set, Keel exits and asks for
 `KEEL_ARCHIVE_PROVIDER=tencent`.

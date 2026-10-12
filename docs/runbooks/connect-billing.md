@@ -351,8 +351,10 @@ Run OpenCost in each shared TKE cluster and set
    No client secret, no storage key.
 3. Set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_FEDERATED_TOKEN_FILE`
    (the workload identity webhook does this), `KEEL_AZURE_BILL_STORAGE_ACCOUNT`,
-   `KEEL_AZURE_BILL_CONTAINER`, `KEEL_AZURE_BILL_PREFIX` and
-   `KEEL_AZURE_BILLING_ACCOUNT`.
+   `KEEL_AZURE_BILL_CONTAINER`, `KEEL_AZURE_BILL_PREFIX`,
+   `KEEL_AZURE_BILLING_ACCOUNT` and `KEEL_AZURE_BILL_EXPORT_REGION` (the
+   storage account's region, e.g. `southeastasia`). The PDPA residency check
+   places the export there; Keel refuses to start without it.
 4. Register Cloud Accounts with the **subscription id** (GUID); Keel strips
    the `/subscriptions/` ARM prefix from `SubAccountId`.
 5. Finality: final from the 6th (Azure can change charges until the 5th).
@@ -373,8 +375,11 @@ Run OpenCost in each shared TKE cluster and set
    federation (`external_account`), impersonation whose source is keyless,
    and the metadata server. It refuses service-account key files and
    `authorized_user` refresh tokens.
-4. Set `KEEL_GCP_BILL_BUCKET`, `KEEL_GCP_BILL_PREFIX`, `KEEL_GCP_BILLING_ACCOUNT`.
-   Cloud Accounts are GCP **project ids** (`SubAccountId`).
+4. Set `KEEL_GCP_BILL_BUCKET`, `KEEL_GCP_BILL_PREFIX`, `KEEL_GCP_BILLING_ACCOUNT`
+   and `KEEL_GCP_BILL_BUCKET_REGION` (the bucket's location, e.g.
+   `asia-southeast1`). The PDPA residency check places the bucket there;
+   Keel refuses to start without it. Cloud Accounts are GCP **project ids**
+   (`SubAccountId`).
 5. Finality: Google gives no hard close (invoice by the 5th business day,
    late adjustments booked to later months); Keel treats a month final from
    the 16th.

@@ -102,7 +102,7 @@ var policyEvidence = map[string][]string{
 	"keel-findings@1":       {"findings", "exceptions"},
 	"keel-vex@1":            nil,
 	"keel-activity@1":       {"activity_chain"},
-	"keel-pdpa-residency@1": {"pdpa.residency"},
+	"keel-pdpa-residency@1": {"pdpa.residency", "pdpa.residency_coverage"},
 	"keel-pdpa-retention@1": {"pdpa.retention_schedule", "pdpa.retention_runs"},
 	"keel-pdpa-breach@1":    {"pdpa.breaches"},
 }
