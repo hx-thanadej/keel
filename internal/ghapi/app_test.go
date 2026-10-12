@@ -26,6 +26,10 @@ func TestAppTokenSignsJWTAndNarrowsPermissions(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	var gotPerms map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/app/installations/77" {
+			_, _ = w.Write([]byte(`{"id":77,"account":{"login":"Acme"}}`))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/app/installations/77/access_tokens" {
 			t.Errorf("%s %s, want POST /app/installations/77/access_tokens", r.Method, r.URL.Path)
 		}
@@ -75,7 +79,7 @@ func TestAppTokenSignsJWTAndNarrowsPermissions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		app := ghapi.App{BaseURL: srv.URL, ID: "123", Installation: 77, Key: parsed, Now: func() time.Time { return now }}
+		app := ghapi.App{BaseURL: srv.URL, ID: "123", Installation: 77, Owner: "acme", Key: parsed, Now: func() time.Time { return now }}
 		tok, err := app.Token(t.Context(), map[string]string{"organization_hooks": "write"})
 		if err != nil || tok != "ghs_installation" {
 			t.Fatalf("%s: token %q, %v", name, tok, err)
@@ -86,5 +90,42 @@ func TestAppTokenSignsJWTAndNarrowsPermissions(t *testing.T) {
 	}
 	if _, err := ghapi.ParseAppKey([]byte("not a key")); err == nil {
 		t.Fatal("garbage parsed as a key")
+	}
+}
+
+func TestAppRefusesAnInstallationOnAnotherAccount(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	minted := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/77":
+			_, _ = w.Write([]byte(`{"id":77,"account":{"login":"someone-else"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/78":
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			minted++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"ghs_wrong_org"}`))
+		default:
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	for _, app := range []ghapi.App{
+		{BaseURL: srv.URL, ID: "123", Installation: 77, Owner: "acme", Key: key},
+		{BaseURL: srv.URL, ID: "123", Installation: 77, Key: key},
+		{BaseURL: srv.URL, ID: "123", Installation: 78, Owner: "acme", Key: key},
+	} {
+		tok, err := app.Token(t.Context(), map[string]string{"organization_hooks": "write"})
+		if err == nil || tok != "" {
+			t.Errorf("installation %d owner %q: token %q, %v; want refused", app.Installation, app.Owner, tok, err)
+		}
+	}
+	if minted != 0 {
+		t.Fatalf("%d installation tokens minted for an installation not on the owner", minted)
 	}
 }

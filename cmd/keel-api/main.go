@@ -621,7 +621,8 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 
 // startWebhookCatchup redelivers failed organisation webhook deliveries
 // every 15 minutes, looking back 24 hours (#226). It authenticates as the
-// GitHub App installation with only organisation webhooks write.
+// GitHub App installation with only organisation webhooks write, and only
+// when that installation is on org (ADR-0020).
 func startWebhookCatchup(ctx context.Context, st *store.Store, org string) error {
 	hookID := os.Getenv("KEEL_GITHUB_WEBHOOK_HOOK_ID")
 	if hookID == "" {
@@ -644,8 +645,9 @@ func startWebhookCatchup(ctx context.Context, st *store.Store, org string) error
 	if err != nil {
 		return fmt.Errorf("KEEL_GITHUB_APP_PRIVATE_KEY: %w", err)
 	}
-	app := ghapi.App{ID: appID, Installation: inst, Key: key}
-	job := githubgov.Catchup{Store: st, Org: org, HookID: hook, Window: 24 * time.Hour, Pause: time.Second,
+	httpc := &http.Client{Timeout: 30 * time.Second}
+	app := ghapi.App{ID: appID, Installation: inst, Owner: org, Key: key, HTTP: httpc}
+	job := githubgov.Catchup{Store: st, Org: org, HookID: hook, Window: 24 * time.Hour, Pause: time.Second, HTTP: httpc,
 		Token: func(ctx context.Context) (string, error) {
 			return app.Token(ctx, map[string]string{"organization_hooks": "write"})
 		}}

@@ -29,6 +29,7 @@ type Catchup struct {
 	HookID  int64
 	Token   func(ctx context.Context) (string, error) // a short-lived token with organisation webhooks write
 	BaseURL string                                    // default https://api.github.com
+	HTTP    *http.Client                              // nil uses http.DefaultClient, which never times out
 	Window  time.Duration                             // how far back to look; wider than the run interval
 	Pause   time.Duration                             // between redeliveries, for GitHub's secondary rate limits
 	Now     func() time.Time                          // defaults to time.Now
@@ -67,7 +68,7 @@ func (c Catchup) Run(ctx context.Context) (CatchupResult, error) {
 	if err != nil {
 		return CatchupResult{}, fmt.Errorf("installation token: %w", err)
 	}
-	gh := ghapi.Client{BaseURL: c.BaseURL, Token: tok}
+	gh := ghapi.Client{BaseURL: c.BaseURL, Token: tok, HTTP: c.HTTP}
 	hook := fmt.Sprintf("/orgs/%s/hooks/%d/deliveries", url.PathEscape(c.Org), c.HookID)
 	byGUID, res, err := c.list(ctx, gh, hook, now.Add(-c.Window))
 	if err != nil {

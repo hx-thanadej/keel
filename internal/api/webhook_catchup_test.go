@@ -72,6 +72,10 @@ func (f *fakeHookAPI) deliver(guid, event, body string, at time.Time, reachKeel 
 }
 
 func (f *fakeHookAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/app/installations/9" {
+		_, _ = w.Write([]byte(`{"id":9,"account":{"login":"acme"}}`))
+		return
+	}
 	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/9/access_tokens" {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = fmt.Fprintf(w, `{"token":%q}`, catchupToken)
@@ -165,7 +169,7 @@ func TestWebhookCatchupRedeliversMissedDeliveriesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := ghapi.App{BaseURL: github.URL, ID: "123", Installation: 9, Key: key}
+	app := ghapi.App{BaseURL: github.URL, ID: "123", Installation: 9, Owner: "acme", Key: key}
 	job := githubgov.Catchup{Store: s, Org: "acme", HookID: 42, BaseURL: github.URL, Window: 24 * time.Hour,
 		Token: func(ctx context.Context) (string, error) {
 			return app.Token(ctx, map[string]string{"organization_hooks": "write"})
@@ -214,5 +218,33 @@ func TestWebhookCatchupRedeliversMissedDeliveriesOnce(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), catchupToken) {
 		t.Fatalf("token logged:\n%s", logs.String())
+	}
+}
+
+// A GitHub that accepts the connection and never answers must not hold the
+// job, whose context lives as long as the server.
+func TestWebhookCatchupGivesUpOnAHungGitHub(t *testing.T) {
+	release := make(chan struct{})
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(github.Close)
+	t.Cleanup(func() { close(release) })
+
+	job := githubgov.Catchup{Org: "acme", HookID: 42, BaseURL: github.URL, Window: time.Hour,
+		HTTP:  &http.Client{Timeout: 200 * time.Millisecond},
+		Token: func(context.Context) (string, error) { return catchupToken, nil }}
+	done := make(chan error, 1)
+	go func() { _, err := job.Run(t.Context()); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("hung GitHub: no error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("catch-up still waiting on a hung GitHub after 5s")
 	}
 }

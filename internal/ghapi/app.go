@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type App struct {
 	BaseURL      string // default https://api.github.com
 	ID           string // App ID or Client ID
 	Installation int64
+	Owner        string // the account login the installation must belong to
 	Key          *rsa.PrivateKey
 	HTTP         *http.Client
 	Now          func() time.Time // defaults to time.Now
@@ -48,17 +50,34 @@ func ParseAppKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 	return rk, nil
 }
 
-// Token returns a new installation token limited to perms.
+// Token returns a new installation token limited to perms. It refuses an
+// installation on any account but Owner, so a wrong installation id never
+// yields a token for someone else's organisation.
 func (a App) Token(ctx context.Context, perms map[string]string) (string, error) {
+	if a.Owner == "" {
+		return "", errors.New("github app: no owner to check the installation against")
+	}
 	jwt, err := a.jwt()
 	if err != nil {
 		return "", err
+	}
+	gh := Client{BaseURL: a.BaseURL, Token: jwt, HTTP: a.HTTP}
+	var inst struct {
+		Account struct {
+			Login string `json:"login"`
+		} `json:"account"`
+	}
+	if err := gh.Do(ctx, http.MethodGet, fmt.Sprintf("/app/installations/%d", a.Installation), nil, &inst); err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(inst.Account.Login, a.Owner) {
+		return "", fmt.Errorf("github app: installation %d is on %q, not %q", a.Installation, inst.Account.Login, a.Owner)
 	}
 	var out struct {
 		Token string `json:"token"`
 	}
 	in := map[string]any{"permissions": perms}
-	if err := (Client{BaseURL: a.BaseURL, Token: jwt, HTTP: a.HTTP}).Do(ctx, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", a.Installation), in, &out); err != nil {
+	if err := gh.Do(ctx, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", a.Installation), in, &out); err != nil {
 		return "", err
 	}
 	if out.Token == "" {

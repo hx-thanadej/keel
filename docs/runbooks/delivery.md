@@ -88,8 +88,12 @@ protection. Keel resends one delivery per second and stops the run on `403`
 or `429`. Each run logs `github webhook catch-up` with the counts.
 
 The job authenticates as a GitHub App installation. It never uses a personal
-access token. Each run mints a one-hour installation token limited to
-`organization_hooks: write`. With it Keel lists the deliveries and POSTs to
+access token. The App private key is a long-lived secret, accepted as an
+exception to ADR-0007 in
+[ADR-0020](../adr/0020-github-app-key-exception.md). Each run checks that the
+installation is on `KEEL_GITHUB_OWNER`, then mints a one-hour installation
+token limited to `organization_hooks: write`. Each GitHub call times out after
+30 seconds. With it Keel lists the deliveries and POSTs to
 `/orgs/{org}/hooks/{hook_id}/deliveries/{id}/attempts` for Keel's own hook.
 It writes nothing else to GitHub. Set it up as an organisation owner:
 
@@ -110,7 +114,28 @@ Without `KEEL_GITHUB_WEBHOOK_HOOK_ID`, Keel logs `github webhook catch-up
 disabled` at start and redelivers nothing. A failed delivery then stays
 missed until the next reconcile reports the drift. Keel refuses to start
 when the hook id is set but any of the three App settings is missing or
-malformed.
+malformed. When the installation is on another account, each run fails with
+`installation <id> is on "<login>", not "<owner>"` and mints no token.
+
+#### Rotating the GitHub App key
+
+Rotate the key every 90 days, and at once when it may have been exposed
+(ADR-0020). GitHub lets the App hold more than one key, so there is no
+downtime.
+
+1. In the App's settings, under **Private keys**, choose **Generate a
+   private key**. The old key keeps working.
+2. Replace `KEEL_GITHUB_APP_PRIVATE_KEY` in the secret store with the new
+   PEM and redeploy Keel.
+3. Confirm the next `github webhook catch-up` log line has no error. It runs
+   once at start.
+4. Delete the old key in the App's settings. GitHub lists each key with
+   the date it was added. Keep the newest.
+5. Delete the downloaded PEM file.
+
+On suspected exposure, delete the exposed key in step 4 even before step 3
+succeeds. The catch-up job fails until the new key is deployed, and the
+hourly reconcile still reports drift meanwhile.
 
 ## Service Templates
 
