@@ -299,7 +299,11 @@ func TestBrokenAWSIdentityLeavesTencentSyncing(t *testing.T) {
 			for k, v := range env {
 				t.Setenv(k, v)
 			}
-			syncs := clientBillSyncs(context.Background(), nil)
+			fake := &fakeSTS{provider: "tencent"}
+			fake.set(true, true)
+			srv := httptest.NewServer(fake)
+			defer srv.Close()
+			syncs := clientBillSyncs(context.Background(), nil, srv.URL)
 			providers := []string{}
 			for _, cs := range syncs {
 				providers = append(providers, cs.Provider)

@@ -37,6 +37,11 @@ type RoleError struct{ Err error }
 func (e *RoleError) Error() string { return e.Err.Error() }
 func (e *RoleError) Unwrap() error { return e.Err }
 
+// ErrIdentityRejected marks a Ready failure where Keel's identity loaded but
+// STS refused it, as opposed to one that never loaded. The two need
+// different fixes, so the home Finding's hint differs.
+var ErrIdentityRejected = errors.New("STS rejected")
+
 // ClientBillSync runs one BillSync per client payer, each confined to its
 // payer's Tenant. It only lists and reads: Connect hands back read-only
 // bill access, and a payer without delivery gets a Finding telling the
@@ -50,10 +55,10 @@ type ClientBillSync struct {
 	// Connect returns bill access through the payer's read-only role. It
 	// wraps a failure to assume the role in *RoleError.
 	Connect func(ClientPayer) (Objects, InvoiceSource, error)
-	// Ready checks Keel's own side, such as its base identity, once per run
-	// that has payers. Its failure is Keel's, not any client's, so the run
-	// stops with that error and raises a Finding in Keel's home Tenant, not
-	// the client's.
+	// Ready checks Keel's own side, such as STS accepting its base identity,
+	// once per run that has payers. Its failure is Keel's, not any client's,
+	// so the run stops with that error and raises a Finding in Keel's home
+	// Tenant, not the client's. A run with no payers resolves that Finding.
 	Ready func(context.Context) error
 	Now   func() time.Time
 }
@@ -75,7 +80,10 @@ func (c *ClientBillSync) Run(ctx context.Context) ([]ClientSync, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(payers) > 0 && c.Ready != nil {
+	if len(payers) == 0 {
+		return nil, c.noPayers(ctx)
+	}
+	if c.Ready != nil {
 		if err := c.keelReady(ctx, len(payers)); err != nil {
 			return nil, err
 		}
@@ -152,7 +160,7 @@ func (c *ClientBillSync) fingerprint(kind findings.Kind, p ClientPayer) string {
 // fixes when Keel's own identity is unusable.
 var clientPayerHelp = map[string]struct {
 	role, delivery func(ClientPayer) string
-	keel           string
+	keel, rejected string
 }{
 	"tencent": {
 		role: func(p ClientPayer) string {
@@ -165,6 +173,9 @@ var clientPayerHelp = map[string]struct {
 				"Then record the bucket, prefix and region on the payer's Cloud Account in Keel. Keel only reads; it never changes Bill Storage or the bucket.", p.PayerID, p.RoleARN)
 		},
 		keel: "Give keel-api a keyless Tencent identity: TKE pod identity (TKE_WEB_IDENTITY_TOKEN_FILE) or a CVM instance role. " +
+			"No client role was tried; the clients' roles are not at fault. Keel retries every hour.",
+		rejected: "STS rejected Keel's Tencent identity, so the identity loaded but is not accepted. Check that its credentials have not expired or been revoked and, for TKE pod identity or a CVM role, " +
+			"that the cluster's OIDC provider or the instance role is still trusted; the reason has STS's message. " +
 			"No client role was tried; the clients' roles are not at fault. Keel retries every hour.",
 	},
 	"aws": {
@@ -179,6 +190,9 @@ var clientPayerHelp = map[string]struct {
 		},
 		keel: "Give keel-api a keyless AWS identity: web identity (AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE) or the instance role; access keys are refused. " +
 			"No client role was tried; the clients' roles are not at fault. Keel retries every hour.",
+		rejected: "STS rejected Keel's AWS identity, so the identity loaded but is not accepted. Check that its credentials have not expired or been revoked and, for web identity, " +
+			"that the role's trust policy still trusts the cluster's OIDC provider and token audience, or that the instance role is still attached; the reason has STS's message. " +
+			"No client role was tried; the clients' roles are not at fault. Keel retries every hour.",
 	},
 }
 
@@ -189,24 +203,46 @@ func (c *ClientBillSync) keelReady(ctx context.Context, payers int) error {
 	if err != nil {
 		return err
 	}
-	fp := findings.KeelIdentityUnusable.String() + ":" + c.Provider
 	ready := c.Ready(ctx)
 	if ready == nil {
-		return c.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'Keel identity usable'
-				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp, c.now())
-			return err
-		})
+		return c.resolveKeel(ctx, home, "Keel identity usable")
 	}
 	ready = fmt.Errorf("%d %s client payers not synced: %w", payers, c.Provider, ready)
+	hint := clientPayerHelp[c.Provider].keel
+	if errors.Is(ready, ErrIdentityRejected) {
+		hint = clientPayerHelp[c.Provider].rejected
+	}
 	return errors.Join(ready, c.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
 			VALUES ($1, $2, $3, 'high', $4, jsonb_build_object('provider', $5::text, 'reason', $6::text, 'configure', $7::text), $8)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = excluded.first_seen_at, detail = excluded.detail`,
-			home, findings.KeelIdentityUnusable, fp, fmt.Sprintf("Keel's own %s identity is unusable; its client payers are not synced", c.Provider),
-			c.Provider, ready.Error(), clientPayerHelp[c.Provider].keel, c.now())
+			home, findings.KeelIdentityUnusable, c.keelFingerprint(), fmt.Sprintf("Keel's own %s identity is unusable; its client payers are not synced", c.Provider),
+			c.Provider, ready.Error(), hint, c.now())
 		return err
 	}))
+}
+
+// noPayers resolves keel_identity_unusable: it is about client payers Keel
+// could not sync, and none are left. Without a home Tenant there is no such
+// Finding.
+func (c *ClientBillSync) noPayers(ctx context.Context) error {
+	var home *string
+	if err := c.Ingester.Store.AppPool().QueryRow(ctx, `SELECT home_tenant_id()::text`).Scan(&home); err != nil || home == nil {
+		return err
+	}
+	return c.resolveKeel(ctx, *home, "no client payers left to sync")
+}
+
+func (c *ClientBillSync) resolveKeel(ctx context.Context, home, resolution string) error {
+	return c.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = $3
+			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, c.keelFingerprint(), c.now(), resolution)
+		return err
+	})
+}
+
+func (c *ClientBillSync) keelFingerprint() string {
+	return findings.KeelIdentityUnusable.String() + ":" + c.Provider
 }
 
 // roleUnusable keeps one open Finding in the payer's Tenant until Keel can

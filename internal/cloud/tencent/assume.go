@@ -68,11 +68,7 @@ func (m *MemberRole) GetCredential() (common.CredentialIface, error) {
 	if err != nil {
 		return nil, err
 	}
-	cpf := profile.NewClientProfile()
-	if scheme, host, ok := strings.Cut(m.Endpoint, "://"); ok {
-		cpf.HttpProfile.Scheme, cpf.HttpProfile.Endpoint = scheme, host
-	}
-	c, err := sts.NewClient(base, m.Region, cpf)
+	c, err := stsClient(base, m.Region, m.Endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -96,4 +92,28 @@ func (m *MemberRole) GetCredential() (common.CredentialIface, error) {
 		m.expires = time.Unix(*res.Response.ExpiredTime, 0)
 	}
 	return m.cached, nil
+}
+
+// stsClient signs with cred. endpoint overrides the STS host
+// (scheme://host), for tests.
+func stsClient(cred common.CredentialIface, region, endpoint string) (*sts.Client, error) {
+	cpf := profile.NewClientProfile()
+	if scheme, host, ok := strings.Cut(endpoint, "://"); ok {
+		cpf.HttpProfile.Scheme, cpf.HttpProfile.Endpoint = scheme, host
+	}
+	return sts.NewClient(cred, region, cpf)
+}
+
+// CallerIdentity asks STS who cred is. Credentials can load and still be
+// rejected (expired, revoked, deleted), and an AssumeRole made with them
+// fails as if the target role had refused; this tells the two apart. It
+// reads nothing and needs no permission. endpoint overrides the STS host
+// (scheme://host), for tests.
+func CallerIdentity(cred common.CredentialIface, region, endpoint string) error {
+	c, err := stsClient(cred, region, endpoint)
+	if err != nil {
+		return err
+	}
+	_, err = c.GetCallerIdentity(sts.NewGetCallerIdentityRequest())
+	return err
 }

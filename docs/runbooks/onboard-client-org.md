@@ -220,14 +220,20 @@ environment variable; client payers are data.
    `GET /v1/tenants/{home}/cost-loads`. AWS has no invoice source, so AWS
    client loads are not reconciled against an invoice.
 5. **Keel's own side.** Before trying any client role, each run checks
-   Keel's own identity for that provider: on AWS it must load and be
-   keyless, on Tencent its credentials must load. If that fails, keel-api
-   logs `ALERT client bill sync failed` for the provider once per run and
-   raises `keel_identity_unusable` in Keel's **home** Tenant
-   (`GET /v1/tenants/{home}/findings?kind=keel_identity_unusable`). No client
-   Finding is raised and no client's "Last successful assume" moves. The
-   Finding resolves on the next run whose identity check passes. The other
-   provider's sync carries on.
+   Keel's own identity for that provider once: it must load (on AWS, from a
+   keyless source) and STS must accept it (`GetCallerIdentity`). If either
+   fails, keel-api logs `ALERT client bill sync failed` for the provider
+   once per run and raises `keel_identity_unusable` in Keel's **home**
+   Tenant (`GET /v1/tenants/{home}/findings?kind=keel_identity_unusable`).
+   Its `detail.reason` says whether the identity did not load or STS
+   rejected it (expired, revoked or untrusted credentials). No client role is
+   tried, no client Finding is raised and no client's "Last successful
+   assume" moves. The Finding resolves on the next run whose identity check
+   passes, or once the provider has no client payers left. The other
+   provider's sync carries on. An AssumeRole refused after STS accepted
+   Keel's identity is a `client_role_unusable` in the client's Tenant. That
+   includes Keel's base role lacking `sts:AssumeRole` on the client's role
+   (step 4), which STS reports the same way as a refusing trust policy.
 
 `bill_sync_blocked` means Keel refused to load a month because two bill
 files charge the same sub-account for the same hours. That happens only in

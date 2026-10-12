@@ -51,6 +51,24 @@ func Keyless(ctx context.Context) (Identity, error) {
 	return keylessOnly{cfg.Credentials}, nil
 }
 
+// CallerIdentity asks STS who base is. Credentials can load and still be
+// rejected (expired, revoked, untrusted web identity), and an AssumeRole
+// made with them fails as if the client's role had refused; this tells the
+// two apart. It needs no permission. stsEndpoint overrides the STS
+// endpoint, for tests.
+func CallerIdentity(ctx context.Context, base Identity, stsEndpoint string) error {
+	_, err := stsWith(base, "us-east-1", stsEndpoint).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	return err
+}
+
+func stsWith(base Identity, region, endpoint string) *sts.Client {
+	return sts.New(sts.Options{Region: region, Credentials: base}, func(o *sts.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = &endpoint
+		}
+	})
+}
+
 var roleARN = regexp.MustCompile(`^arn:(aws|aws-cn|aws-us-gov):iam::(\d{12}):role/([\w+=,.@-]{1,128}/)*[\w+=,.@-]{1,64}$`)
 
 // ClientRole is a client's read-only role in its management account
@@ -134,12 +152,7 @@ func ReadOnlyRole(base Identity, arn, account, externalID string, export Export,
 	if err != nil {
 		return nil, err
 	}
-	client := sts.New(sts.Options{Region: export.Region, Credentials: base}, func(o *sts.Options) {
-		if stsEndpoint != "" {
-			o.BaseEndpoint = &stsEndpoint
-		}
-	})
-	p := stscreds.NewAssumeRoleProvider(client, arn, func(o *stscreds.AssumeRoleOptions) {
+	p := stscreds.NewAssumeRoleProvider(stsWith(base, export.Region, stsEndpoint), arn, func(o *stscreds.AssumeRoleOptions) {
 		o.RoleSessionName = "keel"
 		o.ExternalID = &externalID
 		o.Policy = &policy
