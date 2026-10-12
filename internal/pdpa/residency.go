@@ -49,10 +49,31 @@ type ResidencyRun struct {
 // usageWindow is how far back billed usage places a Cloud Account in a region.
 const usageWindowDays = 35
 
+// locationsSQL lists a Tenant's own residency Locations under row security:
+// each Cloud Account region billed since $1, each quiet account's last known
+// regions (its last $2 billed days), and each active client payer's bill
+// bucket at the payer's stored region.
+const locationsSQL = `SELECT DISTINCT 'cloud_account', f.provider || ':' || coalesce(a.name, f.sub_account_id), f.region_id, false
+	FROM cost_facts f LEFT JOIN cloud_accounts a ON a.id = f.cloud_account_id
+	WHERE f.current AND f.region_id <> '' AND f.charge_period_start >= $1
+	UNION
+	SELECT 'cloud_account', a.provider || ':' || a.name, coalesce(last.region_id, ''), true
+	FROM cloud_accounts a
+	LEFT JOIN LATERAL (SELECT DISTINCT f.region_id FROM cost_facts f
+		WHERE f.cloud_account_id = a.id AND f.current AND f.region_id <> ''
+		AND f.charge_period_start > (SELECT max(m.charge_period_start) FROM cost_facts m WHERE m.cloud_account_id = a.id AND m.current AND m.region_id <> '') - make_interval(days => $2)) last ON true
+	WHERE a.archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM cost_facts f WHERE f.cloud_account_id = a.id AND f.current AND f.region_id <> '' AND f.charge_period_start >= $1)
+	UNION
+	SELECT 'bill_bucket', p.provider || ':' || p.bucket, p.region, false
+	FROM client_payers p JOIN cloud_accounts a ON a.id = p.cloud_account_id AND a.tenant_id = p.tenant_id
+	WHERE p.bucket <> '' AND a.ownership = 'client' AND a.archived_at IS NULL
+	ORDER BY 2, 3`
+
 // RunResidency checks every Tenant's data against its region set: the
 // regions its Cloud Accounts were billed in recently (or, for an account
-// with no recent regional usage, in its last billed window), and the
-// platform stores every Tenant's data passes through. Each Location outside
+// with no recent regional usage, in its last billed window), the bill
+// buckets of its active client payers (ADR-0018), and the platform stores
+// every Tenant's data passes through. Each Location outside
 // the set is an open Finding until it is back inside or gone. A Location
 // whose region is unknown is named in the run's Activity as not checked.
 func (s Service) RunResidency(ctx context.Context) ([]ResidencyRun, error) {
@@ -82,17 +103,7 @@ func (s Service) CheckResidency(ctx context.Context, tenant string) (ResidencyRu
 		}
 		run.Regions = set.DataRegions
 		since := now.AddDate(0, 0, -usageWindowDays)
-		rows, err := tx.Query(ctx, `SELECT DISTINCT 'cloud_account', f.provider || ':' || coalesce(a.name, f.sub_account_id), f.region_id, false
-			FROM cost_facts f LEFT JOIN cloud_accounts a ON a.id = f.cloud_account_id
-			WHERE f.current AND f.region_id <> '' AND f.charge_period_start >= $1
-			UNION
-			SELECT 'cloud_account', a.provider || ':' || a.name, coalesce(last.region_id, ''), true
-			FROM cloud_accounts a
-			LEFT JOIN LATERAL (SELECT DISTINCT f.region_id FROM cost_facts f
-				WHERE f.cloud_account_id = a.id AND f.current AND f.region_id <> ''
-				AND f.charge_period_start > (SELECT max(m.charge_period_start) FROM cost_facts m WHERE m.cloud_account_id = a.id AND m.current AND m.region_id <> '') - make_interval(days => $2)) last ON true
-			WHERE a.archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM cost_facts f WHERE f.cloud_account_id = a.id AND f.current AND f.region_id <> '' AND f.charge_period_start >= $1)
-			ORDER BY 2, 3`, since, usageWindowDays)
+		rows, err := tx.Query(ctx, locationsSQL, since, usageWindowDays)
 		if err != nil {
 			return err
 		}

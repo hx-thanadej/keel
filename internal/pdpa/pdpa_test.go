@@ -282,6 +282,80 @@ func TestResidencyChecksAccountsWithoutRecentBillsFromTheirLastKnownRegions(t *t
 	}
 }
 
+// clientPayer registers a client-owned Tencent payer account in tenant whose
+// Bill Storage delivers to bucket in region (ADR-0018).
+func clientPayer(t *testing.T, s *store.Store, tenant, uin, bucket, region string) (accountID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role) VALUES ($1, 'tencent', $2, $2, 'client', $3) RETURNING id`,
+			tenant, uin, `{"role_arn": "qcs::cam::uin/`+uin+`:roleName/KeelReadOnly"}`).Scan(&accountID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, prefix, region, mode) VALUES ($1, $2, 'tencent', $3, 'focus/', $4, 'per-day')`,
+			accountID, tenant, bucket, region)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return accountID
+}
+
+func bucketFindings(t *testing.T, s *store.Store, tenant string) []string {
+	t.Helper()
+	var out []string
+	for _, f := range open(findings(t, s, tenant, "pdpa_residency")) {
+		if strings.HasPrefix(f, "pdpa_residency:bill_bucket:") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func TestResidencyChecksEachActiveClientPayerBillBucketInItsOwnTenant(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	c := newClock()
+	tat, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	acme, _ := s.CreateTenant(ctx, "acme", "Acme", false)
+	svc := pdpa.Service{Store: s, Now: c.now}
+
+	clientPayer(t, s, tat, "100001", "tat-bills-1250000001", "ap-bangkok")
+	clientPayer(t, s, tat, "100002", "tat-sg-bills-1250000002", "ap-singapore")
+	archived := clientPayer(t, s, tat, "100003", "tat-old-bills-1250000003", "eu-frankfurt")
+	exec(t, s, tat, `UPDATE cloud_accounts SET archived_at = now() WHERE id = $1`, archived)
+	clientPayer(t, s, tat, "100004", "", "na-ashburn") // delivery not set up: no bucket holds bills yet
+	clientPayer(t, s, acme, "200001", "acme-bills-1250000009", "na-siliconvalley")
+	// A TAT row naming an Acme account: foreign keys bypass row security, so
+	// the insert succeeds, but TAT cannot see the account it points at.
+	acmeMember := scalar[string](t, s, acme, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role)
+		VALUES ($1, 'tencent', '200002', '200002', 'client', '{"role_arn": "qcs::cam::uin/200002:roleName/KeelReadOnly"}') RETURNING id`, acme)
+	exec(t, s, tat, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, region, mode) VALUES ($1, $2, 'tencent', 'forged-bills-1250000008', 'eu-frankfurt', 'per-day')`, acmeMember, tat)
+
+	if _, err := svc.RunResidency(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := bucketFindings(t, s, tat), []string{"pdpa_residency:bill_bucket:tencent:tat-sg-bills-1250000002:ap-singapore"}; !slices.Equal(got, want) {
+		t.Fatalf("tat bill bucket Findings %v, want %v: in-region, archived and bucketless payers raise nothing", got, want)
+	}
+	if got, want := bucketFindings(t, s, acme), []string{"pdpa_residency:bill_bucket:tencent:acme-bills-1250000009:na-siliconvalley"}; !slices.Equal(got, want) {
+		t.Fatalf("acme bill bucket Findings %v, want only its own payer's %v", got, want)
+	}
+	if d := lastResidencyDetail(t, s, tat); !strings.Contains(d, "5 locations") {
+		t.Fatalf("residency Activity %q, want the three active payer accounts and the two buckets that receive bills", d)
+	}
+
+	// The client moves its bill delivery into Bangkok: the Finding resolves.
+	exec(t, s, tat, `UPDATE client_payers SET region = 'ap-bangkok' WHERE bucket = 'tat-sg-bills-1250000002'`)
+	c.advance(time.Hour)
+	if _, err := svc.CheckResidency(ctx, tat); err != nil {
+		t.Fatal(err)
+	}
+	if got := bucketFindings(t, s, tat); len(got) != 0 {
+		t.Fatalf("bill bucket Findings %v still open after the bucket moved in-region", got)
+	}
+}
+
 // expirable seeds, for every deletable class, one row past its retention
 // period and one inside it, plus rows retention must never touch. It returns
 // the keys of the expired rows per class. The nth seeding of a Tenant shifts
