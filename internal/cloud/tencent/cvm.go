@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	cvm "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm/v20170312"
 
 	"github.com/hx-thanadej/keel/internal/rightsize"
@@ -17,13 +16,14 @@ type CVMAPI interface {
 	DescribeInstancesWithContext(ctx context.Context, req *cvm.DescribeInstancesRequest) (*cvm.DescribeInstancesResponse, error)
 }
 
-// NewCVM builds a CVM client.
-func NewCVM(region string, creds common.Provider) (CVMAPI, error) {
+// NewCVM builds a CVM client. endpoint overrides its endpoint
+// (scheme://host), for tests.
+func NewCVM(region string, creds common.Provider, endpoint string) (CVMAPI, error) {
 	cred, err := creds.GetCredential()
 	if err != nil {
 		return nil, err
 	}
-	return cvm.NewClient(cred, region, profile.NewClientProfile())
+	return cvm.NewClient(cred, region, clientProfile(endpoint))
 }
 
 // Catalog lists on-sale pay-as-you-go instance types with their hourly list

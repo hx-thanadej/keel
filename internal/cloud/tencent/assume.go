@@ -3,6 +3,7 @@ package tencent
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -25,6 +26,9 @@ type MemberRole struct {
 	// requires it (sts:external_id) so only Keel's registration of that payer
 	// can assume it.
 	ExternalID string
+	// Policy, when set, is the session policy sent on AssumeRole, limiting
+	// the session to what it allows.
+	Policy string
 	// Endpoint overrides the STS host (scheme://host), for tests.
 	Endpoint string
 
@@ -52,6 +56,24 @@ func ReadOnlyRole(base common.Provider, arn, account, externalID, region string)
 	return &MemberRole{Base: base, Account: account, Role: m[2], Region: region, ExternalID: externalID}, nil
 }
 
+// ReadActions are the only actions a client-reads session may use, one per
+// API call the client reads make: DescribeBudget, DescribeStrategies,
+// DescribeTaskStrategyRisks, GetMonitorData and DescribeInstances.
+var ReadActions = []string{"finance:DescribeBudget", "advisor:DescribeStrategies", "advisor:DescribeTaskStrategyRisks",
+	"monitor:GetMonitorData", "cvm:DescribeInstances"}
+
+// ReadsRole is a client's read-only role assumed for Budget, Smart Advisor
+// and Cloud Monitor reads: the same checks and ExternalId as ReadOnlyRole,
+// with a session policy that allows only ReadActions.
+func ReadsRole(base common.Provider, arn, account, externalID, region string) (*MemberRole, error) {
+	r, err := ReadOnlyRole(base, arn, account, externalID, region)
+	if err != nil {
+		return nil, err
+	}
+	r.Policy = `{"version":"2.0","statement":[{"effect":"allow","action":["` + strings.Join(ReadActions, `","`) + `"],"resource":["*"]}]}`
+	return r, nil
+}
+
 // RoleArn is the member role's ARN.
 func (m *MemberRole) RoleArn() string {
 	return fmt.Sprintf("qcs::cam::uin/%s:roleName/%s", m.Account, m.Role)
@@ -77,6 +99,10 @@ func (m *MemberRole) GetCredential() (common.CredentialIface, error) {
 	req.RoleArn, req.RoleSessionName, req.DurationSeconds = &arn, &session, &dur
 	if m.ExternalID != "" {
 		req.ExternalId = &m.ExternalID
+	}
+	if m.Policy != "" {
+		policy := url.QueryEscape(m.Policy) // STS URL-decodes Policy
+		req.Policy = &policy
 	}
 	res, err := c.AssumeRole(req)
 	if err != nil {

@@ -139,19 +139,20 @@ payers.
        {"effect": "allow", "action": ["finance:DescribeBill*"], "resource": ["*"]},
        {"effect": "allow", "action": ["cos:GetBucket", "cos:HeadBucket", "cos:GetObject", "cos:HeadObject"],
         "resource": ["qcs::cos:<region>:uid/<appid>:<bucket>/*", "qcs::cos:<region>:uid/<appid>:<bucket>"]},
-       {"effect": "allow", "action": ["monitor:Describe*", "monitor:GetMonitorData"], "resource": ["*"]},
-       {"effect": "allow", "action": ["advisor:Describe*"], "resource": ["*"]}
+       {"effect": "allow", "action": ["finance:DescribeBudget", "advisor:DescribeStrategies", "advisor:DescribeTaskStrategyRisks",
+         "monitor:GetMonitorData", "cvm:DescribeInstances"], "resource": ["*"]}
      ]
    }
    ```
 
    `finance:DescribeBill*` matches the `QcloudFinanceBillReadOnlyAccess`
    preset and covers `DescribeBillSummaryByPayMode`, which Keel uses to
-   reconcile. The monitor and advisor statements are for Budget, Advisor and
-   rightsizing reads. Their namespaces are unverified, so take the exact names
-   from the CAM visual editor and keep only `Describe`, `Get` and `List`
-   actions. No statement may grant a `Create`, `Modify`, `Put`, `Delete` or
-   `Update` action.
+   reconcile. The last statement is for the Budget, Smart Advisor and
+   rightsizing reads (`tencent.ReadActions`); each action is checked against
+   Tencent's CAM docs in
+   [onboard-client-org.md](onboard-client-org.md#tencent-cloud-payer). No
+   statement may grant a `Create`, `Modify`, `Put`, `Delete` or `Update`
+   action.
 2. **The client sets up delivery.** In the payer, Billing Center, Bill
    Overview, Bill Storage, deliver only the Standard bill (FOCUS) to a private
    COS bucket in the payer account, under its own prefix, as in step 1 of the

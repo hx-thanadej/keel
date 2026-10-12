@@ -4,9 +4,9 @@ Some Tenants own their cloud organisation and pay its bill
 ([ADR-0018](../adr/0018-client-owned-organisations-read-only.md)). Keel is
 read-only there. This runbook is for the Keel operator and the client's cloud
 admin. It covers what main implements today: bill ingestion from a client's
-**Tencent Cloud payer** (#182) and **AWS management account** (#183), and,
-on AWS only, Budget status, security Findings and Rightsizing
-Recommendations read through the same role (#183).
+**Tencent Cloud payer** (#182) and **AWS management account** (#183), and
+Budget status, security Findings and Rightsizing Recommendations read
+through the same role (Tencent #182, AWS #183).
 [connect-billing.md](connect-billing.md) holds the full provider detail; this
 page is the onboarding order and the client's security-review summary.
 
@@ -22,10 +22,14 @@ account:
   Security Hub findings (`GetFindings`, which includes AWS Config rule
   findings when the client has Security Hub's Config integration on) and
   Cost Optimization Hub recommendations (`ListRecommendations`, which
-  carries Compute Optimizer's rightsizing).
-
-Tencent Budgets, Advisor and Cloud Monitor are not read from client
-organisations yet (#182).
+  carries Compute Optimizer's rightsizing);
+- on Tencent, the payer's active Budgets (`DescribeBudget`), its Smart
+  Advisor risks (`DescribeStrategies`, `DescribeTaskStrategyRisks`), and,
+  for rightsizing its own CVM instances, Cloud Monitor CPU and memory
+  (`GetMonitorData`) and the instances' current types (`DescribeInstances`).
+  Keel's VM engine turns those into Recommendations, as for Keel's own
+  accounts; Tencent has no native size recommender (ADR-0013). Only Tencent's
+  public CVM price list (`DescribeZoneInstanceConfigInfos`) is read as Keel.
 
 Keel never does these:
 
@@ -43,14 +47,22 @@ Keel never does these:
   Tencent also accepts environment and profile keys
   (`tencent.Credentials()`), so a dev Keel may run on keys. The client never
   hands Keel a secret; `read_only_role` stores only a role ARN.
-- **No reads beyond the listed ones on AWS.** Every AWS session carries a
+- **No reads beyond the listed ones.** Every AWS session carries a
   session policy. The bill session's is built from the payer's record. It
   allows `s3:ListBucket` on the bucket only for the recorded prefix,
   `s3:GetObject` only under it, and `kms:Decrypt` only on the recorded key
   via S3 in the bucket's region. The reads session's allows only
   `budgets:ViewBudget`, `securityhub:GetFindings` and
   `cost-optimization-hub:ListRecommendations` (`aws.ReadActions`). AWS grants
-  the intersection, so an over-broad role still does only these reads.
+  the intersection, so an over-broad role still does only these reads. The
+  Tencent reads session carries a session policy (the AssumeRole `Policy`
+  parameter) allowing only `finance:DescribeBudget`,
+  `advisor:DescribeStrategies`, `advisor:DescribeTaskStrategyRisks`,
+  `monitor:GetMonitorData` and `cvm:DescribeInstances`
+  (`tencent.ReadActions`). Tencent says it grants the session "based on" that
+  policy; its docs do not state the intersection rule AWS documents, so the
+  role's own policy must still be read-only. The Tencent bill session carries
+  no session policy.
 - **Nothing leaves the Tenant.** A client payer's lines are kept only for
   that Tenant's registered client-owned accounts. Every other line is dropped
   and counted in `dropped_lines` and `dropped_billed`. Security findings and
@@ -202,9 +214,34 @@ Keel never does these:
    }
    ```
 
-   connect-billing.md also lists `monitor:` and `advisor:` read actions for
-   future reads (#182). Nothing on main uses them, so leave them off until it
-   does.
+   Add this statement for the Budget, Smart Advisor and rightsizing reads.
+   Leave it off to have Keel read bills only; each read it cannot make is
+   logged as `ALERT client reads failed` and the other reads carry on.
+
+   ```json
+   {"effect": "allow", "action": ["finance:DescribeBudget", "advisor:DescribeStrategies", "advisor:DescribeTaskStrategyRisks",
+     "monitor:GetMonitorData", "cvm:DescribeInstances"], "resource": ["*"]}
+   ```
+
+   Each action is the read the CAM docs name for the call Keel makes:
+   `DescribeBudget` is a Read action of the `finance` service
+   ([finance actions](https://www.tencentcloud.com/document/product/598/77527)),
+   `DescribeStrategies` and `DescribeTaskStrategyRisks` are Read actions of
+   `advisor`, operation level, resource `*`
+   ([Smart Advisor actions](https://www.tencentcloud.com/document/product/598/57056)),
+   `monitor:GetMonitorData` is the action Tencent's read-only monitoring
+   policy example grants
+   ([custom policy example](https://www.tencentcloud.com/document/product/1045/53784)),
+   and `cvm:DescribeInstances` is the action CAM's own example grants to let
+   a user view CVM instances
+   ([CAM users and permissions](https://www.tencentcloud.com/document/product/598/18795)).
+
+   Smart Advisor assesses only the account that calls it, so its risks are
+   the payer account's. Smart Advisor must be authorised in the payer
+   (console, service authorisation), or `DescribeStrategies` fails. Keel
+   reads Cloud Monitor and instance types only for CVM instances the payer
+   account itself was billed for: member accounts' instances are not
+   rightsized, because Keel holds no session in them.
 
 The client then sends Keel the bucket, prefix, region and, on AWS, any KMS
 key ARN. The operator records them with the same `PUT .../client-payer`,
@@ -252,20 +289,27 @@ environment variable; client payers are data.
    with `dropped_lines`, `dropped_billed` and `reconcile_status`, at
    `GET /v1/tenants/{home}/cost-loads`. AWS has no invoice source, so AWS
    client loads are not reconciled against an invoice.
-5. **AWS reads.** Right after each AWS bill sync, Keel reads every payer that
-   sync visited through a second session of the same role, and logs one
-   `client reads` line per payer with `budgets`, `budgets_over`, `findings`,
-   `recommendations` and `dropped`. In the client's Tenant:
+5. **Budget, finding and rightsizing reads.** Right after each bill sync,
+   Keel reads every payer that sync visited through a second session of the
+   same role, and logs one `client reads` line per payer with `budgets`,
+   `budgets_over`, `findings`, `recommendations` and `dropped`. In the
+   client's Tenant:
    - `GET /v1/tenants/{tenant}/findings?kind=cloud_budget` lists one Finding
-     per AWS budget whose spend is over its limit (high) or whose forecast
-     is (medium). A budget under both raises nothing. Keel stores no other
-     budget status.
+     per budget whose spend is over its limit (high) or whose forecast is
+     (medium). A budget under both raises nothing. Keel stores no other
+     budget status. On Tencent only active budgets are read; a planned
+     (`CYCLE`) budget's limit is the current period's quota, and amounts are
+     taken as USD, since Tencent reports no currency on a budget.
    - `GET /v1/tenants/{tenant}/findings?kind=cloud_security` lists one
      Finding per active Security Hub finding (Critical, High, Medium or Low,
-     workflow New or Notified) on one of the Tenant's client-owned accounts,
-     with that account's Project and Environment.
+     workflow New or Notified) on AWS, or per Smart Advisor risky instance
+     (medium or high risk, any category) on Tencent, on one of the Tenant's
+     client-owned accounts, with that account's Project and Environment.
    - Rightsizing Recommendations appear with the Tenant's others, source
-     `native:aws_coh`.
+     `native:aws_coh` on AWS and `engine:vm` on Tencent. The Tencent ones
+     need 14 days of Cloud Monitor data; the first read backfills the last
+     14 days, and each later read fills any missing day and refreshes the
+     last two.
 
    A `cloud_budget` or `cloud_security` Finding resolves on the first read
    that no longer reports it. A read that fails resolves nothing.
@@ -397,5 +441,6 @@ re-registration. Moving a payer to another Tenant is not supported.
   applies. Nothing assumes those identities, and `PUT .../client-payer`
   refuses any provider but `tencent` and `aws`. There are no onboarding
   steps for them yet.
-- **Tencent Budgets, Advisor findings and rightsizing from client payers**
-  (#182). Only Tencent bills are read today.
+- **Tencent member accounts' rightsizing.** Only the payer account's own CVM
+  instances are rightsized. A member account's recorded `read_only_role` is
+  still unused.
