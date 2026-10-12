@@ -37,12 +37,47 @@ DROP INDEX CONCURRENTLY IF EXISTS cost_facts_example;
   "relation already exists". The drop makes the migration safe to run again.
 - Without a transaction, a migration is not atomic. Keep one index per
   migration file, so a failure leaves nothing half applied.
-- The large tables are `cost_facts`, `activities`, `findings` and
-  `webhook_deliveries`. Add a table to `largeTables` in
+- Name the index. An unnamed index cannot be dropped by name before a retry.
+- Do not wrap it in a `DO` block. `CREATE INDEX CONCURRENTLY` cannot run
+  inside a function body.
+- A `UNIQUE` or `PRIMARY KEY` constraint added by `ALTER TABLE` builds its
+  index under a lock that blocks writes. Build the unique index concurrently
+  as above, then attach it in a later migration with
+  `ALTER TABLE ... ADD CONSTRAINT name UNIQUE USING INDEX name`.
+- The large tables are `cost_facts`, `activities`, `findings`,
+  `webhook_deliveries`, `utilisation_daily`, `k8s_namespace_costs` and
+  `release_components`. Add a table to `largeTables` in
   `internal/store/migrations_lint_test.go` when it becomes hot.
 - `TestMigrationsBuildLargeTableIndexesConcurrently` fails any migration
-  numbered 00055 or higher that creates an index on one of these tables
-  without all three parts. Indexes on small tables are not checked.
+  numbered 00055 or higher that breaks one of these rules on one of these
+  tables. It reads the SQL after stripping comments, lower-casing and
+  removing identifier quotes, and ignores any schema prefix, so spelling does
+  not hide a statement. Indexes on small tables are not checked.
+
+### Replicas migrate one at a time
+
+Every `keel-api` replica runs `store.Migrate` when it starts, so replicas that
+start together race. Without serialising them, River's grants failed with
+`tuple concurrently updated` in most rounds of three or four parallel
+migrators (#239).
+
+`store.Migrate` takes a session advisory lock (`pg_advisory_lock`) on a
+dedicated connection before goose's migrations, River's migrations and
+River's grants, and holds it until all three finish. A second replica waits,
+then finds nothing pending. The wait is bounded by `lock_timeout` (15
+minutes), after which `Migrate` fails with "migration lock not acquired
+within 15m0s; another replica is still migrating". The lock is released when
+its connection closes, so a crashed replica does not leave it held.
+
+The lock connection is idle outside any transaction while the migrations run
+on other connections. `CREATE INDEX CONCURRENTLY` waits only for
+transactions, so a `NO TRANSACTION` migration is not blocked by the lock.
+`TestConcurrentIndexBuildIsNotBlockedByTheMigrationLock` checks this. A
+session lock needs a direct connection, so `KEEL_MIGRATE_URL` must not point
+at a transaction-mode pooler.
+
+Goose's own session locker was not used. It covers only goose's migrations,
+and River's migrations and grants would still race.
 
 ## Consequences
 
@@ -57,6 +92,11 @@ DROP INDEX CONCURRENTLY IF EXISTS cost_facts_example;
   is large and 00054 has not yet run. Its build would block ingest once.
 - A concurrent build takes longer and does two table scans. That is the price
   of not blocking writes.
-- The migrator needs no change. Goose v3.28 reads the `NO TRANSACTION`
-  marker per file, and `store.Migrate` runs through it. Verified against a real
+- A replica that starts during a long concurrent build waits for it before
+  serving. One longer than 15 minutes makes waiting replicas fail and
+  restart. `TestConcurrentMigratorsApplyOnce` runs four migrators at once
+  over five fresh databases and requires no errors and one goose row per
+  version.
+- Goose v3.28 reads the `NO TRANSACTION` marker per file, and
+  `store.Migrate` runs through it. Verified against a real
   database: up, down and up again create, remove and recreate the index.

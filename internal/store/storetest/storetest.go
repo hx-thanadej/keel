@@ -32,54 +32,8 @@ const (
 // connected as keel_app. Skips the test if EnvURL is unset.
 func New(t *testing.T) *store.Store {
 	t.Helper()
-	adminURL := os.Getenv(EnvURL)
-	if adminURL == "" {
-		t.Skipf("%s not set; skipping database test", EnvURL)
-	}
 	ctx := context.Background()
-
-	admin, err := pgx.Connect(ctx, adminURL)
-	if err != nil {
-		t.Fatalf("connect admin: %v", err)
-	}
-	defer func() { _ = admin.Close(ctx) }()
-
-	// Roles are cluster-wide; create once, reuse across tests. Mirrors db/roles.sql.
-	for _, stmt := range []string{
-		`DO $$ BEGIN
-		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '` + ownerRole + `') THEN
-		     CREATE ROLE ` + ownerRole + ` LOGIN PASSWORD '` + password + `';
-		   END IF;
-		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '` + appRole + `') THEN
-		     CREATE ROLE ` + appRole + ` LOGIN PASSWORD '` + password + `' NOSUPERUSER NOBYPASSRLS;
-		   END IF;
-		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keel_lookup') THEN
-		     CREATE ROLE keel_lookup NOLOGIN BYPASSRLS;
-		   END IF;
-		   GRANT keel_lookup TO ` + ownerRole + `;
-		 END $$`,
-	} {
-		if _, err := admin.Exec(ctx, stmt); err != nil && !isDuplicateRole(err) {
-			t.Fatalf("bootstrap roles: %v", err)
-		}
-	}
-
-	dbName := "keel_test_" + randomHex(t)
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+dbName+" OWNER "+ownerRole); err != nil {
-		t.Fatalf("create database: %v", err)
-	}
-	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), adminURL)
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() { _ = c.Close(context.Background()) }()
-		if _, err := c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)"); err != nil {
-			t.Logf("drop %s: %v", dbName, err)
-		}
-	})
-
+	adminURL, dbName := emptyDB(t)
 	if err := store.Migrate(ctx, withUser(t, adminURL, ownerRole, dbName)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -202,4 +156,66 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// EmptyDB creates a database owned by keel_owner with no migrations applied
+// and returns keel_owner's URL to it, for tests of the migrator itself.
+// Skips the test if EnvURL is unset.
+func EmptyDB(t *testing.T) string {
+	t.Helper()
+	adminURL, dbName := emptyDB(t)
+	return withUser(t, adminURL, ownerRole, dbName)
+}
+
+func emptyDB(t *testing.T) (adminURL, dbName string) {
+	t.Helper()
+	adminURL = os.Getenv(EnvURL)
+	if adminURL == "" {
+		t.Skipf("%s not set; skipping database test", EnvURL)
+	}
+	ctx := context.Background()
+
+	admin, err := pgx.Connect(ctx, adminURL)
+	if err != nil {
+		t.Fatalf("connect admin: %v", err)
+	}
+	defer func() { _ = admin.Close(ctx) }()
+
+	// Roles are cluster-wide; create once, reuse across tests. Mirrors db/roles.sql.
+	for _, stmt := range []string{
+		`DO $$ BEGIN
+		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '` + ownerRole + `') THEN
+		     CREATE ROLE ` + ownerRole + ` LOGIN PASSWORD '` + password + `';
+		   END IF;
+		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '` + appRole + `') THEN
+		     CREATE ROLE ` + appRole + ` LOGIN PASSWORD '` + password + `' NOSUPERUSER NOBYPASSRLS;
+		   END IF;
+		   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'keel_lookup') THEN
+		     CREATE ROLE keel_lookup NOLOGIN BYPASSRLS;
+		   END IF;
+		   GRANT keel_lookup TO ` + ownerRole + `;
+		 END $$`,
+	} {
+		if _, err := admin.Exec(ctx, stmt); err != nil && !isDuplicateRole(err) {
+			t.Fatalf("bootstrap roles: %v", err)
+		}
+	}
+
+	dbName = "keel_test_" + randomHex(t)
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+dbName+" OWNER "+ownerRole); err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	t.Cleanup(func() {
+		c, err := pgx.Connect(context.Background(), adminURL)
+		if err != nil {
+			t.Logf("cleanup connect: %v", err)
+			return
+		}
+		defer func() { _ = c.Close(context.Background()) }()
+		if _, err := c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)"); err != nil {
+			t.Logf("drop %s: %v", dbName, err)
+		}
+	})
+
+	return adminURL, dbName
 }
