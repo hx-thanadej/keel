@@ -50,6 +50,10 @@
 //	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
 //	KEEL_GITHUB_WEBHOOK_SECRET  signs the organisation webhook at POST /v1/webhooks/github: secret-scanning
 //	                    alerts, and governance events when KEEL_GITHUB_OWNER is an organisation
+//	KEEL_GITHUB_WEBHOOK_HOOK_ID  id of that webhook; every 15 min Keel asks GitHub to redeliver the failed deliveries
+//	                    of the last 24h, as the GitHub App below (organisation Webhooks: read & write)
+//	KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID, KEEL_GITHUB_APP_PRIVATE_KEY (PEM)  the App and its
+//	                    installation on KEEL_GITHUB_OWNER; Keel mints a one-hour installation token per run
 //	KEEL_PDPA_REGIONS   default data region set for Tenants with no PDPA settings (default ap-bangkok,ap-southeast-7)
 //	KEEL_DB_REGION      region of Keel's Postgres; unset, each PDPA residency run reports the database as not checked
 //	KEEL_GCP_BILL_BUCKET_REGION    region of KEEL_GCP_BILL_BUCKET; required with it (PDPA residency)
@@ -514,6 +518,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		deps.Webhooks = &api.WebhookDeps{Leaks: lk}
 		if owner := os.Getenv("KEEL_GITHUB_OWNER"); owner != "" && os.Getenv("KEEL_GITHUB_ORG") == "1" {
 			deps.Webhooks.Governance = &githubgov.Receiver{Store: st, Owner: owner, Policy: githubPolicy()}
+			if err := startWebhookCatchup(ctx, st, owner); err != nil {
+				pool.Close()
+				return api.Deps{}, noop, err
+			}
 		}
 	}
 	excs := exceptions.New(st)
@@ -609,6 +617,44 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 		})
 	}
 	return out
+}
+
+// startWebhookCatchup redelivers failed organisation webhook deliveries
+// every 15 minutes, looking back 24 hours (#226). It authenticates as the
+// GitHub App installation with only organisation webhooks write.
+func startWebhookCatchup(ctx context.Context, st *store.Store, org string) error {
+	hookID := os.Getenv("KEEL_GITHUB_WEBHOOK_HOOK_ID")
+	if hookID == "" {
+		slog.Warn("github webhook catch-up disabled: KEEL_GITHUB_WEBHOOK_HOOK_ID is unset, so failed deliveries are not redelivered")
+		return nil
+	}
+	hook, err := strconv.ParseInt(hookID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("KEEL_GITHUB_WEBHOOK_HOOK_ID: %w", err)
+	}
+	appID, installation, pemKey := os.Getenv("KEEL_GITHUB_APP_ID"), os.Getenv("KEEL_GITHUB_APP_INSTALLATION_ID"), os.Getenv("KEEL_GITHUB_APP_PRIVATE_KEY")
+	if appID == "" || installation == "" || pemKey == "" {
+		return errors.New("KEEL_GITHUB_WEBHOOK_HOOK_ID needs KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID and KEEL_GITHUB_APP_PRIVATE_KEY")
+	}
+	inst, err := strconv.ParseInt(installation, 10, 64)
+	if err != nil {
+		return fmt.Errorf("KEEL_GITHUB_APP_INSTALLATION_ID: %w", err)
+	}
+	key, err := ghapi.ParseAppKey([]byte(pemKey))
+	if err != nil {
+		return fmt.Errorf("KEEL_GITHUB_APP_PRIVATE_KEY: %w", err)
+	}
+	app := ghapi.App{ID: appID, Installation: inst, Key: key}
+	job := githubgov.Catchup{Store: st, Org: org, HookID: hook, Window: 24 * time.Hour, Pause: time.Second,
+		Token: func(ctx context.Context) (string, error) {
+			return app.Token(ctx, map[string]string{"organization_hooks": "write"})
+		}}
+	go every(ctx, 15*time.Minute, "github webhook catch-up", func(ctx context.Context) error {
+		res, err := job.Run(ctx)
+		slog.Info("github webhook catch-up", "attempts", res.Attempts, "missed", res.Missed, "redelivered", res.Redelivered)
+		return err
+	})
+	return nil
 }
 
 // daily runs fn now and then every 24h until ctx ends.

@@ -19,11 +19,12 @@
 GitHub offers the organisation audit-log API only on Enterprise Cloud. On
 Free and Team, Keel learns about governance changes from the organisation
 webhook it already uses for secret-scanning alerts ([access.md](access.md)).
-The hourly reconcile stays the source of truth, so a lost delivery is caught
-on the next run.
+The hourly reconcile stays the source of truth for the end state. A
+delivery that failed is redelivered by the catch-up job below, so its
+Activity is still written.
 
 Keel needs `KEEL_GITHUB_WEBHOOK_SECRET`, `KEEL_GITHUB_OWNER` and
-`KEEL_GITHUB_ORG=1`. No token is involved. Set it up as an organisation
+`KEEL_GITHUB_ORG=1`. Receiving needs no token. Set it up as an organisation
 owner under **Settings > Webhooks**. If the secret-scanning webhook exists,
 edit it rather than adding a second one.
 
@@ -66,8 +67,50 @@ Stricter changes raise no Finding. Examples are more reviews, extra rules,
 extra checks and wider targets. Rulesets Keel does not own also raise no
 Finding. Classic branch protection, visibility, collaborators, teams and
 membership are not protections Keel owns, so they are recorded as Activities
-only. Keel does not yet redeliver a delivery that failed (#226). The next
-reconcile reports the drift.
+only.
+
+#### Redelivering failed deliveries
+
+GitHub does not retry a delivery that failed because Keel was down,
+answered `5xx` or timed out. Every 15 minutes, and once at start, Keel reads
+the hook's deliveries of the last 24 hours and asks GitHub to resend each one
+that meets all of these conditions:
+
+- No attempt for its delivery id (`guid`) got a `2xx`.
+- The delivery id is not in `webhook_deliveries`, so Keel has not recorded it.
+- It has had fewer than 3 attempts. A payload Keel keeps rejecting is left
+  to the hourly reconcile.
+- Its first attempt is inside the 24-hour window.
+
+The redelivery arrives at the receiver with the original delivery id and a
+fresh signature. It becomes one Activity, and a Finding if it weakens a
+protection. Keel resends one delivery per second and stops the run on `403`
+or `429`. Each run logs `github webhook catch-up` with the counts.
+
+The job authenticates as a GitHub App installation. It never uses a personal
+access token. Each run mints a one-hour installation token limited to
+`organization_hooks: write`. With it Keel lists the deliveries and POSTs to
+`/orgs/{org}/hooks/{hook_id}/deliveries/{id}/attempts` for Keel's own hook.
+It writes nothing else to GitHub. Set it up as an organisation owner:
+
+1. Create a GitHub App owned by the organisation (**Settings > Developer
+   settings > GitHub Apps**). Turn its own webhook off. Under
+   **Organization permissions** set **Webhooks** to **Read and write** and
+   grant nothing else.
+2. Generate a private key and install the App on the organisation only.
+3. Find the hook id. It is the number at the end of the webhook's URL under
+   **Settings > Webhooks**, or `gh api /orgs/<org>/hooks --jq '.[] |
+   [.id, .config.url]'`.
+4. Set `KEEL_GITHUB_WEBHOOK_HOOK_ID` to the hook id, `KEEL_GITHUB_APP_ID`
+   to the App ID (or Client ID), and `KEEL_GITHUB_APP_INSTALLATION_ID` to
+   the number at the end of the installation's settings URL. Store the PEM
+   key in `KEEL_GITHUB_APP_PRIVATE_KEY` with Keel's other secrets.
+
+Without `KEEL_GITHUB_WEBHOOK_HOOK_ID`, Keel logs `github webhook catch-up
+disabled` at start and redelivers nothing. A failed delivery then stays
+missed until the next reconcile reports the drift. Keel refuses to start
+when the hook id is set but any of the three App settings is missing or
+malformed.
 
 ## Service Templates
 
