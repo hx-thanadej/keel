@@ -364,11 +364,13 @@ var mutators = []mutator{
 		}
 		return err
 	}},
-	{name: "leaked key", refusal: true, run: func(t *testing.T, w world, c *cloud, _ any) error {
-		return (&leaks.Service{Store: w.s, Alerts: alerts{}, Keys: map[string]leaks.Keys{"tencent": keys{c}}}).Process(context.Background(), "tat/crm", 1)
+	// Keel searches for a leaked key only with its own role, so a
+	// client-owned account is left out of the search (#240).
+	{name: "leaked key", run: func(t *testing.T, w world, c *cloud, _ any) error {
+		return (&leaks.Service{Store: w.s, Alerts: alerts{}, Keys: map[string]leaks.Keys{"tencent": keys{c}}}).Process(context.Background(), leaks.Repo{Name: "tat/crm"}, 1)
 	}, client: func(t *testing.T, w world) {
-		if n := w.count(t, `SELECT count(*) FROM findings WHERE kind = 'leaked_key' AND severity = 'critical' AND title LIKE '%client-owned 100001 is still active' AND detail->>'action' LIKE '%the client must disable it now%'`); n != 1 {
-			t.Error("no critical Finding telling the client to disable the leaked key")
+		if n := w.count(t, `SELECT count(*) FROM findings WHERE kind = 'leaked_key' AND severity = 'critical' AND detail->>'action' ILIKE '%not in the platform-owned accounts Keel searched%100001%find and disable it by hand%'`); n != 1 {
+			t.Error("no critical Finding saying the client-owned account was not searched and a human must find and disable the leaked key")
 		}
 	}},
 }
@@ -791,4 +793,146 @@ func sdkUses(f *ast.File, dir string) []string {
 		return true
 	})
 	return out
+}
+
+// TestKeelRolesAreGuarded: every tencent.MemberRole built outside tests
+// either is a client's role (ExternalID, built only by tencent.ReadOnlyRole
+// from a client payer's role) or carries the Guard that refuses a
+// client-owned account, so a new job that uses Keel's own role cannot reach
+// a client's organisation (ADR-0018, #240). GetCredential refuses an
+// unguarded Keel role at runtime too; this catches it before it runs.
+func TestKeelRolesAreGuarded(t *testing.T) {
+	var found, unguarded []string
+	err := filepath.WalkDir("../..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "web" || d.Name() == "node_modules" || strings.HasPrefix(d.Name(), ".")) && path != "../.." {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		roles, bad := scanRoles(fset, f)
+		found, unguarded = append(found, roles...), append(unguarded, bad...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) == 0 {
+		t.Fatal("no tencent.MemberRole construction found: the sweep no longer sees how Keel builds its roles")
+	}
+	for _, at := range unguarded {
+		t.Errorf("%s: build Keel's own role with keelRole in cmd/keel-api so it refuses client-owned accounts, and a client's role only with tencent.ReadOnlyRole or ReadsRole from a client payer's RoleARN and RoleExternalID", at)
+	}
+}
+
+// TestKeelRoleScanCatchesBypasses: each way to build Keel's own role without
+// a working Guard, or to pass it off as a client's role, is flagged; the
+// constructions production uses are not.
+func TestKeelRoleScanCatchesBypasses(t *testing.T) {
+	for src, want := range map[string]int{
+		`r := &tencent.MemberRole{Base: b, Account: a, Role: "KeelMember", Guard: guard}`:                     0,
+		`r, err := tencent.ReadsRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Region)`:                 0,
+		`r := &tencent.MemberRole{Base: b, Account: a, Role: "KeelMember"}`:                                   1,
+		`r := &tencent.MemberRole{Base: b, Account: a, Role: "KeelMember", Guard: nil}`:                       1,
+		`r := new(tencent.MemberRole); r.Account, r.Role = a, "KeelMember"`:                                   1,
+		`var r tencent.MemberRole; r.Account = a`:                                                             1,
+		`r := &tencent.MemberRole{Base: b, Account: a, Role: "KeelMember", ExternalID: "x"}`:                  1,
+		`r, err := tencent.ReadOnlyRole(base, "qcs::cam::uin/" + a + ":roleName/KeelMember", a, "x", region)`: 1,
+		`r, err := tencent.ReadsRole(base, keelARN, p.PayerID, p.RoleExternalID, p.Region)`:                   1,
+	} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "x.go", "package main\nfunc f() {\n"+src+"\n}\n", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", src, err)
+		}
+		if _, bad := scanRoles(fset, f); len(bad) != want {
+			t.Errorf("%s: flagged %v, want %d", src, bad, want)
+		}
+	}
+}
+
+// scanRoles returns where f builds a tencent.MemberRole, and which of those
+// are not provably guarded.
+func scanRoles(fset *token.FileSet, f *ast.File) (found, unguarded []string) {
+	pkg := f.Name.Name
+	flag := func(n ast.Node, why string) {
+		at := fset.Position(n.Pos()).String()
+		found = append(found, at)
+		if why != "" {
+			unguarded = append(unguarded, at+" "+why)
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CompositeLit:
+			if !isMemberRole(x.Type, pkg) {
+				return true
+			}
+			why := "builds Keel's own tencent.MemberRole without a Guard"
+			for _, e := range x.Elts {
+				kv, ok := e.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				switch k, _ := kv.Key.(*ast.Ident); {
+				case k == nil:
+				case k.Name == "Guard" && !isNil(kv.Value):
+					why = ""
+				case k.Name == "ExternalID" && pkg == "tencent":
+					why = ""
+				case k.Name == "ExternalID":
+					why = "sets ExternalID outside tencent.ReadOnlyRole"
+				}
+			}
+			flag(x, why)
+		case *ast.CallExpr:
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 && isMemberRole(x.Args[0], pkg) {
+				flag(x, "builds a tencent.MemberRole with new, without a Guard")
+			}
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && pkg != "tencent" && (sel.Sel.Name == "ReadOnlyRole" || sel.Sel.Name == "ReadsRole") {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "tencent" {
+					why := ""
+					if len(x.Args) < 4 || !isField(x.Args[1], "RoleARN") || !isField(x.Args[3], "RoleExternalID") {
+						why = "builds a client's role from something other than a client payer's RoleARN and RoleExternalID"
+					}
+					flag(x, why)
+				}
+			}
+		case *ast.ValueSpec:
+			if x.Type != nil && isMemberRole(x.Type, pkg) {
+				flag(x, "declares a zero tencent.MemberRole, without a Guard")
+			}
+		}
+		return true
+	})
+	return found, unguarded
+}
+
+func isNil(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "nil"
+}
+
+func isField(e ast.Expr, name string) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == name
+}
+
+func isMemberRole(e ast.Expr, pkg string) bool {
+	switch x := e.(type) {
+	case *ast.SelectorExpr:
+		id, ok := x.X.(*ast.Ident)
+		return ok && id.Name == "tencent" && x.Sel.Name == "MemberRole"
+	case *ast.Ident:
+		return pkg == "tencent" && x.Name == "MemberRole"
+	}
+	return false
 }

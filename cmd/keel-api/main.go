@@ -482,7 +482,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		bg.Audit = func(account string) (breakglass.Audit, error) {
 			// The organisation admin account is read with Keel's own role; members through the access role.
-			var creds common.Provider = &tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region}
+			var creds common.Provider = keelRole(st, tencent.Credentials(), account, accessRole, region)
 			if account == os.Getenv("KEEL_TENCENT_ORG_ADMIN_UIN") {
 				creds = tencent.Credentials()
 			}
@@ -497,7 +497,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return err
 		})
 		standing := access.Standing{Store: st, Directory: dir, BreakGlass: bg.Names, Users: func(account string) (access.Users, error) {
-			return tencent.NewCAMUsers(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+			return tencent.NewCAMUsers(keelRole(st, tencent.Credentials(), account, accessRole, region))
 		}}
 		go daily(ctx, "standing access", func(ctx context.Context) error {
 			res, err := standing.Run(ctx)
@@ -512,7 +512,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		lk.Keys["tencent"] = tencent.AccessKeys{API: func(account string) (tencent.KeyAPI, error) {
-			return tencent.NewKeyAPI(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+			return tencent.NewKeyAPI(keelRole(st, tencent.Credentials(), account, accessRole, region))
 		}}
 	}
 	if len(lk.WebhookSecret) > 0 {
@@ -578,11 +578,11 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		ci := ciidentity.Manager{Store: st, Provider: "tencent", JWKS: ciidentity.GitHubJWKS(nil),
 			IAM: func(account string) (ciidentity.IAM, error) {
-				api, err := tencent.NewCAM(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+				api, err := tencent.NewCAM(keelRole(st, tencent.Credentials(), account, accessRole, region))
 				return tencent.CIIdentity{API: api}, err
 			}}
 		bounds := boundary.Manager{Store: st, Provider: "tencent", IAM: func(account string) (boundary.IAM, error) {
-			return tencent.NewBoundaries(&tencent.MemberRole{Base: tencent.Credentials(), Account: account, Role: accessRole, Region: region})
+			return tencent.NewBoundaries(keelRole(st, tencent.Credentials(), account, accessRole, region))
 		}}
 		go daily(ctx, "permission boundaries", func(ctx context.Context) error {
 			res, err := bounds.Check(ctx)
@@ -1080,7 +1080,7 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 		return errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_BUCKET")
 	}
 	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
-	creds := billCredentials(tencent.Credentials(), payer, os.Getenv("KEEL_TENCENT_BILL_ROLE"), region)
+	creds := billCredentials(st, tencent.Credentials(), payer, os.Getenv("KEEL_TENCENT_BILL_ROLE"), region)
 	objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
 		Creds: archive.Refreshing(tencent.STS{Creds: creds}, 10*time.Minute)})
 	if err != nil {
@@ -1130,12 +1130,21 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 // billCredentials is the identity that reads the payer's bills and invoices.
 // With a payer billing role it assumes that role from Keel's base identity,
 // so payer billing access never becomes Keel's identity for other calls.
-func billCredentials(base common.Provider, payer, role, region string) common.Provider {
+func billCredentials(st *store.Store, base common.Provider, payer, role, region string) common.Provider {
 	if role == "" {
 		slog.Warn("KEEL_TENCENT_BILL_ROLE is unset; tencent bill sync reads bills with Keel's base identity")
 		return base
 	}
-	return &tencent.MemberRole{Base: base, Account: payer, Role: role, Region: region}
+	return keelRole(st, base, payer, role, region)
+}
+
+// keelRole is Keel's own role in a Tencent account. It is never assumed in a
+// client-owned Cloud Account, which Keel reads only through the client's
+// read-only role (ADR-0018, #240).
+func keelRole(st *store.Store, base common.Provider, account, role, region string) *tencent.MemberRole {
+	return &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region, Guard: func(account string) error {
+		return catalog.RequireKeelReachable(context.Background(), st, "tencent", account)
+	}}
 }
 
 // clientBillSyncs reads client payers' bills on each provider, each through
@@ -1608,21 +1617,7 @@ func startUtilisation(ctx context.Context, st *store.Store) error {
 		}
 	}
 	if role := os.Getenv("KEEL_TENCENT_MEMBER_ROLE"); role != "" {
-		region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
-		base := tencent.Credentials()
-		roles := map[string]*tencent.MemberRole{}
-		job.CVM = func(account string) (*utilisation.TencentCVM, error) {
-			r, ok := roles[account]
-			if !ok {
-				r = &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region}
-				roles[account] = r
-			}
-			api, err := utilisation.NewMonitorClient(region, r)
-			if err != nil {
-				return nil, err
-			}
-			return &utilisation.TencentCVM{API: api}, nil
-		}
+		job.CVM = tencentCVMUtilisation(st, tencent.Credentials(), role, envOr("KEEL_TENCENT_REGION", "ap-bangkok"), "")
 	}
 	if len(job.Clusters) == 0 && job.CVM == nil && os.Getenv("KEEL_AWS_COH") != "1" {
 		return nil // nothing to collect and no recommender to import from
@@ -1711,7 +1706,7 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 	}
 	vm := rightsize.VMEngine{Service: rightsize.Service{Store: st}, Catalog: tencent.Catalog{API: catAPI}, Region: region,
 		Inventory: func(account string) rightsize.Inventory {
-			api, err := tencent.NewCVM(region, &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region}, "")
+			api, err := tencent.NewCVM(region, keelRole(st, base, account, role, region), "")
 			if err != nil {
 				return failingInventory{err}
 			}
@@ -1724,14 +1719,42 @@ func rightsizeAll(ctx context.Context, st *store.Store) {
 	}
 	grace, _ := strconv.Atoi(envOr("KEEL_WASTE_GRACE_DAYS", "7"))
 	waste := rightsize.WasteEngine{Service: rightsize.Service{Store: st}, GraceDays: max(grace, 1), CleanupEnabled: os.Getenv("KEEL_WASTE_CLEANUP") == "1",
-		Scanner: func(account string) (rightsize.WasteScanner, rightsize.Cleaner, error) {
-			w, err := tencent.NewWaste(region, &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region})
-			return w, w, err
-		}}
+		Scanner: tencentWasteScanner(st, base, role, region, "")}
 	if res, err := waste.Run(ctx); err != nil {
 		slog.Error("waste scan failed", "err", err)
 	} else {
 		slog.Info("waste", "raised", res.Raised, "kept", res.Kept, "deleted", res.Deleted, "errors", res.Errors)
+	}
+}
+
+// tencentCVMUtilisation reads each member account's Cloud Monitor through
+// Keel's member role there, one role per account so its session is reused.
+// stsEndpoint overrides the STS host, for tests.
+func tencentCVMUtilisation(st *store.Store, base common.Provider, role, region, stsEndpoint string) func(string) (*utilisation.TencentCVM, error) {
+	roles := map[string]*tencent.MemberRole{}
+	return func(account string) (*utilisation.TencentCVM, error) {
+		r, ok := roles[account]
+		if !ok {
+			r = keelRole(st, base, account, role, region)
+			r.Endpoint = stsEndpoint
+			roles[account] = r
+		}
+		api, err := utilisation.NewMonitorClient(region, r)
+		if err != nil {
+			return nil, err
+		}
+		return &utilisation.TencentCVM{API: api}, nil
+	}
+}
+
+// tencentWasteScanner scans and cleans each member account through Keel's
+// member role there. stsEndpoint overrides the STS host, for tests.
+func tencentWasteScanner(st *store.Store, base common.Provider, role, region, stsEndpoint string) func(string) (rightsize.WasteScanner, rightsize.Cleaner, error) {
+	return func(account string) (rightsize.WasteScanner, rightsize.Cleaner, error) {
+		r := keelRole(st, base, account, role, region)
+		r.Endpoint = stsEndpoint
+		w, err := tencent.NewWaste(region, r)
+		return w, w, err
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -92,6 +93,7 @@ func (s *Service) SetClient(c *river.Client[pgx.Tx]) { s.river = c }
 
 type jobArgs struct {
 	Repo     string `json:"repo"`
+	RepoID   int64  `json:"repo_id,omitempty"`
 	Number   int    `json:"number"`
 	Delivery string `json:"delivery"`
 }
@@ -133,6 +135,7 @@ func (s *Service) Receive(ctx context.Context, delivery, event string, body []by
 				Number int `json:"number"`
 			} `json:"alert"`
 			Repository struct {
+				ID       int64  `json:"id"`
 				FullName string `json:"full_name"`
 			} `json:"repository"`
 		}
@@ -145,7 +148,7 @@ func (s *Service) Receive(ctx context.Context, delivery, event string, body []by
 		if s.river == nil {
 			return errors.New("leaked-key processing has no River client")
 		}
-		_, err = s.river.InsertTx(ctx, tx, jobArgs{Repo: p.Repository.FullName, Number: p.Alert.Number, Delivery: delivery}, &river.InsertOpts{MaxAttempts: 10})
+		_, err = s.river.InsertTx(ctx, tx, jobArgs{Repo: p.Repository.FullName, RepoID: p.Repository.ID, Number: p.Alert.Number, Delivery: delivery}, &river.InsertOpts{MaxAttempts: 10})
 		return err
 	})
 }
@@ -176,8 +179,16 @@ func mask(id string) string {
 
 var keelActor = activity.Actor{Type: activity.ActorKeel, UID: "keel:leaked-keys"}
 
+// Repo is the repository an alert names: GitHub's id, which Services
+// record, and its owner/name.
+type Repo struct {
+	ID   int64
+	Name string
+}
+
 // Process handles one alert: find, disable, report.
-func (s *Service) Process(ctx context.Context, repo string, number int) error {
+func (s *Service) Process(ctx context.Context, r Repo, number int) error {
+	repo := r.Name
 	typ, secret, err := s.Alerts.Secret(ctx, repo, number)
 	if err != nil {
 		return err
@@ -221,67 +232,138 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 			return err
 		}
 	}
+	ids := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		ids = append(ids, a.external)
+	}
+	clients, err := catalog.ClientOwned(ctx, s.Store, provider, ids)
+	if err != nil {
+		return err
+	}
+	ids = slices.DeleteFunc(ids, func(id string) bool { return clients[id] }) // searched only through Keel's own role
 	var found Key
-	ok := false
+	ok, searched := false, false
 	if k := s.Keys[provider]; k != nil && keyID != "" {
-		ids := make([]string, 0, len(accounts))
-		for _, a := range accounts {
-			ids = append(ids, a.external)
-		}
 		if found, ok, err = k.Find(ctx, keyID, ids); err != nil {
 			return err
 		}
-	}
-	owner := acct{tenant: home}
-	for _, a := range accounts {
-		if ok && a.external == found.Account {
-			owner = a
-		}
-	}
-	disabled := false
-	if ok {
-		err := catalog.RequirePlatformOwned(ctx, s.Store, owner.tenant, owner.id, "DisableLeakedKey", keelActor)
-		if err != nil && !errors.Is(err, catalog.ErrClientOwned) {
-			return err
-		}
-		if err == nil {
-			if err := s.Keys[provider].Disable(ctx, found); err != nil {
-				return err // retried: the key must not stay active
-			}
-			disabled = true
-		}
+		searched = true
 	}
 	title := fmt.Sprintf("Leaked %s access key %s in %s", provider, mask(keyID), repo)
-	detail := map[string]any{"repository": repo, "alert": number, "key": mask(keyID), "provider": provider}
-	act := "Keel could not find this key in any account it manages: find and disable it by hand"
-	switch {
-	case disabled:
-		title = fmt.Sprintf("Leaked %s access key %s of %s in %s was disabled", provider, mask(keyID), found.Owner, found.Account)
-		detail["account"], detail["owner"] = found.Account, found.Owner
-		act = "disabled at once; move the owner to workload identity (no replacement key)"
-	case ok:
-		title = fmt.Sprintf("Leaked %s access key %s of %s in client-owned %s is still active", provider, mask(keyID), found.Owner, found.Account)
-		detail["account"], detail["owner"], detail["client_owned"] = found.Account, found.Owner, true
-		act = "Keel is read-only in the client's organisation (ADR-0018) and did not disable it: the client must disable it now and move the owner to workload identity"
+	detail := func() map[string]any {
+		return map[string]any{"repository": repo, "alert": number, "key": mask(keyID), "provider": provider}
 	}
+	report := func(t target, title string, detail map[string]any, act string, disabled bool) error {
+		return s.report(ctx, t, provider, keyID, repo, number, title, detail, act, disabled)
+	}
+	if ok {
+		owner := target{tenant: home}
+		for _, a := range accounts {
+			if a.external == found.Account {
+				owner = target{tenant: a.tenant, id: a.id, project: a.project, env: a.env}
+			}
+		}
+		d := detail()
+		d["account"], d["owner"] = found.Account, found.Owner
+		err := catalog.RequirePlatformOwned(ctx, s.Store, owner.tenant, owner.id, "DisableLeakedKey", keelActor)
+		if errors.Is(err, catalog.ErrClientOwned) { // switched to client-owned since the search
+			d["client_owned"] = true
+			return report(owner, fmt.Sprintf("Leaked %s access key %s of %s in client-owned %s is still active", provider, mask(keyID), found.Owner, found.Account), d,
+				"Keel is read-only in the client's organisation (ADR-0018) and did not disable it: the client must disable it now and move the owner to workload identity", false)
+		}
+		if err != nil {
+			return err
+		}
+		if err := s.Keys[provider].Disable(ctx, found); err != nil {
+			return err // retried: the key must not stay active
+		}
+		return report(owner, fmt.Sprintf("Leaked %s access key %s of %s in %s was disabled", provider, mask(keyID), found.Owner, found.Account), d,
+			"disabled at once; move the owner to workload identity (no replacement key)", true)
+	}
+	// Not in a platform-owned account. Keel does not search client-owned
+	// accounts (ADR-0018), so when a client's Service owns the repository the
+	// key is most likely the client's: only they can find and disable it.
+	unsearched := map[string][]string{} // tenant → its client-owned accounts
+	var all []string
+	for _, a := range accounts {
+		if clients[a.external] {
+			unsearched[a.tenant] = append(unsearched[a.tenant], a.external)
+			all = append(all, a.external)
+		}
+	}
+	if searched && r.ID != 0 {
+		rows, err := s.Store.AppPool().Query(ctx, `SELECT tenant_id::text, service_id::text FROM services_by_repository($1)`, r.ID)
+		if err != nil {
+			return err
+		}
+		services, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (target, error) {
+			var t target
+			return t, row.Scan(&t.tenant, &t.service)
+		})
+		if err != nil {
+			return err
+		}
+		reported := map[string]bool{}
+		for _, t := range services {
+			if len(unsearched[t.tenant]) == 0 || reported[t.tenant] {
+				continue
+			}
+			reported[t.tenant] = true
+			d := detail()
+			d["client_owned_accounts"] = unsearched[t.tenant]
+			act := fmt.Sprintf("the repository belongs to your Service and the key is not in the platform-owned accounts Keel searched. Keel does not search client-owned accounts (ADR-0018): you must find this key in your accounts (%s), disable it now and move the owner to workload identity",
+				strings.Join(unsearched[t.tenant], ", "))
+			if err := report(t, title, d, act, false); err != nil {
+				return err
+			}
+		}
+		if len(reported) > 0 {
+			return nil
+		}
+	}
+	d := detail()
+	act := "Keel could not search for this key: find and disable it by hand"
+	if searched {
+		act = "the key is not in the platform-owned accounts Keel searched"
+		if len(all) > 0 {
+			d["client_owned_accounts"] = all
+			act += fmt.Sprintf(", and Keel does not search client-owned accounts (ADR-0018): %s", strings.Join(all, ", "))
+		}
+		act += ". Find and disable it by hand"
+	}
+	return report(target{tenant: home}, title, d, act, false)
+}
+
+// target is where a leaked key's Finding is raised: a Tenant, and the
+// account or Service the key is attributed to there.
+type target struct{ tenant, id, project, env, service string }
+
+func (s *Service) report(ctx context.Context, t target, provider, keyID, repo string, number int, title string, detail map[string]any, act string, disabled bool) error {
 	detail["action"] = act
 	raw, _ := json.Marshal(detail)
-	return s.Store.InTenant(ctx, owner.tenant, func(tx pgx.Tx) error {
-		var project, env *string
-		if owner.project != "" {
-			project, env = &owner.project, &owner.env
+	return s.Store.InTenant(ctx, t.tenant, func(tx pgx.Tx) error {
+		var project, env, service, team *string
+		if t.project != "" {
+			project, env = &t.project, &t.env
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, owner_team_id, first_seen_at)
-			VALUES ($1, 'leaked_key', $2, 'critical', $3, $4, $5, $6, (SELECT team_id FROM projects WHERE id = $5), $7)
+		if t.service != "" {
+			var p, tm string
+			if err := tx.QueryRow(ctx, `SELECT project_id::text, team_id::text FROM services WHERE id = $1`, t.service).Scan(&p, &tm); err != nil {
+				return err
+			}
+			project, service, team = &p, &t.service, &tm
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, project_id, environment_id, service_id, owner_team_id, first_seen_at)
+			VALUES ($1, 'leaked_key', $2, 'critical', $3, $4, $5, $6, $7, coalesce($8::uuid, (SELECT team_id FROM projects WHERE id = $5)), $9)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = now(), detail = excluded.detail`,
-			owner.tenant, "leaked_key:"+provider+":"+mask(keyID), title, raw, project, env, s.now()); err != nil {
+			t.tenant, "leaked_key:"+provider+":"+mask(keyID), title, raw, project, env, service, team, s.now()); err != nil {
 			return err
 		}
 		outcome := activity.Success
 		if !disabled {
 			outcome = activity.Failure
 		}
-		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: owner.tenant, Source: "keel/leaked-keys", Type: "keel.leaked_key.handled", Subject: "repository/" + repo,
+		_, err := activity.Record(ctx, tx, activity.Activity{TenantID: t.tenant, Source: "keel/leaked-keys", Type: "keel.leaked_key.handled", Subject: "repository/" + repo,
 			Operation: "DisableLeakedKey", Kind: activity.Update, Actor: keelActor, Outcome: outcome, StatusDetail: title + ": " + act,
 			Why: activity.Why{Reason: fmt.Sprintf("GitHub secret scanning alert %s#%d", repo, number)}})
 		return err
@@ -294,5 +376,5 @@ type worker struct {
 }
 
 func (w *worker) Work(ctx context.Context, job *river.Job[jobArgs]) error {
-	return w.s.Process(ctx, job.Args.Repo, job.Args.Number)
+	return w.s.Process(ctx, Repo{ID: job.Args.RepoID, Name: job.Args.Repo}, job.Args.Number)
 }

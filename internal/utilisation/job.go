@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/hx-thanadej/keel/internal/catalog"
 )
 
 // Cluster is a Kubernetes cluster to collect from. DefaultScope
@@ -168,6 +172,14 @@ func (j Job) cvm(ctx context.Context, day time.Time) error {
 		byAcct := map[string][]inst{}
 		for _, x := range insts {
 			byAcct[x.account] = append(byAcct[x.account], x)
+		}
+		clients, err := catalog.ClientOwned(ctx, j.Store.Store, "tencent", slices.Collect(maps.Keys(byAcct)))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for acct := range clients {
+			delete(byAcct, acct) // read through the client's role (#182), never Keel's member role
 		}
 		for acct, xs := range byAcct {
 			col, err := j.CVM(acct)

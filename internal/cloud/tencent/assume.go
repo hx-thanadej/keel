@@ -14,9 +14,11 @@ import (
 	sts "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts/v20180813"
 )
 
-// MemberRole assumes a read-only role in a member account with Keel's own
-// keyless credentials, so Keel reads each account (Cloud Monitor, CVM) with
-// short-lived credentials scoped to that account (ADR-0006, ADR-0007).
+// MemberRole assumes a role in an account from Keel's own keyless
+// credentials, so Keel reaches each account with short-lived credentials
+// scoped to it (ADR-0006, ADR-0007). Without an ExternalID it is one of
+// Keel's own roles, assumed only after Guard allows Account; with one it is
+// a client's read-only role (ReadOnlyRole).
 type MemberRole struct {
 	Base    common.Provider
 	Account string // member UIN
@@ -29,6 +31,10 @@ type MemberRole struct {
 	// Policy, when set, is the session policy sent on AssumeRole, limiting
 	// the session to what it allows.
 	Policy string
+	// Guard refuses an account Keel's own roles must not enter, a
+	// client-owned Cloud Account (ADR-0018). Keel's own role is never
+	// assumed without one.
+	Guard func(account string) error
 	// Endpoint overrides the STS host (scheme://host), for tests.
 	Endpoint string
 
@@ -85,6 +91,14 @@ func (m *MemberRole) GetCredential() (common.CredentialIface, error) {
 	defer m.mu.Unlock()
 	if m.cached != nil && time.Until(m.expires) > 5*time.Minute {
 		return m.cached, nil
+	}
+	if m.ExternalID == "" {
+		if m.Guard == nil {
+			return nil, fmt.Errorf("keel's own role %s has no ownership guard", m.RoleArn())
+		}
+		if err := m.Guard(m.Account); err != nil {
+			return nil, err
+		}
 	}
 	base, err := m.Base.GetCredential()
 	if err != nil {
