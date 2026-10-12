@@ -3,6 +3,7 @@ package breakglass_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -78,4 +79,39 @@ func TestBreakGlassUseNeedsPostMortemAndDrillsComeDue(t *testing.T) {
 		t.Fatalf("open %d %v", open, err)
 	}
 	storetest.ClockedFindings(t, s, "breakglass")
+}
+
+// TestBreakGlassAuditSkipsClientAccounts: the audit log is read through
+// Keel's own role, which never enters a client-owned account (ADR-0018,
+// #240). Watch skips a break-glass identity in a client's account, rather
+// than failing on it, and still audits the platform one.
+func TestBreakGlassAuditSkipsClientAccounts(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	_, _ = s.CreateTenant(ctx, "harmonyx", "HarmonyX", true)
+	tat, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	if err := s.InTenant(ctx, tat, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role)
+			VALUES ($1, 'tencent', '100009', 'prod', 'client', '{"role_arn": "qcs::cam::uin/100009:roleName/keel-readonly"}')`, tat)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	admin := activity.Actor{Type: activity.ActorHuman, UID: "user:admin@harmonyx.co"}
+	var audited []string
+	svc := breakglass.Service{Store: s, Now: func() time.Time { return storetest.Epoch }, Audit: func(account string) (breakglass.Audit, error) {
+		audited = append(audited, account)
+		return audit{}, nil
+	}}
+	for _, account := range []string{"200045645249", "100009"} {
+		if _, err := svc.Register(ctx, breakglass.Identity{Account: account, PrincipalID: "100099", Name: "breakglass-" + account, Holder: "CTO safe", HardwareMFA: true}, admin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := svc.Watch(ctx, time.Hour); err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	if !slices.Equal(audited, []string{"200045645249"}) {
+		t.Fatalf("audited %v, want only platform-owned 200045645249", audited)
+	}
 }

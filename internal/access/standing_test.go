@@ -2,6 +2,7 @@ package access_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -57,4 +58,38 @@ func TestStandingAccessReport(t *testing.T) {
 		t.Fatalf("after cleanup %+v", res)
 	}
 	storetest.ClockedFindings(t, w.s, "standing_access")
+}
+
+// TestStandingAccessSkipsClientAccounts: CAM users are listed through
+// Keel's own role, which never enters a client-owned account (ADR-0018,
+// #240). The run skips the client's prod account, rather than failing on
+// it, and still reports the platform one.
+func TestStandingAccessSkipsClientAccounts(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	if err := w.s.InTenant(ctx, w.tenant, func(tx pgx.Tx) error {
+		var env string
+		if err := tx.QueryRow(ctx, `INSERT INTO environments (tenant_id, project_id, name) SELECT tenant_id, project_id, 'production' FROM environments WHERE id = $1 RETURNING id`, w.prod).Scan(&env); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, environment_id, provider, external_id, name) VALUES ($1, $2, 'tencent', '100003', 'production')`, w.tenant, env); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE cloud_accounts SET ownership = 'client', read_only_role = '{"role_arn": "qcs::cam::uin/100002:roleName/keel-readonly"}' WHERE external_id = '100002'`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var listed []string
+	s := access.Standing{Store: w.s, Users: func(account string) (access.Users, error) {
+		listed = append(listed, account)
+		return users{"alice"}, nil
+	}, Now: storetest.Clock()}
+	res, err := s.Run(ctx)
+	if err != nil || res.Standing != 1 {
+		t.Fatalf("%+v %v: want the platform account's CAM user reported and no error", res, err)
+	}
+	if !slices.Equal(listed, []string{"100003"}) {
+		t.Fatalf("listed CAM users in %v, want only platform-owned 100003", listed)
+	}
 }
