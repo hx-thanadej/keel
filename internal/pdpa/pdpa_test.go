@@ -356,6 +356,24 @@ func TestResidencyChecksEachActiveClientPayerBillBucketInItsOwnTenant(t *testing
 	}
 }
 
+func TestResidencyDoesNotCheckAPlatformOwnedPayersBucketAsAClientBucket(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.New(t)
+	tat, _ := s.CreateTenant(ctx, "tat", "TAT", false)
+	svc := pdpa.Service{Store: s, Now: newClock().now}
+
+	platform, _ := account(t, s, tat, "plat")
+	exec(t, s, tat, `INSERT INTO client_payers (cloud_account_id, tenant_id, provider, bucket, region, mode) VALUES ($1, $2, 'tencent', 'platform-bills-1250000007', 'eu-frankfurt', 'per-day')`, platform, tat)
+	clientPayer(t, s, tat, "100001", "tat-sg-bills-1250000002", "ap-singapore")
+
+	if _, err := svc.RunResidency(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := bucketFindings(t, s, tat), []string{"pdpa_residency:bill_bucket:tencent:tat-sg-bills-1250000002:ap-singapore"}; !slices.Equal(got, want) {
+		t.Fatalf("bill bucket Findings %v, want only the client payer's %v: a platform-owned payer's bucket is not a client bucket", got, want)
+	}
+}
+
 // expirable seeds, for every deletable class, one row past its retention
 // period and one inside it, plus rows retention must never touch. It returns
 // the keys of the expired rows per class. The nth seeding of a Tenant shifts
