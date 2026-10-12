@@ -157,7 +157,7 @@ func (s *Service) do(ctx context.Context, p auth.Principal, w write, fn func(tx 
 		}
 		return ErrForbidden
 	}
-	return s.store.InTenant(ctx, w.res.TenantID, func(tx pgx.Tx) error {
+	err = s.store.InTenant(ctx, w.res.TenantID, func(tx pgx.Tx) error {
 		id, err := fn(tx)
 		if err != nil {
 			return err
@@ -170,7 +170,15 @@ func (s *Service) do(ctx context.Context, p auth.Principal, w write, fn func(tx 
 		})
 		return err
 	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
 }
+
+// errUnchanged is returned by a write's fn when the resource is already in
+// the requested state. The write succeeds with no Activity.
+var errUnchanged = errors.New("unchanged")
 
 // recordDenied writes the denial into the target Tenant's log, so a Tenant sees
 // attempts on its data; it falls back to the caller's own Tenant.

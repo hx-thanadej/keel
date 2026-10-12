@@ -102,7 +102,7 @@ func (s *Service) SetClientPayer(ctx context.Context, p auth.Principal, tenantID
 	return out, mapErr(err)
 }
 
-// RotateClientPayerExternalID gives an active client payer a new random
+// RotateClientPayerExternalID gives an active, client-owned payer a new random
 // ExternalId and returns it this once (#213). The next bill sync assumes the
 // payer's role with it, so the client must put it in the role's trust policy;
 // until then the sync raises client_role_unusable naming the new id. The
@@ -116,6 +116,14 @@ func (s *Service) RotateClientPayerExternalID(ctx context.Context, p auth.Princi
 	err := s.do(ctx, p, write{action: "cloud_account.rotate_external_id", res: authz.Resource{Type: "cloud_account", ID: accountID, TenantID: tenantID},
 		actType: "keel.cloud_account.client_payer_external_id_rotated", operation: "RotateClientPayerExternalID", kind: activity.Update, why: why},
 		func(tx pgx.Tx) (string, error) {
+			var o Ownership
+			if err := tx.QueryRow(ctx, `SELECT a.ownership FROM cloud_accounts a JOIN client_payers p ON p.cloud_account_id = a.id
+				WHERE a.id = $1 AND a.archived_at IS NULL FOR SHARE OF a`, accountID).Scan(&o); err != nil {
+				return "", err
+			}
+			if o != OwnershipClient {
+				return "", invalid("only a client-owned Cloud Account's ExternalId can be rotated; sync assumes no client role for a platform-owned one")
+			}
 			err := tx.QueryRow(ctx, `UPDATE client_payers p SET role_external_id = $2, updated_at = now() FROM cloud_accounts a
 				WHERE p.cloud_account_id = $1 AND a.id = p.cloud_account_id AND a.archived_at IS NULL
 				RETURNING p.cloud_account_id::text, p.tenant_id::text, p.bucket, p.prefix, p.region, p.mode, p.kms_key_arn, p.updated_at`, accountID, out.RoleExternalID).

@@ -468,13 +468,22 @@ func (s *Service) ArchiveCloudAccount(ctx context.Context, p auth.Principal, ten
 // same id, ownership, read-only role and client payer row. It is how an
 // archived payer is re-onboarded (#213); registering the account again
 // conflicts, since (provider, external_id) stays unique across archived rows.
+// Unarchiving an active account returns it unchanged and records nothing, so
+// a retried call is safe and the log shows only real re-onboardings.
 func (s *Service) UnarchiveCloudAccount(ctx context.Context, p auth.Principal, tenantID, id, why string) (CloudAccount, error) {
 	var a CloudAccount
 	err := s.do(ctx, p, write{action: "cloud_account.unarchive", res: authz.Resource{Type: "cloud_account", ID: id, TenantID: tenantID},
 		actType: "keel.cloud_account.unarchived", operation: "UnarchiveCloudAccount", kind: activity.Update, why: why},
 		func(tx pgx.Tx) (string, error) {
-			err := tx.QueryRow(ctx, `UPDATE cloud_accounts SET archived_at = NULL WHERE id = $1 RETURNING `+accountCols, id).
-				Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.Ownership, &a.ReadOnlyRole, &a.ArchivedAt)
+			if err := tx.QueryRow(ctx, `SELECT `+accountCols+` FROM cloud_accounts WHERE id = $1 FOR UPDATE`, id).
+				Scan(&a.ID, &a.TenantID, &a.EnvironmentID, &a.Provider, &a.ExternalID, &a.Name, &a.Ownership, &a.ReadOnlyRole, &a.ArchivedAt); err != nil {
+				return id, err
+			}
+			if a.ArchivedAt == nil {
+				return id, errUnchanged
+			}
+			_, err := tx.Exec(ctx, `UPDATE cloud_accounts SET archived_at = NULL WHERE id = $1`, id)
+			a.ArchivedAt = nil
 			return id, err
 		})
 	return a, mapErr(err)

@@ -273,7 +273,10 @@ role was deleted.
    with `{"why": "..."}`. The action is `cloud_account.rotate_external_id`,
    a permission of its own, not part of `cloud_account.update`. The response
    carries the new `role_external_id` once; no call reads it back. Keel draws
-   it from a CSPRNG (128 bits). It works only on an active payer.
+   it from a CSPRNG (128 bits). It works only on an active, client-owned
+   payer. On a payer whose Cloud Account was made platform-owned it fails
+   with 400 and records nothing, as `PUT .../client-payer` does: sync assumes
+   no client role for that account, so a new id would never be used.
 2. The Tenant's Activity Log records
    `keel.cloud_account.client_payer_external_id_rotated` with the actor and
    `why`. It never carries the old or the new id. A refused attempt is
@@ -288,13 +291,29 @@ refuses Keel and `client_role_unusable` opens in the client's Tenant. Its
 there while the Finding is open. It resolves on the next successful
 AssumeRole. Bills wait in the client's bucket until that sync.
 
+The ExternalId stays visible in that Finding to every reader in the
+client's Tenant, not only to admins. The client's own engineers need it to
+fix the trust policy, and the ExternalId is not a secret. It guards against
+the confused deputy problem by tying Keel's AssumeRole to this client; it
+grants nothing without Keel's base role. AWS says so directly: "AWS does
+not treat the external ID as a secret", and it is shown to anyone who can
+view the role
+([AWS IAM, external IDs for third-party access](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_common-scenarios_third-party.html#id_roles_third-party_external-id)).
+Keel still returns it from the API only once and keeps it out of
+Activities, so it does not spread further than the client needs.
+
 Keel keeps no grace period in which both ids work. A rotation is usually
 done because the old id should stop working, and a grace window would keep
 it working. It would also need a second column and a second AssumeRole per
 failed sync. The cost of no grace is a sync gap of at most the time the
 client takes to edit one condition, which the Finding reports. To avoid
 even that gap, ask the client to accept both values in the condition
-(`StringEquals` takes a list) right after you rotate, then drop the old one.
+right after you rotate, then drop the old one. On AWS this is confirmed:
+`StringEquals` on `sts:ExternalId` takes a list of values. On Tencent it is
+unconfirmed whether `string_equal` on `sts:external_id` accepts a value
+list. Until that is tested on a real Tencent account, do not rely on it:
+rotate when the client is ready to replace the single value, and expect a
+`client_role_unusable` Finding until they do.
 
 ## 7. Re-onboard an archived payer
 
@@ -305,7 +324,8 @@ as `keel.cloud_account.unarchived`). The account keeps its id, its
 ownership, its read-only role, its client payer record and its ExternalId,
 so its cost history and Activities stay attributed to it, and the
 client-owned guards hold as before. Sync visits it again from the next
-run.
+run. Unarchiving an account that is already active returns it unchanged
+and records no Activity, so a retried call is safe.
 
 1. Unarchive the payer and each member account you archived in section 5.
 2. If the client deleted the role, have them recreate it (section 2). If you
