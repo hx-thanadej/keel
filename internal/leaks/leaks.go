@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -228,6 +229,11 @@ func (s *Service) Process(ctx context.Context, repo string, number int) error {
 		for _, a := range accounts {
 			ids = append(ids, a.external)
 		}
+		clients, err := catalog.ClientOwned(ctx, s.Store, provider, ids)
+		if err != nil {
+			return err
+		}
+		ids = slices.DeleteFunc(ids, func(id string) bool { return clients[id] }) // searched only through Keel's own role
 		if found, ok, err = k.Find(ctx, keyID, ids); err != nil {
 			return err
 		}

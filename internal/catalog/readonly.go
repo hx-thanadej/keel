@@ -50,3 +50,37 @@ func RequirePlatformOwned(ctx context.Context, st *store.Store, tenant, accountI
 	}
 	return nil
 }
+
+// ClientOwned is the one selector for jobs that use Keel's own roles in a
+// provider's accounts: it reports which of externalIDs are client-owned
+// Cloud Accounts in any Tenant, which those roles never reach (ADR-0018).
+// An account Keel has not registered is not client-owned.
+func ClientOwned(ctx context.Context, st *store.Store, provider string, externalIDs []string) (map[string]bool, error) {
+	rows, err := st.AppPool().Query(ctx, `SELECT external_id FROM account_owners($1, $2) WHERE ownership = 'client'`, provider, externalIDs)
+	if err != nil {
+		return nil, fmt.Errorf("ownership of %s accounts: %w", provider, err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("ownership of %s accounts: %w", provider, err)
+	}
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
+}
+
+// RequireKeelReachable refuses an account Keel's own roles must not enter:
+// a client-owned Cloud Account, which Keel reads only through the client's
+// read-only role (ADR-0018). The error wraps ErrClientOwned.
+func RequireKeelReachable(ctx context.Context, st *store.Store, provider, externalID string) error {
+	client, err := ClientOwned(ctx, st, provider, []string{externalID})
+	if err != nil {
+		return err
+	}
+	if client[externalID] {
+		return fmt.Errorf("keel's own role in %s account %s: %w", provider, externalID, ErrClientOwned)
+	}
+	return nil
+}

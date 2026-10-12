@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/activity"
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/store"
 )
 
@@ -223,8 +224,16 @@ func (s Service) Watch(ctx context.Context, lookback time.Duration) (WatchResult
 		return res, err
 	}
 	now := s.now()
+	accounts := make([]string, len(ids))
+	for i, id := range ids {
+		accounts[i] = id.Account
+	}
+	clients, err := catalog.ClientOwned(ctx, s.Store, "tencent", accounts)
+	if err != nil {
+		return res, err
+	}
 	for _, id := range ids {
-		if s.Audit != nil {
+		if s.Audit != nil && !clients[id.Account] { // audited through Keel's own role, never in a client's organisation
 			a, err := s.Audit(id.Account)
 			if err != nil {
 				return res, err

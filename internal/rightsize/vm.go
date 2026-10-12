@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"slices"
 	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/hx-thanadej/keel/internal/catalog"
 )
 
 // InstanceType is one size in a provider's catalogue.
@@ -196,16 +197,12 @@ func (e VMEngine) recommend(ctx context.Context, tenant string, types []Instance
 	for _, u := range uses {
 		accounts = append(accounts, u.account)
 	}
-	rows, err := e.Service.Store.AppPool().Query(ctx, `SELECT external_id FROM account_owners('tencent', $1) WHERE ownership = 'client'`, accounts)
-	if err != nil {
-		return nil, err
-	}
-	clients, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	clients, err := catalog.ClientOwned(ctx, e.Service.Store, "tencent", accounts)
 	if err != nil {
 		return nil, err
 	}
 	for id, u := range uses {
-		if slices.Contains(clients, u.account) != e.Client {
+		if clients[u.account] != e.Client {
 			res.Skipped["other_ownership"]++
 			delete(uses, id)
 		}

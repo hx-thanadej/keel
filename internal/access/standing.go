@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/store"
 )
 
@@ -99,6 +100,14 @@ func (s Standing) Run(ctx context.Context) (StandingResult, error) {
 		}); err != nil {
 			return res, err
 		}
+		externals := make([]string, len(accounts))
+		for i, a := range accounts {
+			externals[i] = a.external
+		}
+		clients, err := catalog.ClientOwned(ctx, s.Store, "tencent", externals)
+		if err != nil {
+			return res, err
+		}
 		for _, a := range accounts {
 			res.Accounts++
 			var found []standingItem
@@ -123,7 +132,7 @@ func (s Standing) Run(ctx context.Context) (StandingResult, error) {
 					found = append(found, standingItem{key: "cic:" + as.RoleConfiguration + ":" + as.PrincipalID, what: what})
 				}
 			}
-			if s.Users != nil {
+			if s.Users != nil && !clients[a.external] { // users are listed through Keel's own role, never in a client's organisation
 				u, err := s.Users(a.external)
 				if err != nil {
 					return res, err

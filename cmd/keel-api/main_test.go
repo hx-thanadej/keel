@@ -19,6 +19,7 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 type staticCreds struct{ id string }
@@ -43,7 +44,7 @@ func TestBillCredentialsAssumesPayerRole(t *testing.T) {
 	defer sts.Close()
 
 	base := staticCreds{id: "base-id"}
-	p := billCredentials(base, "200045645249", "KeelBillReader", "ap-bangkok")
+	p := billCredentials(storetest.New(t), base, "200045645249", "KeelBillReader", "ap-bangkok")
 	role, ok := p.(*tencent.MemberRole)
 	if !ok {
 		t.Fatalf("bill credentials = %T, want the assumed payer role", p)
@@ -65,7 +66,7 @@ func TestBillCredentialsAssumesPayerRole(t *testing.T) {
 
 func TestBillCredentialsWithoutRoleKeepBaseIdentity(t *testing.T) {
 	base := staticCreds{id: "base-id"}
-	if p := billCredentials(base, "200045645249", "", "ap-bangkok"); p != common.Provider(base) {
+	if p := billCredentials(nil, base, "200045645249", "", "ap-bangkok"); p != common.Provider(base) {
 		t.Fatalf("bill credentials = %#v, want the base identity", p)
 	}
 }

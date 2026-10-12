@@ -149,8 +149,19 @@ func (e WasteEngine) tenant(ctx context.Context, tenant string, res *WasteResult
 		return err
 	}
 
+	externals := make([]string, len(accounts))
+	for i, a := range accounts {
+		externals[i] = a.external
+	}
+	clients, err := catalog.ClientOwned(ctx, e.Service.Store, "tencent", externals)
+	if err != nil {
+		return err
+	}
 	cleaners := map[string]Cleaner{}
 	for _, a := range accounts {
+		if clients[a.external] {
+			continue // scanned only through Keel's member role, never in a client's organisation
+		}
 		scanner, cleaner, err := e.Scanner(a.external)
 		if err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("account %s: %v", a.external, err))

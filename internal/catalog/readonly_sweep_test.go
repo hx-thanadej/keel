@@ -364,11 +364,13 @@ var mutators = []mutator{
 		}
 		return err
 	}},
-	{name: "leaked key", refusal: true, run: func(t *testing.T, w world, c *cloud, _ any) error {
+	// Keel searches for a leaked key only with its own role, so a
+	// client-owned account is left out of the search (#240).
+	{name: "leaked key", run: func(t *testing.T, w world, c *cloud, _ any) error {
 		return (&leaks.Service{Store: w.s, Alerts: alerts{}, Keys: map[string]leaks.Keys{"tencent": keys{c}}}).Process(context.Background(), "tat/crm", 1)
 	}, client: func(t *testing.T, w world) {
-		if n := w.count(t, `SELECT count(*) FROM findings WHERE kind = 'leaked_key' AND severity = 'critical' AND title LIKE '%client-owned 100001 is still active' AND detail->>'action' LIKE '%the client must disable it now%'`); n != 1 {
-			t.Error("no critical Finding telling the client to disable the leaked key")
+		if n := w.count(t, `SELECT count(*) FROM findings WHERE kind = 'leaked_key' AND severity = 'critical' AND detail->>'action' LIKE '%find and disable it by hand%'`); n != 1 {
+			t.Error("no critical Finding telling a human to find and disable the leaked key")
 		}
 	}},
 }
@@ -791,4 +793,67 @@ func sdkUses(f *ast.File, dir string) []string {
 		return true
 	})
 	return out
+}
+
+// TestKeelRolesAreGuarded: every tencent.MemberRole built outside tests
+// either is a client's role (ExternalID) or carries the Guard that refuses a
+// client-owned account, so a new job that uses Keel's own role cannot reach
+// a client's organisation (ADR-0018, #240). GetCredential refuses an
+// unguarded Keel role at runtime too; this catches it before it runs.
+func TestKeelRolesAreGuarded(t *testing.T) {
+	var found, unguarded []string
+	err := filepath.WalkDir("../..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "web" || d.Name() == "node_modules" || strings.HasPrefix(d.Name(), ".")) && path != "../.." {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || !isMemberRole(lit.Type, f.Name.Name) {
+				return true
+			}
+			at := fset.Position(lit.Pos()).String()
+			found = append(found, at)
+			for _, e := range lit.Elts {
+				if kv, ok := e.(*ast.KeyValueExpr); ok {
+					if k, ok := kv.Key.(*ast.Ident); ok && (k.Name == "Guard" || k.Name == "ExternalID") {
+						return true
+					}
+				}
+			}
+			unguarded = append(unguarded, at)
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) == 0 {
+		t.Fatal("no tencent.MemberRole literal found: the sweep no longer sees how Keel builds its roles")
+	}
+	for _, at := range unguarded {
+		t.Errorf("%s builds Keel's own tencent.MemberRole without a Guard: build it with keelRole in cmd/keel-api so it refuses client-owned accounts", at)
+	}
+}
+
+func isMemberRole(e ast.Expr, pkg string) bool {
+	switch x := e.(type) {
+	case *ast.SelectorExpr:
+		id, ok := x.X.(*ast.Ident)
+		return ok && id.Name == "tencent" && x.Sel.Name == "MemberRole"
+	case *ast.Ident:
+		return pkg == "tencent" && x.Name == "MemberRole"
+	}
+	return false
 }
