@@ -2,6 +2,8 @@ package rightsize_test
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -198,5 +200,83 @@ func TestImportNativeAttributesAndConverts(t *testing.T) {
 	home, _ := svc.List(ctx, w.home, rightsize.Filter{})
 	if len(home) != 1 || home[0].ResourceID != "i-0zzz" {
 		t.Fatalf("unowned in home: %+v", home)
+	}
+}
+
+// TestImportedAdviceGoneFromKeelsListingIsWithdrawn: Keel's own Cost
+// Optimization Hub listing withdraws open advice it no longer holds, in
+// every Tenant it imported into, and resolves its Finding. It leaves alone
+// advice it still holds, accepted advice, other sources, and a client
+// payer's advice of the same source.
+func TestImportedAdviceGoneFromKeelsListingIsWithdrawn(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	var client string
+	must(t, w.s.InTenant(ctx, w.tat, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, environment_id, provider, external_id, name) VALUES ($1, $2, 'aws', '222222222222', 'tat-aws-prod')`, w.tat, w.prod); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role)
+			VALUES ($1, 'aws', '300000000001', 'client-payer', 'client', '{"role_arn": "arn:aws:iam::300000000001:role/KeelReadOnly"}') RETURNING external_id`, w.tat).Scan(&client)
+	}))
+	coh := func(account, resource string) rightsize.Recommendation {
+		return rightsize.Recommendation{Source: "native:aws_coh", Provider: "aws", AccountID: account, ResourceID: resource, ResourceType: "ec2instance",
+			Action: "resize", MonthlySavings: "10.00", Currency: "USD", Confidence: 0.8}
+	}
+	svc := rightsize.Service{Store: w.s}
+	listed := []rightsize.Recommendation{coh("222222222222", "i-kept"), coh("222222222222", "i-gone"), coh("222222222222", "i-accepted"), coh("999999999999", "i-home-gone")}
+	_, err := svc.Import(ctx, listed)
+	must(t, err)
+	_, err = svc.ImportForClient(ctx, w.tat, client, []rightsize.Recommendation{coh(client, "i-client")})
+	must(t, err)
+	_, _, err = svc.Upsert(ctx, w.tat, rec(w, "500m", "800.00"))
+	must(t, err)
+	open, _ := svc.List(ctx, w.tat, rightsize.Filter{State: "open"})
+	for _, r := range open {
+		if r.ResourceID == "i-accepted" {
+			_, err := svc.Accept(ctx, w.tat, r.ID, by)
+			must(t, err)
+		}
+	}
+
+	throttled := errors.New("ThrottlingException on page 2")
+	if _, err := svc.ImportListing(ctx, "native:aws_coh", func(context.Context) ([]rightsize.Recommendation, error) {
+		return []rightsize.Recommendation{coh("222222222222", "i-kept")}, throttled
+	}); !errors.Is(err, throttled) {
+		t.Fatalf("err %v, want the failed listing reported", err)
+	}
+	if open, _ := svc.List(ctx, w.tat, rightsize.Filter{State: "open"}); len(open) != 4 {
+		t.Fatalf("tat open %d after a failed listing, want all 4 kept", len(open))
+	}
+
+	res, err := svc.ImportListing(ctx, "native:aws_coh", func(context.Context) ([]rightsize.Recommendation, error) {
+		return []rightsize.Recommendation{coh("222222222222", "i-kept")}, nil
+	})
+	must(t, err)
+	if res.Kept != 1 || res.Withdrawn != 2 {
+		t.Errorf("result %+v, want i-kept kept, i-gone and i-home-gone withdrawn", res)
+	}
+	states := func(tenant string) map[string]string {
+		all, err := svc.List(ctx, tenant, rightsize.Filter{})
+		must(t, err)
+		out := map[string]string{}
+		for _, r := range all {
+			out[r.ResourceID] = r.State
+		}
+		return out
+	}
+	want := map[string]string{"i-kept": "open", "i-gone": "superseded", "i-accepted": "accepted", "i-client": "open", "tke-prod/tat-crm/deploy/api": "open"}
+	if got := states(w.tat); !maps.Equal(got, want) {
+		t.Errorf("tat states %v, want %v", got, want)
+	}
+	if got := states(w.home); got["i-home-gone"] != "superseded" {
+		t.Errorf("home states %v, want i-home-gone superseded", got)
+	}
+	var resolved int
+	must(t, w.s.InTenant(ctx, w.tat, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE fingerprint = 'rightsizing:aws|i-gone|resize' AND status = 'resolved' AND resolution = 'no longer reported by native:aws_coh'`).Scan(&resolved)
+	}))
+	if resolved != 1 {
+		t.Errorf("i-gone's Finding not resolved")
 	}
 }

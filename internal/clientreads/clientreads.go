@@ -55,6 +55,11 @@ type Sync struct {
 	// Connect assumes the payer's read-only role and returns a Reader that
 	// makes only read calls with it.
 	Connect func(cost.ClientPayer) (Reader, error)
+	// Listing is the source a successful Recommendations read lists in
+	// full, every page with no error, so the payer's open advice of it that
+	// the read no longer holds is withdrawn. Empty withdraws nothing: Keel's
+	// VM engine for Tencent reports only what it could evaluate.
+	Listing string
 	Now     func() time.Time
 }
 
@@ -67,11 +72,12 @@ type Report struct {
 	Findings        int              `json:"findings"`
 	Recommendations int              `json:"recommendations"`
 	Dropped         int              `json:"dropped"`
+	Withdrawn       int              `json:"withdrawn"`
 }
 
 // Run reads each payer. One payer's or one source's failure does not stop
 // the others; the errors are joined. A failed source resolves nothing, so
-// its Findings stay as last read.
+// its Findings and Recommendations stay as last read.
 func (s *Sync) Run(ctx context.Context, payers []cost.ClientPayer) ([]Report, error) {
 	var out []Report
 	var failed []error
@@ -105,12 +111,18 @@ func (s *Sync) one(ctx context.Context, p cost.ClientPayer) (Report, error) {
 	if recs, err := r.Recommendations(ctx); err != nil {
 		failed = append(failed, fmt.Errorf("recommendations: %w", err))
 	} else {
-		res, err := (rightsize.Service{Store: s.Store}).ImportForClient(ctx, p.TenantID, recs)
+		svc := rightsize.Service{Store: s.Store, Now: s.Now}
+		res, err := svc.ImportForClient(ctx, p.TenantID, p.PayerID, recs)
 		if err != nil {
 			return rep, err
 		}
 		rep.Recommendations = res.Raised + res.Kept
 		rep.Dropped += res.Dropped
+		if s.Listing != "" {
+			if rep.Withdrawn, err = svc.WithdrawForClient(ctx, p.TenantID, p.PayerID, s.Listing, recs); err != nil {
+				return rep, err
+			}
+		}
 	}
 	return rep, errors.Join(failed...)
 }

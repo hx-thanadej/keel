@@ -25,6 +25,7 @@ type fakeAWSAPI struct {
 	mu      sync.Mutex
 	ops     []string
 	signers []string
+	noRecs  bool
 }
 
 func (f *fakeAWSAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +36,7 @@ func (f *fakeAWSAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.ops = append(f.ops, op)
 	f.signers = append(f.signers, r.Header.Get("Authorization"))
+	noRecs := f.noRecs
 	f.mu.Unlock()
 	switch op {
 	case "AWSBudgetServiceGateway.DescribeBudgets":
@@ -48,6 +50,10 @@ func (f *fakeAWSAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			`{"SchemaVersion":"2018-10-08","Id":"f-nobody","ProductArn":"p","GeneratorId":"g","AwsAccountId":"399999999999","Types":["t"],"CreatedAt":"2026-09-01T00:00:00Z","UpdatedAt":"2026-09-01T00:00:00Z",`+
 			`"Severity":{"Label":"HIGH"},"Title":"elsewhere","Description":"d","ProductName":"Config","Resources":[{"Type":"Other","Id":"x"}]}]}`)
 	case "CostOptimizationHubService.ListRecommendations":
+		if noRecs {
+			_, _ = io.WriteString(w, `{"items":[]}`)
+			return
+		}
 		_, _ = io.WriteString(w, `{"items":[`+
 			`{"accountId":"300000000001","actionType":"Rightsize","currencyCode":"USD","currentResourceType":"Ec2Instance","estimatedMonthlySavings":40.5,"recommendationId":"r-1","region":"us-east-1","resourceId":"i-payer"},`+
 			`{"accountId":"399999999999","actionType":"Stop","currencyCode":"USD","currentResourceType":"Ec2Instance","estimatedMonthlySavings":9,"recommendationId":"r-2","region":"us-east-1","resourceId":"i-nobody"}]}`)
@@ -133,7 +139,11 @@ func TestAWSClientReadsThroughTheReadOnlyRole(t *testing.T) {
 	syncClients(ctx, []*cost.ClientBillSync{awsClientBillSync(&cost.Ingester{Store: c.st}, webIdentity{}, stsSrv.URL, s3.URL)},
 		map[string]*clientreads.Sync{"aws": awsClientReads(c.st, webIdentity{}, stsSrv.URL, apiSrv.URL)})
 
-	want := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["budgets:ViewBudget","securityhub:GetFindings","cost-optimization-hub:ListRecommendations"],"Resource":"*"}]}`
+	want := `{"Version":"2012-10-17","Statement":[` +
+		`{"Effect":"Allow","Action":"budgets:ViewBudget","Resource":"arn:aws:budgets::300000000001:budget/*"},` +
+		`{"Effect":"Allow","Action":"aws-portal:ViewBilling","Resource":"*"},` +
+		`{"Effect":"Allow","Action":"securityhub:GetFindings","Resource":"arn:aws:securityhub:us-east-1:300000000001:hub/default"},` +
+		`{"Effect":"Allow","Action":"cost-optimization-hub:ListRecommendations","Resource":"*"}]}`
 	var readsSessions int
 	for _, a := range sts.assumed {
 		if a.Get("Action") != "AssumeRole" || a.Get("Policy") != want {
@@ -167,6 +177,15 @@ func TestAWSClientReadsThroughTheReadOnlyRole(t *testing.T) {
 	}
 	if got := openKinds(t, c, c.home); len(got) != 0 {
 		t.Errorf("home Tenant Findings %v, want none from a client's cloud", got)
+	}
+
+	api.mu.Lock()
+	api.noRecs = true
+	api.mu.Unlock()
+	syncClients(ctx, []*cost.ClientBillSync{awsClientBillSync(&cost.Ingester{Store: c.st}, webIdentity{}, stsSrv.URL, s3.URL)},
+		map[string]*clientreads.Sync{"aws": awsClientReads(c.st, webIdentity{}, stsSrv.URL, apiSrv.URL)})
+	if got := openKinds(t, c, c.tenant); !slices.Equal(got, wantOpen) {
+		t.Errorf("client Tenant Findings %v, want %v once Cost Optimization Hub stops reporting the recommendation", got, wantOpen)
 	}
 }
 
