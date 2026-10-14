@@ -211,3 +211,45 @@ func TestClientReadRoleComesFromTheRegistration(t *testing.T) {
 		}
 	}
 }
+
+// TestEnterHoldsNoConnectionDuringAssume: while Keel's role is assumed (a
+// network call to STS), Enter holds none of the pool's connections, and a
+// switch still waits for it (TestOwnershipSwitchWaitsForKeelRole).
+func TestEnterHoldsNoConnectionDuringAssume(t *testing.T) {
+	w := newRoleWorld(t)
+	ctx := context.Background()
+	a, err := catalog.ReachKeelAccount(ctx, w.st, "tencent", keelAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held int32 = -1
+	if err := a.Enter(ctx, func() error { held = w.st.AppPool().Stat().AcquiredConns(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if held != 0 {
+		t.Errorf("Enter held %d connections while assuming, want 0", held)
+	}
+}
+
+// TestLapsedAssumptionIsRefused: an assumption that outlives its claim on
+// the account, so a switch to client-owned committed while it ran, is
+// refused when it returns.
+func TestLapsedAssumptionIsRefused(t *testing.T) {
+	w := newRoleWorld(t)
+	ctx := context.Background()
+	a, err := catalog.ReachKeelAccount(ctx, w.st, "tencent", keelAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	su := storetest.Superuser(t, w.st)
+	err = a.Enter(ctx, func() error {
+		if _, err := su.Exec(ctx, `UPDATE keel_role_leases SET expires_at = clock_timestamp() - interval '1 second'`); err != nil {
+			return err
+		}
+		w.exec(t, w.home, `UPDATE cloud_accounts SET ownership = 'client', read_only_role = jsonb_build_object('role_arn', 'qcs::cam::uin/'||external_id||':roleName/R') WHERE external_id = $1`, keelAccount)
+		return nil
+	})
+	if !errors.Is(err, catalog.ErrClientOwned) {
+		t.Fatalf("Enter after its claim lapsed and the account switched = %v, want ErrClientOwned", err)
+	}
+}

@@ -38,14 +38,35 @@ func New(t *testing.T) *store.Store {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	pool, err := pgxpool.New(ctx, withUser(t, adminURL, appRole, dbName))
+	s := appStore(t, withUser(t, adminURL, appRole, dbName))
+	superURLs.Store(s, superURL(t, adminURL, dbName))
+	return s
+}
+
+// Replica is a second Store on s's database with its own pool, as a second
+// keel-api replica would connect.
+func Replica(t *testing.T, s *store.Store) *store.Store {
+	t.Helper()
+	u, ok := superURLs.Load(s)
+	if !ok {
+		t.Fatal("store not created by storetest.New")
+	}
+	parsed, err := url.Parse(u.(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.User = url.UserPassword(appRole, password)
+	return appStore(t, parsed.String())
+}
+
+func appStore(t *testing.T, appURL string) *store.Store {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), appURL)
 	if err != nil {
 		t.Fatalf("app pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	s := store.New(pool)
-	superURLs.Store(s, superURL(t, adminURL, dbName))
-	return s
+	return store.New(pool)
 }
 
 // Epoch is the start of every test service clock: years from wall time, so a
