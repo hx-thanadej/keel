@@ -102,22 +102,45 @@ func TestKeelsMemberRoleSkipsClientAccounts(t *testing.T) {
 }
 
 // TestKeelRoleRefusesClientOwnedAccounts: Keel's own role, whatever job
-// builds it, makes no STS call for a client-owned Cloud Account; Keel's
-// payer, which no Tenant registers, is still reached.
+// builds it, makes no STS call for a client-owned Cloud Account, including
+// one switched to client-owned after the role was built; Keel's payer,
+// which no Tenant registers, is still reached.
 func TestKeelRoleRefusesClientOwnedAccounts(t *testing.T) {
 	c := newClientWorld(t, "tencent")
+	ctx := context.Background()
 	sts := &assumeRecorder{}
 	srv := httptest.NewServer(sts)
 	defer srv.Close()
-	for account, client := range map[string]bool{c.payer: true, "200045645249": false} {
-		r := keelRole(c.st, staticCreds{id: "base-id"}, account, "KeelMember", "ap-bangkok")
-		r.Endpoint = srv.URL
-		_, err := r.GetCredential()
-		if refused := errors.Is(err, catalog.ErrClientOwned); refused != client {
-			t.Errorf("account %s: err %v, want refused=%v", account, err, client)
-		}
+	base := staticCreds{id: "base-id"}
+	if _, err := keelRole(c.st, base, c.payer, "KeelMember", "ap-bangkok", srv.URL); !errors.Is(err, catalog.ErrClientOwned) {
+		t.Errorf("Keel's role in client-owned %s: %v, want ErrClientOwned", c.payer, err)
+	}
+	r, err := keelRole(c.st, base, "200045645249", "KeelMember", "ap-bangkok", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.GetCredential(); errors.Is(err, catalog.ErrClientOwned) {
+		t.Errorf("Keel's payer refused: %v", err)
 	}
 	if got, want := sts.take(), []string{"AssumeRole qcs::cam::uin/200045645249:roleName/KeelMember"}; !slices.Equal(got, want) {
 		t.Errorf("STS saw %v, want only %v", got, want)
+	}
+
+	switched, err := keelRole(c.st, base, platformAccount, "KeelMember", "ap-bangkok", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.st.InTenant(ctx, c.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role)
+			VALUES ($1, 'tencent', $2, 'now the client''s', 'client', jsonb_build_object('role_arn', 'qcs::cam::uin/'||$2||':roleName/R'))`, c.tenant, platformAccount)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := switched.GetCredential(); !errors.Is(err, catalog.ErrClientOwned) {
+		t.Errorf("Keel's role built before %s became client-owned: %v, want ErrClientOwned", platformAccount, err)
+	}
+	if got := sts.take(); len(got) != 0 {
+		t.Errorf("STS saw %v, want nothing", got)
 	}
 }

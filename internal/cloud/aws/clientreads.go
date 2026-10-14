@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/securityhub"
 	shtypes "github.com/aws/aws-sdk-go-v2/service/securityhub/types"
 
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/clientreads"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 )
@@ -53,8 +54,8 @@ func readsPolicy(partition, account, region string) (string, error) {
 // Budgets, Security Hub (read in region) and Cost Optimization Hub reads,
 // with the same checks and ExternalId as ReadOnlyRole but a session limited
 // to readsPolicy. stsEndpoint overrides the STS endpoint, for tests.
-func ReadsRole(base Identity, arn, account, externalID, region, stsEndpoint string) (*ClientRole, error) {
-	m, err := clientRoleARN(arn, account, externalID)
+func ReadsRole(base Identity, grant catalog.ClientReadRole, region, stsEndpoint string) (*ClientRole, error) {
+	m, err := clientRoleARN(grant)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +63,7 @@ func ReadsRole(base Identity, arn, account, externalID, region, stsEndpoint stri
 	if err != nil {
 		return nil, err
 	}
-	return assume(base, arn, externalID, policy, "us-east-1", stsEndpoint), nil
+	return assume(base, grant, policy, "us-east-1", stsEndpoint), nil
 }
 
 // ClientReads reads a client management account through a ReadsRole

@@ -15,8 +15,11 @@ import (
 	billing "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing/v20180709"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 
+	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/catalog/catalogtest"
 	"github.com/hx-thanadej/keel/internal/clientreads"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 type keelCreds struct{}
@@ -72,16 +75,16 @@ func TestReadsRoleLimitsTheSession(t *testing.T) {
 	f := &fakeTencent{}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	role, err := tencent.ReadsRole(keelCreds{}, "qcs::cam::uin/300000000001:roleName/KeelReadOnly", "300000000001", "ext-1", "ap-bangkok")
+	_, grant := catalogtest.ClientPayer(t, storetest.New(t), "tencent", "300000000001", "qcs::cam::uin/300000000001:roleName/KeelReadOnly")
+	role, err := tencent.ReadsRole(keelCreds{}, grant, "ap-bangkok", srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	role.Endpoint = srv.URL
 	if _, err := role.GetCredential(); err != nil {
 		t.Fatal(err)
 	}
 	got := f.bodies["AssumeRole"]
-	if len(got) != 1 || got[0]["ExternalId"] != "ext-1" {
+	if len(got) != 1 || got[0]["ExternalId"] != grant.ExternalID() {
 		t.Fatalf("AssumeRole bodies %v, want one with the payer's ExternalId", got)
 	}
 	encoded, _ := got[0]["Policy"].(string)
@@ -110,8 +113,8 @@ func TestReadsRoleLimitsTheSession(t *testing.T) {
 			t.Errorf("session policy allows %s, which is not a read", a)
 		}
 	}
-	if _, err := tencent.ReadsRole(keelCreds{}, "qcs::cam::uin/300000000001:roleName/KeelReadOnly", "300000000001", "", "ap-bangkok"); err == nil {
-		t.Error("a reads role without an ExternalId was accepted")
+	if _, err := tencent.ReadsRole(keelCreds{}, catalog.ClientReadRole{}, "ap-bangkok", srv.URL); err == nil {
+		t.Error("a reads role no registration holds was accepted")
 	}
 }
 

@@ -1,6 +1,7 @@
 package tencent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -12,54 +13,80 @@ import (
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	sts "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sts/v20180813"
+
+	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/store"
 )
 
-// MemberRole assumes a role in an account from Keel's own keyless
-// credentials, so Keel reaches each account with short-lived credentials
-// scoped to it (ADR-0006, ADR-0007). Without an ExternalID it is one of
-// Keel's own roles, assumed only after Guard allows Account; with one it is
-// a client's read-only role (ReadOnlyRole).
-type MemberRole struct {
-	Base    common.Provider
-	Account string // member UIN
-	Role    string // role name in the member account, e.g. KeelReadOnly
-	Region  string
-	// ExternalID is sent on AssumeRole when set; a client role's trust policy
-	// requires it (sts:external_id) so only Keel's registration of that payer
-	// can assume it.
-	ExternalID string
-	// Policy, when set, is the session policy sent on AssumeRole, limiting
-	// the session to what it allows.
-	Policy string
-	// Guard refuses an account Keel's own roles must not enter, a
-	// client-owned Cloud Account (ADR-0018). Keel's own role is never
-	// assumed without one.
-	Guard func(account string) error
-	// Endpoint overrides the STS host (scheme://host), for tests.
-	Endpoint string
+// KeelRole is one of Keel's own roles in an account, assumed from Keel's
+// keyless base identity so Keel reaches each account with short-lived
+// credentials scoped to it (ADR-0006, ADR-0007). It is assumed only inside
+// account.Enter, which refuses a client-owned account (ADR-0018), and it
+// never sends an ExternalId: a client's role is a ClientRole.
+type KeelRole struct {
+	base     common.Provider
+	account  catalog.KeelAccount
+	role     string // role name in the account, e.g. KeelReadOnly
+	region   string
+	endpoint string
+	session
+}
 
-	mu      sync.Mutex
-	cached  common.CredentialIface
-	expires time.Time
+// NewKeelRole is role in Tencent account, which no Tenant may hold as
+// client-owned; the error wraps catalog.ErrClientOwned when one does.
+// stsEndpoint overrides the STS host (scheme://host), for tests.
+func NewKeelRole(ctx context.Context, st *store.Store, base common.Provider, account, role, region, stsEndpoint string) (*KeelRole, error) {
+	a, err := catalog.ReachKeelAccount(ctx, st, "tencent", account)
+	if err != nil {
+		return nil, err
+	}
+	return &KeelRole{base: base, account: a, role: role, region: region, endpoint: stsEndpoint}, nil
+}
+
+// RoleArn is the role's ARN.
+func (k *KeelRole) RoleArn() string {
+	return fmt.Sprintf("qcs::cam::uin/%s:roleName/%s", k.account.ID(), k.role)
+}
+
+// GetCredential implements common.Provider.
+func (k *KeelRole) GetCredential() (common.CredentialIface, error) {
+	return k.get(func() (cred common.CredentialIface, expires time.Time, err error) {
+		err = k.account.Enter(context.Background(), func() error {
+			cred, expires, err = assumeRole(k.base, k.region, k.endpoint, k.RoleArn(), nil, "")
+			return err
+		})
+		return cred, expires, err
+	})
 }
 
 var roleARN = regexp.MustCompile(`^qcs::cam::uin/(\d{1,20}):roleName/([\w+=,.@-]{1,128})$`)
 
-// ReadOnlyRole is a client's read-only role (ADR-0018), assumed from Keel's
-// base identity with Keel's ExternalId for that payer. The role must live in
-// account, the client payer whose bills it reads.
-func ReadOnlyRole(base common.Provider, arn, account, externalID, region string) (*MemberRole, error) {
-	m := roleARN.FindStringSubmatch(arn)
+// ClientRole is a client's read-only role in its payer (ADR-0018), assumed
+// from Keel's base identity with Keel's ExternalId for that payer.
+type ClientRole struct {
+	base     common.Provider
+	grant    catalog.ClientReadRole
+	region   string
+	policy   string
+	endpoint string
+	session
+}
+
+// ReadOnlyRole is grant, a client's read-only role, which must live in the
+// payer whose bills it reads. stsEndpoint overrides the STS host
+// (scheme://host), for tests.
+func ReadOnlyRole(base common.Provider, grant catalog.ClientReadRole, region, stsEndpoint string) (*ClientRole, error) {
+	m := roleARN.FindStringSubmatch(grant.ARN())
 	if m == nil {
-		return nil, fmt.Errorf("read-only role %q is not qcs::cam::uin/<uin>:roleName/<name>", arn)
+		return nil, fmt.Errorf("read-only role %q is not qcs::cam::uin/<uin>:roleName/<name>", grant.ARN())
 	}
-	if m[1] != account {
-		return nil, fmt.Errorf("read-only role %s is not in payer %s", arn, account)
+	if m[1] != grant.Payer() {
+		return nil, fmt.Errorf("read-only role %s is not in payer %s", grant.ARN(), grant.Payer())
 	}
-	if externalID == "" {
-		return nil, fmt.Errorf("read-only role %s has no ExternalId", arn)
+	if grant.ExternalID() == "" {
+		return nil, fmt.Errorf("read-only role %s has no ExternalId", grant.ARN())
 	}
-	return &MemberRole{Base: base, Account: account, Role: m[2], Region: region, ExternalID: externalID}, nil
+	return &ClientRole{base: base, grant: grant, region: region, endpoint: stsEndpoint}, nil
 }
 
 // ReadActions are the only actions a client-reads session may use, one per
@@ -71,67 +98,80 @@ var ReadActions = []string{"finance:DescribeBudget", "advisor:DescribeStrategies
 // ReadsRole is a client's read-only role assumed for Budget, Smart Advisor
 // and Cloud Monitor reads: the same checks and ExternalId as ReadOnlyRole,
 // with a session policy that allows only ReadActions.
-func ReadsRole(base common.Provider, arn, account, externalID, region string) (*MemberRole, error) {
-	r, err := ReadOnlyRole(base, arn, account, externalID, region)
+func ReadsRole(base common.Provider, grant catalog.ClientReadRole, region, stsEndpoint string) (*ClientRole, error) {
+	r, err := ReadOnlyRole(base, grant, region, stsEndpoint)
 	if err != nil {
 		return nil, err
 	}
-	r.Policy = `{"version":"2.0","statement":[{"effect":"allow","action":["` + strings.Join(ReadActions, `","`) + `"],"resource":["*"]}]}`
+	r.policy = `{"version":"2.0","statement":[{"effect":"allow","action":["` + strings.Join(ReadActions, `","`) + `"],"resource":["*"]}]}`
 	return r, nil
 }
 
-// RoleArn is the member role's ARN.
-func (m *MemberRole) RoleArn() string {
-	return fmt.Sprintf("qcs::cam::uin/%s:roleName/%s", m.Account, m.Role)
+// GetCredential implements common.Provider. The zero ClientRole, which no
+// constructor built, has no ExternalId and is refused.
+func (c *ClientRole) GetCredential() (common.CredentialIface, error) {
+	return c.get(func() (common.CredentialIface, time.Time, error) {
+		externalID := c.grant.ExternalID()
+		if externalID == "" {
+			return nil, time.Time{}, errors.New("client role: no ExternalId; build it with ReadOnlyRole or ReadsRole")
+		}
+		return assumeRole(c.base, c.region, c.endpoint, c.grant.ARN(), &externalID, c.policy)
+	})
 }
 
-// GetCredential implements common.Provider, renewing 5 minutes before expiry.
-func (m *MemberRole) GetCredential() (common.CredentialIface, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cached != nil && time.Until(m.expires) > 5*time.Minute {
-		return m.cached, nil
+// session caches an assumed role's credentials, renewing them 5 minutes
+// before expiry.
+type session struct {
+	mu      sync.Mutex
+	cached  common.CredentialIface
+	expires time.Time
+}
+
+func (s *session) get(assume func() (common.CredentialIface, time.Time, error)) (common.CredentialIface, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cached != nil && time.Until(s.expires) > 5*time.Minute {
+		return s.cached, nil
 	}
-	if m.ExternalID == "" {
-		if m.Guard == nil {
-			return nil, fmt.Errorf("keel's own role %s has no ownership guard", m.RoleArn())
-		}
-		if err := m.Guard(m.Account); err != nil {
-			return nil, err
-		}
-	}
-	base, err := m.Base.GetCredential()
+	c, expires, err := assume()
 	if err != nil {
 		return nil, err
 	}
-	c, err := stsClient(base, m.Region, m.Endpoint)
+	s.cached, s.expires = c, expires
+	return c, nil
+}
+
+// assumeRole assumes arn from base, sending externalID and policy (a
+// session policy limiting the session) when set.
+func assumeRole(base common.Provider, region, endpoint, arn string, externalID *string, policy string) (common.CredentialIface, time.Time, error) {
+	cred, err := base.GetCredential()
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
+	}
+	c, err := stsClient(cred, region, endpoint)
+	if err != nil {
+		return nil, time.Time{}, err
 	}
 	req := sts.NewAssumeRoleRequest()
-	arn, session, dur := m.RoleArn(), "keel", uint64(3600)
-	req.RoleArn, req.RoleSessionName, req.DurationSeconds = &arn, &session, &dur
-	if m.ExternalID != "" {
-		req.ExternalId = &m.ExternalID
-	}
-	if m.Policy != "" {
-		policy := url.QueryEscape(m.Policy) // STS URL-decodes Policy
+	session, dur := "keel", uint64(3600)
+	req.RoleArn, req.RoleSessionName, req.DurationSeconds, req.ExternalId = &arn, &session, &dur, externalID
+	if policy != "" {
+		policy = url.QueryEscape(policy) // STS URL-decodes Policy
 		req.Policy = &policy
 	}
 	res, err := c.AssumeRole(req)
 	if err != nil {
-		return nil, fmt.Errorf("AssumeRole %s: %w", arn, err)
+		return nil, time.Time{}, fmt.Errorf("AssumeRole %s: %w", arn, err)
 	}
 	if res.Response == nil || res.Response.Credentials == nil || res.Response.Credentials.TmpSecretId == nil {
-		return nil, errors.New("AssumeRole: no credentials in response")
+		return nil, time.Time{}, errors.New("AssumeRole: no credentials in response")
 	}
 	cr := res.Response.Credentials
-	m.cached = common.NewTokenCredential(*cr.TmpSecretId, *cr.TmpSecretKey, *cr.Token)
-	m.expires = time.Now().Add(time.Duration(dur) * time.Second)
+	expires := time.Now().Add(time.Duration(dur) * time.Second)
 	if res.Response.ExpiredTime != nil {
-		m.expires = time.Unix(*res.Response.ExpiredTime, 0)
+		expires = time.Unix(*res.Response.ExpiredTime, 0)
 	}
-	return m.cached, nil
+	return common.NewTokenCredential(*cr.TmpSecretId, *cr.TmpSecretKey, *cr.Token), expires, nil
 }
 
 // stsClient signs with cred. endpoint overrides the STS host

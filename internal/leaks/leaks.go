@@ -324,7 +324,14 @@ func (s *Service) Process(ctx context.Context, r Repo, number int) error {
 	d := detail()
 	act := "Keel could not search for this key: find and disable it by hand"
 	if searched {
-		act = "the key is not in the platform-owned accounts Keel searched"
+		slices.Sort(ids)
+		ids = slices.Compact(ids)
+		d["searched_accounts"] = ids
+		names := strings.Join(ids, ", ")
+		if len(ids) == 0 {
+			names = "none"
+		}
+		act = fmt.Sprintf("the key is not in the platform-owned accounts Keel searched (%s)", names)
 		if len(all) > 0 {
 			d["client_owned_accounts"] = all
 			act += fmt.Sprintf(", and Keel does not search client-owned accounts (ADR-0018): %s", strings.Join(all, ", "))
