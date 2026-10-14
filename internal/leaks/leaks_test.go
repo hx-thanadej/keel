@@ -221,7 +221,7 @@ func TestLeakedKeyInAClientAccountReachesTheClient(t *testing.T) {
 	}
 	got = findings(home)
 	if len(got) != 1 || strings.Contains(got[0].action, "could not find this key in any account it manages") ||
-		!strings.Contains(got[0].action, "not in the platform-owned accounts Keel searched") || !strings.Contains(got[0].action, "100002") {
-		t.Fatalf("home Tenant findings %+v: want one that says the platform accounts were searched and client-owned 100002 was not", got)
+		!strings.Contains(got[0].action, "not in the platform-owned accounts Keel searched (200001)") || !strings.Contains(got[0].action, "100002") {
+		t.Fatalf("home Tenant findings %+v: want one that names the searched platform account 200001 and says client-owned 100002 was not searched", got)
 	}
 }

@@ -17,8 +17,10 @@ import (
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 
+	"github.com/hx-thanadej/keel/internal/catalog/catalogtest"
 	"github.com/hx-thanadej/keel/internal/cloud/tencent"
 	"github.com/hx-thanadej/keel/internal/cost"
+	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
@@ -44,12 +46,13 @@ func TestBillCredentialsAssumesPayerRole(t *testing.T) {
 	defer sts.Close()
 
 	base := staticCreds{id: "base-id"}
-	p := billCredentials(storetest.New(t), base, "200045645249", "KeelBillReader", "ap-bangkok")
-	role, ok := p.(*tencent.MemberRole)
-	if !ok {
+	p, err := billCredentials(storetest.New(t), base, "200045645249", "KeelBillReader", "ap-bangkok", sts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.(*tencent.KeelRole); !ok {
 		t.Fatalf("bill credentials = %T, want the assumed payer role", p)
 	}
-	role.Endpoint = sts.URL
 	for range 2 {
 		c, err := p.GetCredential()
 		if err != nil {
@@ -66,7 +69,7 @@ func TestBillCredentialsAssumesPayerRole(t *testing.T) {
 
 func TestBillCredentialsWithoutRoleKeepBaseIdentity(t *testing.T) {
 	base := staticCreds{id: "base-id"}
-	if p := billCredentials(nil, base, "200045645249", "", "ap-bangkok"); p != common.Provider(base) {
+	if p, err := billCredentials(nil, base, "200045645249", "", "ap-bangkok", ""); err != nil || p != common.Provider(base) {
 		t.Fatalf("bill credentials = %#v, want the base identity", p)
 	}
 }
@@ -75,13 +78,21 @@ func TestBillCredentialsWithoutRoleKeepBaseIdentity(t *testing.T) {
 // and invoices are read with credentials from that client's own read-only
 // role, assumed from Keel's base identity; a role outside the payer is refused.
 func TestClientPayerConnectAssumesEachClientsRole(t *testing.T) {
+	st := storetest.New(t)
+	payers := []cost.ClientPayer{
+		registered(t, st, "tencent", "qcs::cam::uin/300000000001:roleName/KeelReadOnly", cost.ClientPayer{PayerID: "300000000001", Bucket: "c1-bills-1250000001", Region: "ap-bangkok"}),
+		registered(t, st, "tencent", "qcs::cam::uin/300000000002:roleName/AcmeKeelRead", cost.ClientPayer{PayerID: "300000000002", Bucket: "c2-bills-1250000002", Region: "ap-singapore"}),
+	}
+	untrusted := registered(t, st, "tencent", "qcs::cam::uin/300000000004:roleName/Untrusted", cost.ClientPayer{PayerID: "300000000004", Region: "ap-bangkok"})
+	externalIDs := map[string]string{}
+	for _, p := range append(slices.Clone(payers), untrusted) {
+		externalIDs[p.RoleARN] = p.RoleExternalID
+	}
 	var assumed []string
 	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req struct{ RoleArn, ExternalId string }
 		_ = json.Unmarshal(body, &req)
-		externalIDs := map[string]string{"qcs::cam::uin/300000000001:roleName/KeelReadOnly": "ext-c1", "qcs::cam::uin/300000000002:roleName/AcmeKeelRead": "ext-c2",
-			"qcs::cam::uin/300000000001:roleName/Untrusted": "ext-c1"}
 		if want := externalIDs[req.RoleArn]; req.ExternalId != want {
 			t.Errorf("AssumeRole %s with ExternalId %q, want the payer's own %q", req.RoleArn, req.ExternalId, want)
 		}
@@ -96,12 +107,7 @@ func TestClientPayerConnectAssumesEachClientsRole(t *testing.T) {
 		_, _ = io.WriteString(w, `{"Response":{"Credentials":{"TmpSecretId":"id-`+req.RoleArn+`","TmpSecretKey":"k","Token":"token-`+req.RoleArn+`"},"ExpiredTime":4102444800,"RequestId":"r"}}`)
 	}))
 	defer sts.Close()
-	connect := clientPayerConnect(staticCreds{id: "base-id"}, sts.URL)
-
-	payers := []cost.ClientPayer{
-		{TenantID: "t1", PayerID: "300000000001", RoleARN: "qcs::cam::uin/300000000001:roleName/KeelReadOnly", RoleExternalID: "ext-c1", Bucket: "c1-bills-1250000001", Region: "ap-bangkok"},
-		{TenantID: "t2", PayerID: "300000000002", RoleARN: "qcs::cam::uin/300000000002:roleName/AcmeKeelRead", RoleExternalID: "ext-c2", Bucket: "c2-bills-1250000002", Region: "ap-singapore"},
-	}
+	connect := clientPayerConnect(st, staticCreds{id: "base-id"}, sts.URL)
 	for _, p := range payers {
 		_, inv, err := connect(p)
 		if err != nil {
@@ -119,14 +125,19 @@ func TestClientPayerConnectAssumesEachClientsRole(t *testing.T) {
 		t.Errorf("STS assumed %v, want %v", assumed, want)
 	}
 
-	elsewhere := payers[0]
-	elsewhere.RoleARN = "qcs::cam::uin/300000000002:roleName/KeelReadOnly"
+	elsewhere := registered(t, st, "tencent", "qcs::cam::uin/300000000002:roleName/KeelReadOnly", cost.ClientPayer{PayerID: "300000000003", Region: "ap-bangkok"})
 	if _, _, err := connect(elsewhere); err == nil {
 		t.Error("a read-only role outside the payer account was accepted")
 	}
+	redirected := payers[0]
+	redirected.RoleARN, redirected.RoleExternalID = "qcs::cam::uin/300000000001:roleName/KeelMember", ""
+	if _, _, err := connect(redirected); err != nil {
+		t.Fatal(err)
+	}
+	if got := assumed[len(assumed)-1]; got != payers[0].RoleARN {
+		t.Errorf("connect with a caller-edited role assumed %s, want the registered %s", got, payers[0].RoleARN)
+	}
 
-	untrusted := payers[0]
-	untrusted.RoleARN = "qcs::cam::uin/300000000001:roleName/Untrusted"
 	if _, _, err := connect(untrusted); err == nil || !strings.Contains(err.Error(), "external id mismatch") {
 		t.Errorf("connect with a role that refuses Keel = %v, want the AssumeRole error before any bill read", err)
 	}
@@ -197,12 +208,13 @@ func TestAWSClientPayerConnectReadsEachExportAsItsClient(t *testing.T) {
 		_, _ = io.WriteString(w, "csv")
 	}))
 	defer s3Srv.Close()
-	connect := awsClientPayerConnect(webIdentity{}, stsSrv.URL, s3Srv.URL)
+	st := storetest.New(t)
+	connect := awsClientPayerConnect(st, webIdentity{}, stsSrv.URL, s3Srv.URL)
 
 	payers := []cost.ClientPayer{
-		{TenantID: "t1", PayerID: "300000000001", RoleARN: "arn:aws:iam::300000000001:role/KeelReadOnly", RoleExternalID: "0123456789abcdef0123456789abcdef", Bucket: "c1-bills", Prefix: "exports/", Region: "us-east-1"},
-		{TenantID: "t2", PayerID: "300000000002", RoleARN: "arn:aws:iam::300000000002:role/billing/AcmeKeelRead", RoleExternalID: "fedcba9876543210fedcba9876543210", Bucket: "c2-bills", Prefix: "exports/", Region: "ap-southeast-1",
-			KMSKeyARN: "arn:aws:kms:ap-southeast-1:300000000002:key/1234abcd-12ab-34cd-56ef-1234567890ab"},
+		registered(t, st, "aws", "arn:aws:iam::300000000001:role/KeelReadOnly", cost.ClientPayer{PayerID: "300000000001", Bucket: "c1-bills", Prefix: "exports/", Region: "us-east-1"}),
+		registered(t, st, "aws", "arn:aws:iam::300000000002:role/billing/AcmeKeelRead", cost.ClientPayer{PayerID: "300000000002", Bucket: "c2-bills", Prefix: "exports/", Region: "ap-southeast-1",
+			KMSKeyARN: "arn:aws:kms:ap-southeast-1:300000000002:key/1234abcd-12ab-34cd-56ef-1234567890ab"}),
 	}
 	wantPolicies := []string{
 		`{"Version":"2012-10-17","Statement":[` +
@@ -260,10 +272,8 @@ func TestAWSClientPayerConnectReadsEachExportAsItsClient(t *testing.T) {
 	}
 
 	assumed, reads = nil, nil
-	elsewhere := payers[0]
-	elsewhere.RoleARN = "arn:aws:iam::300000000002:role/KeelReadOnly"
-	untrusted := payers[0]
-	untrusted.RoleARN = "arn:aws:iam::300000000001:role/Untrusted"
+	elsewhere := registered(t, st, "aws", "arn:aws:iam::300000000002:role/KeelReadOnly", cost.ClientPayer{PayerID: "300000000003", Bucket: "c1-bills", Prefix: "exports/", Region: "us-east-1"})
+	untrusted := registered(t, st, "aws", "arn:aws:iam::300000000004:role/Untrusted", cost.ClientPayer{PayerID: "300000000004", Bucket: "c1-bills", Prefix: "exports/", Region: "us-east-1"})
 	for name, p := range map[string]cost.ClientPayer{"role outside the management account": elsewhere, "role refusing Keel": untrusted} {
 		_, _, err := connect(p)
 		var roleErr *cost.RoleError
@@ -320,4 +330,14 @@ func TestBrokenAWSIdentityLeavesTencentSyncing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// registered is p registered in the database as a client payer on provider
+// whose read-only role is roleARN, with the Tenant and ExternalId the
+// registration holds.
+func registered(t *testing.T, st *store.Store, provider, roleARN string, p cost.ClientPayer) cost.ClientPayer {
+	t.Helper()
+	tenant, grant := catalogtest.ClientPayer(t, st, provider, p.PayerID, roleARN)
+	p.TenantID, p.RoleARN, p.RoleExternalID = tenant, grant.ARN(), grant.ExternalID()
+	return p
 }

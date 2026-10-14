@@ -29,9 +29,9 @@ func TestReadsPolicyScopesWhatAWSLetsItScope(t *testing.T) {
 			`{"Effect":"Allow","Action":"securityhub:GetFindings","Resource":"arn:aws-us-gov:securityhub:us-gov-west-1:300000000001:hub/default"},` +
 			`{"Effect":"Allow","Action":"cost-optimization-hub:ListRecommendations","Resource":"*"}]}`},
 	} {
-		m, err := clientRoleARN(tc.arn, "300000000001", "ext")
-		if err != nil {
-			t.Fatal(err)
+		m := roleARN.FindStringSubmatch(tc.arn)
+		if m == nil {
+			t.Fatalf("%s: %s is not a role ARN", name, tc.arn)
 		}
 		got, err := readsPolicy(m[1], m[2], tc.region)
 		if err != nil || got != tc.want {

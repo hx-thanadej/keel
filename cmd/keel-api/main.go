@@ -489,9 +489,12 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		bg.Audit = func(account string) (breakglass.Audit, error) {
 			// The organisation admin account is read with Keel's own role; members through the access role.
-			var creds common.Provider = keelRole(st, tencent.Credentials(), account, accessRole, region)
 			if account == os.Getenv("KEEL_TENCENT_ORG_ADMIN_UIN") {
-				creds = tencent.Credentials()
+				return tencent.NewCloudAudit(region, tencent.Credentials())
+			}
+			creds, err := keelRole(st, tencent.Credentials(), account, accessRole, region, "")
+			if err != nil {
+				return nil, err
 			}
 			return tencent.NewCloudAudit(region, creds)
 		}
@@ -504,7 +507,11 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return err
 		})
 		standing := access.Standing{Store: st, Directory: dir, BreakGlass: bg.Names, Users: func(account string) (access.Users, error) {
-			return tencent.NewCAMUsers(keelRole(st, tencent.Credentials(), account, accessRole, region))
+			creds, err := keelRole(st, tencent.Credentials(), account, accessRole, region, "")
+			if err != nil {
+				return nil, err
+			}
+			return tencent.NewCAMUsers(creds)
 		}}
 		go daily(ctx, "standing access", func(ctx context.Context) error {
 			res, err := standing.Run(ctx)
@@ -521,7 +528,11 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		lk.Keys["tencent"] = tencent.AccessKeys{API: func(account string) (tencent.KeyAPI, error) {
-			return tencent.NewKeyAPI(keelRole(st, tencent.Credentials(), account, accessRole, region))
+			creds, err := keelRole(st, tencent.Credentials(), account, accessRole, region, "")
+			if err != nil {
+				return nil, err
+			}
+			return tencent.NewKeyAPI(creds)
 		}}
 	}
 	if len(lk.WebhookSecret) > 0 {
@@ -587,11 +598,19 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		ci := ciidentity.Manager{Store: st, Provider: "tencent", JWKS: ciidentity.GitHubJWKS(nil),
 			IAM: func(account string) (ciidentity.IAM, error) {
-				api, err := tencent.NewCAM(keelRole(st, tencent.Credentials(), account, accessRole, region))
+				creds, err := keelRole(st, tencent.Credentials(), account, accessRole, region, "")
+				if err != nil {
+					return nil, err
+				}
+				api, err := tencent.NewCAM(creds)
 				return tencent.CIIdentity{API: api}, err
 			}}
 		bounds := boundary.Manager{Store: st, Provider: "tencent", IAM: func(account string) (boundary.IAM, error) {
-			return tencent.NewBoundaries(keelRole(st, tencent.Credentials(), account, accessRole, region))
+			creds, err := keelRole(st, tencent.Credentials(), account, accessRole, region, "")
+			if err != nil {
+				return nil, err
+			}
+			return tencent.NewBoundaries(creds)
 		}}
 		go daily(ctx, "permission boundaries", func(ctx context.Context) error {
 			res, err := bounds.Check(ctx)
@@ -1167,7 +1186,10 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 		return errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_BUCKET")
 	}
 	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
-	creds := billCredentials(st, tencent.Credentials(), payer, os.Getenv("KEEL_TENCENT_BILL_ROLE"), region)
+	creds, err := billCredentials(st, tencent.Credentials(), payer, os.Getenv("KEEL_TENCENT_BILL_ROLE"), region, "")
+	if err != nil {
+		return err
+	}
 	objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
 		Creds: archive.Refreshing(tencent.STS{Creds: creds}, 10*time.Minute)})
 	if err != nil {
@@ -1217,21 +1239,21 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 // billCredentials is the identity that reads the payer's bills and invoices.
 // With a payer billing role it assumes that role from Keel's base identity,
 // so payer billing access never becomes Keel's identity for other calls.
-func billCredentials(st *store.Store, base common.Provider, payer, role, region string) common.Provider {
+// stsEndpoint overrides the STS host, for tests.
+func billCredentials(st *store.Store, base common.Provider, payer, role, region, stsEndpoint string) (common.Provider, error) {
 	if role == "" {
 		slog.Warn("KEEL_TENCENT_BILL_ROLE is unset; tencent bill sync reads bills with Keel's base identity")
-		return base
+		return base, nil
 	}
-	return keelRole(st, base, payer, role, region)
+	return keelRole(st, base, payer, role, region, stsEndpoint)
 }
 
 // keelRole is Keel's own role in a Tencent account. It is never assumed in a
 // client-owned Cloud Account, which Keel reads only through the client's
-// read-only role (ADR-0018, #240).
-func keelRole(st *store.Store, base common.Provider, account, role, region string) *tencent.MemberRole {
-	return &tencent.MemberRole{Base: base, Account: account, Role: role, Region: region, Guard: func(account string) error {
-		return catalog.RequireKeelReachable(context.Background(), st, "tencent", account)
-	}}
+// read-only role (ADR-0018, #244). stsEndpoint overrides the STS host, for
+// tests.
+func keelRole(st *store.Store, base common.Provider, account, role, region, stsEndpoint string) (*tencent.KeelRole, error) {
+	return tencent.NewKeelRole(context.Background(), st, base, account, role, region, stsEndpoint)
 }
 
 // clientBillSyncs reads client payers' bills on each provider, each through
@@ -1270,7 +1292,7 @@ func awsClientBillSync(in *cost.Ingester, base awsadapter.Identity, stsEndpoint,
 	if v := os.Getenv("KEEL_AWS_PAYER_ACCOUNT"); v != "" {
 		own = []string{v}
 	}
-	return &cost.ClientBillSync{Ingester: in, Provider: "aws", OwnPayers: own, Connect: awsClientPayerConnect(base, stsEndpoint, s3Endpoint),
+	return &cost.ClientBillSync{Ingester: in, Provider: "aws", OwnPayers: own, Connect: awsClientPayerConnect(in.Store, base, stsEndpoint, s3Endpoint),
 		Ready: func(ctx context.Context) error {
 			if _, err := base.Retrieve(ctx); err != nil {
 				return fmt.Errorf("loading Keel's AWS identity: %w", err)
@@ -1293,7 +1315,7 @@ func tencentClientBillSync(in *cost.Ingester, base common.Provider, stsEndpoint 
 	if v := os.Getenv("KEEL_TENCENT_PAYER_UIN"); v != "" {
 		own = []string{v}
 	}
-	return &cost.ClientBillSync{Ingester: in, Provider: "tencent", OwnPayers: own, Connect: clientPayerConnect(base, stsEndpoint),
+	return &cost.ClientBillSync{Ingester: in, Provider: "tencent", OwnPayers: own, Connect: clientPayerConnect(in.Store, base, stsEndpoint),
 		Ready: func(ctx context.Context) error {
 			done := make(chan error, 1)
 			go func() {
@@ -1389,11 +1411,14 @@ func clientReads(ctx context.Context, st *store.Store) map[string]*clientreads.S
 // read. stsEndpoint and endpoint override the Tencent hosts in tests.
 func tencentClientReads(st *store.Store, base common.Provider, stsEndpoint, endpoint string) *clientreads.Sync {
 	return &clientreads.Sync{Store: st, Provider: "tencent", Connect: func(p cost.ClientPayer) (clientreads.Reader, error) {
-		role, err := tencent.ReadsRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Region)
+		grant, err := catalog.LoadClientReadRole(context.Background(), st, "tencent", p.TenantID, p.PayerID)
 		if err != nil {
 			return nil, &cost.RoleError{Err: err}
 		}
-		role.Endpoint = stsEndpoint
+		role, err := tencent.ReadsRole(base, grant, p.Region, stsEndpoint)
+		if err != nil {
+			return nil, &cost.RoleError{Err: err}
+		}
 		if _, err := role.GetCredential(); err != nil {
 			return nil, &cost.RoleError{Err: err}
 		}
@@ -1429,7 +1454,11 @@ func (r tencentReader) Recommendations(ctx context.Context) ([]rightsize.Recomme
 // stsEndpoint and endpoint override the AWS endpoints in tests.
 func awsClientReads(st *store.Store, base awsadapter.Identity, stsEndpoint, endpoint string) *clientreads.Sync {
 	return &clientreads.Sync{Store: st, Provider: "aws", Listing: awsadapter.COHSource, Connect: func(p cost.ClientPayer) (clientreads.Reader, error) {
-		role, err := awsadapter.ReadsRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Region, stsEndpoint)
+		grant, err := catalog.LoadClientReadRole(context.Background(), st, "aws", p.TenantID, p.PayerID)
+		if err != nil {
+			return nil, &cost.RoleError{Err: err}
+		}
+		role, err := awsadapter.ReadsRole(base, grant, p.Region, stsEndpoint)
 		if err != nil {
 			return nil, &cost.RoleError{Err: err}
 		}
@@ -1444,13 +1473,16 @@ func awsClientReads(st *store.Store, base awsadapter.Identity, stsEndpoint, endp
 // invoice totals, as that client's read-only role assumed from Keel's base
 // identity. It assumes the role up front, so a role that refuses Keel fails
 // here and not mid-sync. stsEndpoint overrides the STS host in tests.
-func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+func clientPayerConnect(st *store.Store, base common.Provider, stsEndpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-		role, err := tencent.ReadOnlyRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Region)
+		grant, err := catalog.LoadClientReadRole(context.Background(), st, "tencent", p.TenantID, p.PayerID)
 		if err != nil {
 			return nil, nil, &cost.RoleError{Err: err}
 		}
-		role.Endpoint = stsEndpoint
+		role, err := tencent.ReadOnlyRole(base, grant, p.Region, stsEndpoint)
+		if err != nil {
+			return nil, nil, &cost.RoleError{Err: err}
+		}
 		if _, err := role.GetCredential(); err != nil {
 			return nil, nil, &cost.RoleError{Err: err}
 		}
@@ -1469,9 +1501,13 @@ func clientPayerConnect(base common.Provider, stsEndpoint string) func(cost.Clie
 // up front, so a role that refuses Keel fails here and not mid-sync. AWS
 // has no invoice source, as for Keel's own AWS payer. stsEndpoint and
 // s3Endpoint (scheme://host) override the AWS endpoints in tests.
-func awsClientPayerConnect(base awsadapter.Identity, stsEndpoint, s3Endpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
+func awsClientPayerConnect(st *store.Store, base awsadapter.Identity, stsEndpoint, s3Endpoint string) func(cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
 	return func(p cost.ClientPayer) (cost.Objects, cost.InvoiceSource, error) {
-		role, err := awsadapter.ReadOnlyRole(base, p.RoleARN, p.PayerID, p.RoleExternalID,
+		grant, err := catalog.LoadClientReadRole(context.Background(), st, "aws", p.TenantID, p.PayerID)
+		if err != nil {
+			return nil, nil, &cost.RoleError{Err: err}
+		}
+		role, err := awsadapter.ReadOnlyRole(base, grant,
 			awsadapter.Export{Bucket: p.Bucket, Prefix: p.Prefix, Region: p.Region, KMSKeyARN: p.KMSKeyARN}, stsEndpoint)
 		if err != nil {
 			return nil, nil, &cost.RoleError{Err: err}
@@ -1791,7 +1827,11 @@ func rightsizeAll(ctx context.Context, st *store.Store, prs *apply.Applier) {
 	}
 	vm := rightsize.VMEngine{Service: rightsize.Service{Store: st}, Catalog: tencent.Catalog{API: catAPI}, Region: region,
 		Inventory: func(account string) rightsize.Inventory {
-			api, err := tencent.NewCVM(region, keelRole(st, base, account, role, region), "")
+			creds, err := keelRole(st, base, account, role, region, "")
+			if err != nil {
+				return failingInventory{err}
+			}
+			api, err := tencent.NewCVM(region, creds, "")
 			if err != nil {
 				return failingInventory{err}
 			}
@@ -1816,12 +1856,14 @@ func rightsizeAll(ctx context.Context, st *store.Store, prs *apply.Applier) {
 // Keel's member role there, one role per account so its session is reused.
 // stsEndpoint overrides the STS host, for tests.
 func tencentCVMUtilisation(st *store.Store, base common.Provider, role, region, stsEndpoint string) func(string) (*utilisation.TencentCVM, error) {
-	roles := map[string]*tencent.MemberRole{}
+	roles := map[string]*tencent.KeelRole{}
 	return func(account string) (*utilisation.TencentCVM, error) {
 		r, ok := roles[account]
 		if !ok {
-			r = keelRole(st, base, account, role, region)
-			r.Endpoint = stsEndpoint
+			var err error
+			if r, err = keelRole(st, base, account, role, region, stsEndpoint); err != nil {
+				return nil, err
+			}
 			roles[account] = r
 		}
 		api, err := utilisation.NewMonitorClient(region, r)
@@ -1836,8 +1878,10 @@ func tencentCVMUtilisation(st *store.Store, base common.Provider, role, region, 
 // member role there. stsEndpoint overrides the STS host, for tests.
 func tencentWasteScanner(st *store.Store, base common.Provider, role, region, stsEndpoint string) func(string) (rightsize.WasteScanner, rightsize.Cleaner, error) {
 	return func(account string) (rightsize.WasteScanner, rightsize.Cleaner, error) {
-		r := keelRole(st, base, account, role, region)
-		r.Endpoint = stsEndpoint
+		r, err := keelRole(st, base, account, role, region, stsEndpoint)
+		if err != nil {
+			return nil, nil, err
+		}
 		w, err := tencent.NewWaste(region, r)
 		return w, w, err
 	}

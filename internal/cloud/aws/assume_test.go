@@ -5,7 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/catalog/catalogtest"
 	"github.com/hx-thanadej/keel/internal/cloud/aws"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
 // TestKeylessRefusesAccessKeys: access keys in the environment are not
@@ -24,17 +27,20 @@ func TestKeylessRefusesAccessKeys(t *testing.T) {
 	}
 }
 
-// TestReadOnlyRoleMustBeInTheManagementAccount: a role ARN from another
-// account, or a payer without Keel's ExternalId, is refused before any STS
-// call.
+// TestReadOnlyRoleMustBeInTheManagementAccount: a registered role ARN in
+// another account, or a role no registration holds, is refused before any
+// STS call.
 func TestReadOnlyRoleMustBeInTheManagementAccount(t *testing.T) {
-	for name, tc := range map[string]struct{ arn, externalID string }{
-		"other account":  {"arn:aws:iam::300000000002:role/KeelReadOnly", "0123456789abcdef0123456789abcdef"},
-		"not a role":     {"arn:aws:iam::300000000001:user/keel", "0123456789abcdef0123456789abcdef"},
-		"no external id": {"arn:aws:iam::300000000001:role/KeelReadOnly", ""},
-	} {
-		if _, err := aws.ReadOnlyRole(nil, tc.arn, "300000000001", tc.externalID, aws.Export{Bucket: "c1-bills", Region: "us-east-1"}, "http://127.0.0.1:1"); err == nil {
+	_, elsewhere := catalogtest.ClientPayer(t, storetest.New(t), "aws", "300000000001", "arn:aws:iam::300000000002:role/KeelReadOnly")
+	for name, grant := range map[string]catalog.ClientReadRole{"other account": elsewhere, "unregistered": {}} {
+		if _, err := aws.ReadOnlyRole(nil, grant, aws.Export{Bucket: "c1-bills", Region: "us-east-1"}, "http://127.0.0.1:1"); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+		if _, err := aws.ReadsRole(nil, grant, "ap-southeast-1", "http://127.0.0.1:1"); err == nil {
+			t.Errorf("%s: accepted for reads", name)
+		}
+	}
+	if _, _, _, err := (&aws.ClientRole{}).Get(); err == nil {
+		t.Error("the zero client role was assumed")
 	}
 }

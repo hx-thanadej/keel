@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
+	"github.com/hx-thanadej/keel/internal/catalog"
 	"github.com/hx-thanadej/keel/internal/cost"
 )
 
@@ -131,14 +133,14 @@ func sessionPolicy(partition string, e Export) (string, error) {
 	return string(b), err
 }
 
-// ReadOnlyRole assumes arn, which must live in account, the client's
-// management account. Every session carries sessionPolicy(export), and AWS
+// ReadOnlyRole assumes grant, a client's read-only role, which must live in
+// the client's management account. Every session carries sessionPolicy(export), and AWS
 // grants the intersection of the role's policies and the session policy, so
 // even a role that allows more reads only the export's prefix (and decrypts
 // only through S3 with the export's key) through Keel. stsEndpoint
 // overrides the STS endpoint, for tests.
-func ReadOnlyRole(base Identity, arn, account, externalID string, export Export, stsEndpoint string) (*ClientRole, error) {
-	m, err := clientRoleARN(arn, account, externalID)
+func ReadOnlyRole(base Identity, grant catalog.ClientReadRole, export Export, stsEndpoint string) (*ClientRole, error) {
+	m, err := clientRoleARN(grant)
 	if err != nil {
 		return nil, err
 	}
@@ -146,27 +148,28 @@ func ReadOnlyRole(base Identity, arn, account, externalID string, export Export,
 	if err != nil {
 		return nil, err
 	}
-	return assume(base, arn, externalID, policy, export.Region, stsEndpoint), nil
+	return assume(base, grant, policy, export.Region, stsEndpoint), nil
 }
 
-// clientRoleARN checks that arn is a role in account and that Keel has an
-// ExternalId for it, and returns arn's partition and account.
-func clientRoleARN(arn, account, externalID string) ([]string, error) {
-	m := roleARN.FindStringSubmatch(arn)
+// clientRoleARN checks that grant's role is in its payer and that Keel has
+// an ExternalId for it, and returns the ARN's partition and account.
+func clientRoleARN(grant catalog.ClientReadRole) ([]string, error) {
+	m := roleARN.FindStringSubmatch(grant.ARN())
 	if m == nil {
-		return nil, fmt.Errorf("read-only role %q is not arn:aws:iam::<account>:role/<name>", arn)
+		return nil, fmt.Errorf("read-only role %q is not arn:aws:iam::<account>:role/<name>", grant.ARN())
 	}
-	if m[2] != account {
-		return nil, fmt.Errorf("read-only role %s is not in management account %s", arn, account)
+	if m[2] != grant.Payer() {
+		return nil, fmt.Errorf("read-only role %s is not in management account %s", grant.ARN(), grant.Payer())
 	}
-	if externalID == "" {
-		return nil, fmt.Errorf("read-only role %s has no ExternalId", arn)
+	if grant.ExternalID() == "" {
+		return nil, fmt.Errorf("read-only role %s has no ExternalId", grant.ARN())
 	}
 	return m, nil
 }
 
-func assume(base Identity, arn, externalID, policy, region, stsEndpoint string) *ClientRole {
-	p := stscreds.NewAssumeRoleProvider(stsWith(base, region, stsEndpoint), arn, func(o *stscreds.AssumeRoleOptions) {
+func assume(base Identity, grant catalog.ClientReadRole, policy, region, stsEndpoint string) *ClientRole {
+	externalID := grant.ExternalID()
+	p := stscreds.NewAssumeRoleProvider(stsWith(base, region, stsEndpoint), grant.ARN(), func(o *stscreds.AssumeRoleOptions) {
 		o.RoleSessionName = "keel"
 		o.ExternalID = &externalID
 		o.Policy = &policy
@@ -176,8 +179,12 @@ func assume(base Identity, arn, externalID, policy, region, stsEndpoint string) 
 }
 
 // Get returns the session's (access key id, secret, session token),
-// assuming the role again when the session is near expiry.
+// assuming the role again when the session is near expiry. The zero
+// ClientRole, which no constructor built, is refused.
 func (r *ClientRole) Get() (id, key, token string, err error) {
+	if r.creds == nil {
+		return "", "", "", errors.New("client role: build it with ReadOnlyRole or ReadsRole")
+	}
 	c, err := r.creds.Retrieve(context.Background())
 	if err != nil {
 		return "", "", "", err

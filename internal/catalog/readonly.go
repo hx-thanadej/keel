@@ -70,17 +70,3 @@ func ClientOwned(ctx context.Context, st *store.Store, provider string, external
 	}
 	return out, nil
 }
-
-// RequireKeelReachable refuses an account Keel's own roles must not enter:
-// a client-owned Cloud Account, which Keel reads only through the client's
-// read-only role (ADR-0018). The error wraps ErrClientOwned.
-func RequireKeelReachable(ctx context.Context, st *store.Store, provider, externalID string) error {
-	client, err := ClientOwned(ctx, st, provider, []string{externalID})
-	if err != nil {
-		return err
-	}
-	if client[externalID] {
-		return fmt.Errorf("keel's own role in %s account %s: %w", provider, externalID, ErrClientOwned)
-	}
-	return nil
-}
