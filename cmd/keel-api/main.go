@@ -1358,7 +1358,7 @@ func syncClients(ctx context.Context, syncs []*cost.ClientBillSync, reads map[st
 		}
 		for _, r := range reports {
 			slog.Info("client reads", "provider", cs.Provider, "tenant", r.Payer.TenantID, "payer", r.Payer.PayerID, "budgets", r.Budgets,
-				"budgets_over", r.BudgetsOver, "findings", r.Findings, "recommendations", r.Recommendations, "dropped", r.Dropped)
+				"budgets_over", r.BudgetsOver, "findings", r.Findings, "recommendations", r.Recommendations, "dropped", r.Dropped, "withdrawn", r.Withdrawn)
 		}
 	}
 	return loaded
@@ -1425,8 +1425,8 @@ func (r tencentReader) Recommendations(ctx context.Context) ([]rightsize.Recomme
 // role up front, so a role that refuses Keel fails before any read.
 // stsEndpoint and endpoint override the AWS endpoints in tests.
 func awsClientReads(st *store.Store, base awsadapter.Identity, stsEndpoint, endpoint string) *clientreads.Sync {
-	return &clientreads.Sync{Store: st, Provider: "aws", Connect: func(p cost.ClientPayer) (clientreads.Reader, error) {
-		role, err := awsadapter.ReadsRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, stsEndpoint)
+	return &clientreads.Sync{Store: st, Provider: "aws", Listing: awsadapter.COHSource, Connect: func(p cost.ClientPayer) (clientreads.Reader, error) {
+		role, err := awsadapter.ReadsRole(base, p.RoleARN, p.PayerID, p.RoleExternalID, p.Region, stsEndpoint)
 		if err != nil {
 			return nil, &cost.RoleError{Err: err}
 		}
@@ -1753,12 +1753,10 @@ func rightsizeAll(ctx context.Context, st *store.Store, prs *apply.Applier) {
 	if os.Getenv("KEEL_AWS_COH") == "1" {
 		if c, err := awsadapter.NewCOH(ctx); err != nil {
 			slog.Error("aws cost optimization hub", "err", err)
-		} else if recs, err := c.List(ctx); err != nil {
-			slog.Error("aws cost optimization hub", "err", err)
-		} else if res, err := (rightsize.Service{Store: st}).Import(ctx, recs); err != nil {
+		} else if res, err := (rightsize.Service{Store: st}).ImportListing(ctx, awsadapter.COHSource, c.List); err != nil {
 			slog.Error("aws recommendations import", "err", err)
 		} else {
-			slog.Info("aws recommendations", "raised", res.Raised, "kept", res.Kept, "unowned", res.Unowned)
+			slog.Info("aws recommendations", "raised", res.Raised, "kept", res.Kept, "unowned", res.Unowned, "withdrawn", res.Withdrawn)
 		}
 	}
 	if res, err := (rightsize.OffHoursEngine{Service: rightsize.Service{Store: st}}).Run(ctx); err != nil {

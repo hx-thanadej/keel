@@ -231,11 +231,13 @@ The role needs exactly these actions:
 
 Keel also reads Budgets, Security Hub findings (which include Config rule
 findings) and Cost Optimization Hub recommendations (which include Compute
-Optimizer's) with the same role, in a session limited to
-`budgets:ViewBudget`, `securityhub:GetFindings` and
-`cost-optimization-hub:ListRecommendations`. Add those three actions to the
-role for them; [onboard-client-org.md](onboard-client-org.md#aws-management-account)
-has the full policy.
+Optimizer's savings advice, not its under-provisioned findings) with the
+same role, in a session limited to `budgets:ViewBudget` on the management
+account's budgets, `aws-portal:ViewBilling`, `securityhub:GetFindings` on
+its hub in the payer's region, and `cost-optimization-hub:ListRecommendations`.
+Add those four statements to the role for them;
+[onboard-client-org.md](onboard-client-org.md#aws-management-account) has
+the full policy and the reasons.
 
 1. **The client sets up the export.** In the management account, open
    Billing and Cost Management, Data Exports, Create export

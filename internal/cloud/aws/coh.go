@@ -12,6 +12,10 @@ import (
 	"github.com/hx-thanadej/keel/internal/rightsize"
 )
 
+// COHSource is the Source of every recommendation read from Cost
+// Optimization Hub.
+const COHSource = "native:aws_coh"
+
 // COH reads AWS Cost Optimization Hub, which already deduplicates
 // recommendations across Compute Optimizer and Savings Plans and prices
 // savings after discounts (#71).
@@ -27,7 +31,8 @@ func NewCOH(ctx context.Context) (*COH, error) {
 	return &COH{client: coh.NewFromConfig(cfg)}, nil
 }
 
-// List returns every recommendation, mapped to Keel's record.
+// List returns every recommendation, mapped to Keel's record: all pages,
+// or none and the error of the page that failed.
 func (c *COH) List(ctx context.Context) ([]rightsize.Recommendation, error) {
 	var out []rightsize.Recommendation
 	p := coh.NewListRecommendationsPaginator(c.client, &coh.ListRecommendationsInput{IncludeAllRecommendations: false})
@@ -66,7 +71,7 @@ func FromCOH(r cohtypes.Recommendation) rightsize.Recommendation {
 		resource = s(r.ResourceArn)
 	}
 	rec := rightsize.Recommendation{
-		Source: "native:aws_coh", Provider: "aws", AccountID: s(r.AccountId), Region: s(r.Region), ResourceID: resource,
+		Source: COHSource, Provider: "aws", AccountID: s(r.AccountId), Region: s(r.Region), ResourceID: resource,
 		ResourceType: strings.ToLower(s(r.CurrentResourceType)), Action: action,
 		Current:     map[string]any{"summary": s(r.CurrentResourceSummary), "type": s(r.CurrentResourceType)},
 		Recommended: map[string]any{"summary": s(r.RecommendedResourceSummary), "type": s(r.RecommendedResourceType)},

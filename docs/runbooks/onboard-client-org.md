@@ -22,7 +22,8 @@ account:
   Security Hub findings (`GetFindings`, which includes AWS Config rule
   findings when the client has Security Hub's Config integration on) and
   Cost Optimization Hub recommendations (`ListRecommendations`, which
-  carries Compute Optimizer's rightsizing);
+  carries Compute Optimizer's cost-saving rightsizing and idle advice, but
+  not its under-provisioned findings; see the coverage note in step 2);
 - on Tencent, the payer's active Budgets (`DescribeBudget`), its Smart
   Advisor risks (`DescribeStrategies`, `DescribeTaskStrategyRisks`), and,
   for rightsizing its own CVM instances, Cloud Monitor CPU and memory
@@ -52,7 +53,8 @@ Keel never does these:
   allows `s3:ListBucket` on the bucket only for the recorded prefix,
   `s3:GetObject` only under it, and `kms:Decrypt` only on the recorded key
   via S3 in the bucket's region. The reads session's allows only
-  `budgets:ViewBudget`, `securityhub:GetFindings` and
+  `budgets:ViewBudget` on the payer's own budgets, `aws-portal:ViewBilling`,
+  `securityhub:GetFindings` on the payer's hub in its recorded region, and
   `cost-optimization-hub:ListRecommendations` (`aws.ReadActions`). AWS grants
   the intersection, so an over-broad role still does only these reads. The
   Tencent reads session carries a session policy (the AssumeRole `Policy`
@@ -158,21 +160,57 @@ Keel never does these:
      "Statement": [
        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::<bucket>"},
        {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::<bucket>/<prefix>*"},
-       {"Effect": "Allow", "Action": ["budgets:ViewBudget", "securityhub:GetFindings", "cost-optimization-hub:ListRecommendations"], "Resource": "*"}
+       {"Effect": "Allow", "Action": "budgets:ViewBudget", "Resource": "arn:aws:budgets::<management account id>:budget/*"},
+       {"Effect": "Allow", "Action": "aws-portal:ViewBilling", "Resource": "*"},
+       {"Effect": "Allow", "Action": "securityhub:GetFindings", "Resource": "arn:aws:securityhub:<region>:<management account id>:hub/default"},
+       {"Effect": "Allow", "Action": "cost-optimization-hub:ListRecommendations", "Resource": "*"}
      ]
    }
    ```
 
-   The last statement is for the non-bill reads. Each action is the one the
-   Service Authorization Reference names for the call Keel makes, and each
-   is Read or List access: `DescribeBudgets` needs `budgets:ViewBudget`
-   ([AWS Budgets](https://docs.aws.amazon.com/service-authorization/latest/reference/list_budgets.html)),
-   `GetFindings` needs `securityhub:GetFindings`
-   ([Security Hub](https://docs.aws.amazon.com/service-authorization/latest/reference/list_securityhub.html)),
-   and `ListRecommendations` needs `cost-optimization-hub:ListRecommendations`
-   ([Cost Optimization Hub](https://docs.aws.amazon.com/service-authorization/latest/reference/list_cost-optimization-hub.html)). Leave the statement off
-   to have Keel read bills only; each read it cannot make is logged as
-   `ALERT client reads failed` and the other reads carry on.
+   The last four statements are for the non-bill reads. `<region>` is the
+   payer's recorded `region`. Each action is one the Service Authorization
+   Reference names for the call Keel makes, and each is Read or List access:
+
+   - `DescribeBudgets` authorizes `budgets:ViewBudget`, whose resource type
+     is `budget` (`arn:${Partition}:budgets::${Account}:budget/${BudgetName}`)
+     ([AWS Budgets](https://docs.aws.amazon.com/service-authorization/latest/reference/list_budgets.html)).
+     AWS's guide says that for actions on a budget resource you specify the
+     budget ARN
+     ([policy examples](https://docs.aws.amazon.com/cost-management/latest/userguide/billing-example-policies.html)),
+     so the statement names the management account's budgets only.
+   - The same reference's operations table also lists the legacy
+     `aws-portal:ViewBilling` against `DescribeBudgets`. AWS says the
+     `aws-portal` actions reached end of standard support in July 2023
+     ([policy examples](https://docs.aws.amazon.com/cost-management/latest/userguide/billing-example-policies.html))
+     and that API access to AWS Budgets is unaffected by the move to the
+     fine-grained billing actions
+     ([fine-grained access](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/migrate-granularaccess-whatis.html));
+     the fine-grained replacement for viewing budgets is `budgets:ViewBudget`
+     itself. AWS's own `AWSBudgetsReadOnlyAccess` managed policy still grants
+     `aws-portal:ViewBilling` with `budgets:ViewBudget`
+     ([policy](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AWSBudgetsReadOnlyAccess.html)).
+     Keel's position: grant it, because the reference still lists it and a
+     session policy that left it out could not be fixed from the client's
+     side. In an account on the fine-grained actions it grants nothing more.
+     `aws-portal` defines no resource types, so it stays on `*`. A client
+     that refuses it loses nothing else; if `DescribeBudgets` is then denied,
+     the budget read alone fails.
+   - `GetFindings` authorizes `securityhub:GetFindings`, whose resource type
+     is `hub` (`arn:${Partition}:securityhub:${Region}:${Account}:hub/default`)
+     ([Security Hub](https://docs.aws.amazon.com/service-authorization/latest/reference/list_securityhub.html)).
+     Keel calls it only in the payer's recorded region, so the statement names
+     that hub.
+   - `ListRecommendations` authorizes `cost-optimization-hub:ListRecommendations`.
+     Cost Optimization Hub does not support a resource ARN in `Resource`
+     ([Cost Optimization Hub](https://docs.aws.amazon.com/service-authorization/latest/reference/list_cost-optimization-hub.html)),
+     so it stays on `*`.
+
+   Keel's session policy carries the same four statements for the payer
+   (`aws.ReadsRole`), so a client role written with `Resource: "*"` is still
+   narrowed to them. Leave the statements off to have Keel read bills only;
+   each read it cannot make is logged as `ALERT client reads failed` and the
+   other reads carry on.
 
    Keel reads Security Hub in the payer's recorded `region`, so aggregate
    findings into that region. It sees what Security Hub in the management
@@ -180,6 +218,19 @@ Keel never does these:
    only the management account's own findings arrive. Cost Optimization Hub
    and Compute Optimizer must be enrolled for the organisation, or the list
    is empty.
+
+   **Coverage gap: under-provisioned resources.** Cost Optimization Hub
+   lists cost optimization recommendations: rightsizing, idle deletion,
+   Savings Plans and Reserved Instances, each with estimated savings
+   ([Cost Optimization Hub](https://docs.aws.amazon.com/cost-management/latest/userguide/cost-optimization-hub.html)).
+   Compute Optimizer's under-provisioned finding is a performance one: a
+   specification that does not meet the workload's needs
+   ([EC2 findings](https://docs.aws.amazon.com/compute-optimizer/latest/ug/view-ec2-recommendations.html)),
+   with no saving to list. So Keel never shows a client's under-provisioned
+   instances. Keel does not read Compute Optimizer directly; a client that
+   wants under-provisioning watched reads it in the Compute Optimizer
+   console. Reading it through Keel would add `compute-optimizer` read
+   actions to the role and the session policy.
 
 3. **KMS (only if the bucket uses SSE-KMS).** Add this statement, make sure
    the key policy lets the role use the key, and give Keel the key ARN (not
@@ -292,7 +343,7 @@ environment variable; client payers are data.
 5. **Budget, finding and rightsizing reads.** Right after each bill sync,
    Keel reads every payer that sync visited through a second session of the
    same role, and logs one `client reads` line per payer with `budgets`,
-   `budgets_over`, `findings`, `recommendations` and `dropped`. In the
+   `budgets_over`, `findings`, `recommendations`, `dropped` and `withdrawn`. In the
    client's Tenant:
    - `GET /v1/tenants/{tenant}/findings?kind=cloud_budget` lists one Finding
      per budget whose spend is over its limit (high) or whose forecast is
@@ -312,7 +363,19 @@ environment variable; client payers are data.
      last two.
 
    A `cloud_budget` or `cloud_security` Finding resolves on the first read
-   that no longer reports it. A read that fails resolves nothing.
+   that no longer reports it. On AWS, an open `native:aws_coh`
+   Recommendation that a complete Cost Optimization Hub listing for its
+   payer no longer holds is withdrawn: its state becomes `superseded` with
+   `decision_reason` "no longer reported by native:aws_coh", its Finding
+   resolves, and the log line counts it in `withdrawn`. A listing is
+   complete only when every page arrived with no error. Each payer's
+   listing withdraws only advice read through that payer, so two payers in
+   one Tenant never withdraw each other's. Accepted advice is left to its
+   pull request. Tencent `engine:vm` advice is never withdrawn this way:
+   the engine reports only the instances it could evaluate. A read that
+   fails resolves and withdraws nothing. Keel's own Cost Optimization Hub
+   import (`KEEL_AWS_COH=1`) withdraws its own advice by the same rule,
+   never a client payer's.
 6. **Keel's own side.** Before trying any client role, each run checks
    Keel's own identity for that provider once: it must load (on AWS, from a
    keyless source) and STS must accept it (`GetCallerIdentity`). If either

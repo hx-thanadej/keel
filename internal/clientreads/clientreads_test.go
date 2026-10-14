@@ -278,3 +278,107 @@ func TestClientReadsRoleFailureLandsNothing(t *testing.T) {
 		t.Errorf("c2 open %v, want its finding despite c1's role failure", got)
 	}
 }
+
+// openRecs is tenant's open recommendations as account/resource.
+func openRecs(t *testing.T, s *store.Store, tenant string) []string {
+	t.Helper()
+	list, err := (rightsize.Service{Store: s}).List(context.Background(), tenant, rightsize.Filter{State: "open"})
+	must(t, err)
+	var out []string
+	for _, r := range list {
+		out = append(out, r.AccountID+"/"+r.ResourceID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestClientRecommendationsGoneFromACompleteListingAreWithdrawn: advice the
+// payer's provider stops reporting is withdrawn on the next complete read,
+// and its Finding resolved. A read that fails, even with some
+// recommendations in hand, withdraws nothing. A second payer in the same
+// Tenant reporting nothing withdraws none of the first payer's advice.
+func TestClientRecommendationsGoneFromACompleteListingAreWithdrawn(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	second := client{payer: "300000000003", member: "300000000033"}
+	must(t, w.s.InTenant(ctx, w.c1.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO cloud_accounts (tenant_id, provider, external_id, name, ownership, read_only_role)
+			VALUES ($1, 'aws', $2, 'payer-2', 'client', '{"role_arn": "arn:aws:iam::300000000003:role/KeelReadOnly"}'),
+			       ($1, 'aws', $3, 'member-2', 'client', '{"role_arn": "arn:aws:iam::300000000033:role/KeelReadOnly"}')`,
+			w.c1.tenant, second.payer, second.member)
+		return err
+	}))
+	second.tenant = w.c1.tenant
+	clouds := map[string]*fake{
+		w.c1.payer:   {recs: []rightsize.Recommendation{rec(w.c1.member, "i-kept"), rec(w.c1.member, "i-gone"), rec(w.c1.payer, "i-flaky")}},
+		second.payer: {recs: []rightsize.Recommendation{rec(second.member, "i-second")}},
+	}
+	sync := &clientreads.Sync{Store: w.s, Provider: "aws", Listing: "native:aws_coh",
+		Connect: func(p cost.ClientPayer) (clientreads.Reader, error) { return clouds[p.PayerID], nil }}
+	payers := []cost.ClientPayer{w.c1.clientPayer(), second.clientPayer()}
+	_, err := sync.Run(ctx, payers)
+	must(t, err)
+	all := []string{w.c1.payer + "/i-flaky", w.c1.member + "/i-gone", w.c1.member + "/i-kept", second.member + "/i-second"}
+	if got := openRecs(t, w.s, w.c1.tenant); !slices.Equal(got, all) {
+		t.Fatalf("open %v, want %v", got, all)
+	}
+
+	clouds[w.c1.payer].recs = []rightsize.Recommendation{rec(w.c1.member, "i-kept")}
+	clouds[w.c1.payer].fail = map[string]error{"recommendations": errors.New("ThrottlingException on page 2")}
+	clouds[second.payer].recs = nil
+	clouds[second.payer].fail = map[string]error{"recommendations": errors.New("AccessDeniedException")}
+	if _, err := sync.Run(ctx, payers); err == nil {
+		t.Fatal("failed reads reported no error")
+	}
+	if got := openRecs(t, w.s, w.c1.tenant); !slices.Equal(got, all) {
+		t.Fatalf("open %v after failed reads, want all of %v kept", got, all)
+	}
+
+	clouds[w.c1.payer].fail = nil
+	clouds[w.c1.payer].recs = []rightsize.Recommendation{rec(w.c1.member, "i-kept")}
+	clouds[second.payer].fail = nil
+	_, err = sync.Run(ctx, payers)
+	must(t, err)
+	if got, want := openRecs(t, w.s, w.c1.tenant), []string{w.c1.member + "/i-kept"}; !slices.Equal(got, want) {
+		t.Fatalf("open %v, want %v once both payers' complete listings dropped the rest", got, want)
+	}
+
+	clouds[second.payer].recs = []rightsize.Recommendation{rec(second.member, "i-second")}
+	_, err = sync.Run(ctx, []cost.ClientPayer{second.clientPayer()})
+	must(t, err)
+	clouds[second.payer].recs = nil
+	_, err = sync.Run(ctx, []cost.ClientPayer{w.c1.clientPayer()})
+	must(t, err)
+	if got, want := openRecs(t, w.s, w.c1.tenant), []string{w.c1.member + "/i-kept", second.member + "/i-second"}; !slices.Equal(got, want) {
+		t.Fatalf("open %v, want %v: c1's listing must not withdraw the second payer's advice", got, want)
+	}
+
+	var withdrawn, resolved int
+	must(t, w.s.InTenant(ctx, w.c1.tenant, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM recommendations WHERE state = 'superseded' AND decision_reason = 'no longer reported by native:aws_coh'`).Scan(&withdrawn); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM findings WHERE kind = 'rightsizing' AND status = 'resolved' AND resolution = 'no longer reported by native:aws_coh'`).Scan(&resolved)
+	}))
+	if withdrawn != 3 || resolved != 3 {
+		t.Errorf("withdrawn %d with %d Findings resolved, want 3 and 3", withdrawn, resolved)
+	}
+}
+
+// TestClientReadsWithoutAListingWithdrawNothing: a provider whose
+// Recommendations are not a complete listing (Keel's VM engine for Tencent
+// reports only what it could evaluate) never withdraws advice.
+func TestClientReadsWithoutAListingWithdrawNothing(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	cloud := &fake{recs: []rightsize.Recommendation{rec(w.c1.member, "i-1")}}
+	sync := &clientreads.Sync{Store: w.s, Provider: "aws", Connect: func(cost.ClientPayer) (clientreads.Reader, error) { return cloud, nil }}
+	_, err := sync.Run(ctx, []cost.ClientPayer{w.c1.clientPayer()})
+	must(t, err)
+	cloud.recs = nil
+	_, err = sync.Run(ctx, []cost.ClientPayer{w.c1.clientPayer()})
+	must(t, err)
+	if got, want := openRecs(t, w.s, w.c1.tenant), []string{w.c1.member + "/i-1"}; !slices.Equal(got, want) {
+		t.Errorf("open %v, want %v", got, want)
+	}
+}

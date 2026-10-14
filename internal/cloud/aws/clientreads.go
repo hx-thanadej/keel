@@ -2,7 +2,9 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,27 +20,49 @@ import (
 	"github.com/hx-thanadej/keel/internal/rightsize"
 )
 
-// ReadActions are the only actions a client-reads session may use, one per
-// API call ClientReads makes: DescribeBudgets, GetFindings and
-// ListRecommendations.
-var ReadActions = []string{"budgets:ViewBudget", "securityhub:GetFindings", "cost-optimization-hub:ListRecommendations"}
+// ReadActions are the only actions a client-reads session may use. AWS
+// authorizes DescribeBudgets with budgets:ViewBudget and lists the legacy
+// aws-portal:ViewBilling for it too, GetFindings with securityhub:GetFindings
+// and ListRecommendations with cost-optimization-hub:ListRecommendations.
+var ReadActions = []string{"budgets:ViewBudget", "aws-portal:ViewBilling", "securityhub:GetFindings", "cost-optimization-hub:ListRecommendations"}
+
+var awsRegion = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`)
 
 // readsPolicy is the session policy on every client-reads session. AWS
 // grants the intersection with the role's own policies, so through Keel
-// even an over-broad role makes only ReadActions.
-func readsPolicy() string {
-	return `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["` + strings.Join(ReadActions, `","`) + `"],"Resource":"*"}]}`
+// even an over-broad role makes only ReadActions, on the payer's own budgets
+// and its Security Hub in region. aws-portal and Cost Optimization Hub
+// define no resource types, so they stay on "*".
+func readsPolicy(partition, account, region string) (string, error) {
+	if !awsRegion.MatchString(region) {
+		return "", fmt.Errorf("security hub region %q is not an AWS region", region)
+	}
+	b, err := json.Marshal(struct {
+		Version   string
+		Statement []statement
+	}{"2012-10-17", []statement{
+		{Effect: "Allow", Action: "budgets:ViewBudget", Resource: "arn:" + partition + ":budgets::" + account + ":budget/*"},
+		{Effect: "Allow", Action: "aws-portal:ViewBilling", Resource: "*"},
+		{Effect: "Allow", Action: "securityhub:GetFindings", Resource: "arn:" + partition + ":securityhub:" + region + ":" + account + ":hub/default"},
+		{Effect: "Allow", Action: "cost-optimization-hub:ListRecommendations", Resource: "*"},
+	}})
+	return string(b), err
 }
 
 // ReadsRole assumes a client's read-only role in its management account for
-// Budgets, Security Hub and Cost Optimization Hub reads, with the same
-// checks and ExternalId as ReadOnlyRole but a session limited to
-// ReadActions. stsEndpoint overrides the STS endpoint, for tests.
-func ReadsRole(base Identity, arn, account, externalID, stsEndpoint string) (*ClientRole, error) {
-	if _, err := clientRoleARN(arn, account, externalID); err != nil {
+// Budgets, Security Hub (read in region) and Cost Optimization Hub reads,
+// with the same checks and ExternalId as ReadOnlyRole but a session limited
+// to readsPolicy. stsEndpoint overrides the STS endpoint, for tests.
+func ReadsRole(base Identity, arn, account, externalID, region, stsEndpoint string) (*ClientRole, error) {
+	m, err := clientRoleARN(arn, account, externalID)
+	if err != nil {
 		return nil, err
 	}
-	return assume(base, arn, externalID, readsPolicy(), "us-east-1", stsEndpoint), nil
+	policy, err := readsPolicy(m[1], m[2], region)
+	if err != nil {
+		return nil, err
+	}
+	return assume(base, arn, externalID, policy, "us-east-1", stsEndpoint), nil
 }
 
 // ClientReads reads a client management account through a ReadsRole
@@ -151,7 +175,9 @@ func (c *ClientReads) Findings(ctx context.Context) ([]clientreads.Finding, erro
 }
 
 // Recommendations implements clientreads.Reader with Cost Optimization Hub,
-// which carries Compute Optimizer's rightsizing recommendations.
+// which carries Compute Optimizer's savings recommendations only: its
+// under-provisioned findings never arrive. The listing is complete or an
+// error (COH.List), so Sync.Listing may be COHSource.
 func (c *ClientReads) Recommendations(ctx context.Context) ([]rightsize.Recommendation, error) {
 	return c.coh.List(ctx)
 }
