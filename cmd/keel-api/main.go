@@ -234,7 +234,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	}
 	var gh *githubTokens
 	if app != nil {
-		gh = newGitHubTokens(*app, os.Getenv("KEEL_GITHUB_ORG") == "1", os.Getenv("KEEL_GITHUB_REMEDIATE") == "1")
+		gh = newGitHubTokens(*app, os.Getenv("KEEL_GITHUB_ORG") == "1", os.Getenv("KEEL_GITHUB_REMEDIATE") == "1", os.Getenv("KEEL_REUSABLE_WORKFLOW") != "")
 	}
 	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{},
 		Cost:    &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}, Rules: cost.Rules{Store: st}},
@@ -670,8 +670,16 @@ func githubApp(httpc *http.Client) (*ghapi.App, error) {
 			enabledBy = append(enabledBy, k)
 		}
 	}
+	var legacy []string
+	for _, k := range []string{"KEEL_GITHUB_ADMIN_TOKEN", "KEEL_GITHUB_WRITE_TOKEN", "KEEL_GITHUB_TOKEN"} {
+		if os.Getenv(k) != "" {
+			legacy = append(legacy, k)
+		}
+	}
 	owner := os.Getenv("KEEL_GITHUB_OWNER")
 	switch {
+	case len(set) == 0 && len(legacy) > 0:
+		return nil, fmt.Errorf("%s no longer enable GitHub integrations (#231): configure the GitHub App (KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID, KEEL_GITHUB_APP_PRIVATE_KEY, KEEL_GITHUB_OWNER) and remove the token", strings.Join(legacy, ", "))
 	case len(set) == 0 && len(enabledBy) == 0:
 		return nil, nil
 	case len(missing) > 0:
@@ -700,7 +708,9 @@ type githubTokens struct {
 	catchup                           *ghapi.TokenSource
 }
 
-func newGitHubTokens(app ghapi.App, org, remediate bool) *githubTokens {
+// workflows is true when Service Templates write .github/workflows/*
+// (KEEL_REUSABLE_WORKFLOW set), which GitHub gates behind Workflows: write.
+func newGitHubTokens(app ghapi.App, org, remediate, workflows bool) *githubTokens {
 	pullRequests := ghapi.Permissions{"contents": "write", "pull_requests": "write", "metadata": "read"}
 	governance := ghapi.Permissions{"metadata": "read"}
 	if org {
@@ -715,6 +725,11 @@ func newGitHubTokens(app ghapi.App, org, remediate bool) *githubTokens {
 			governance["organization_custom_properties"] = "admin"
 		}
 	}
+	templates := ghapi.Permissions{"administration": "write", "contents": "write", "metadata": "read",
+		"organization_custom_properties": "write", "members": "read"}
+	if workflows {
+		templates["workflows"] = "write"
+	}
 	return &githubTokens{
 		rightsizing: app.Source(pullRequests),
 		admission:   app.Source(pullRequests),
@@ -722,11 +737,10 @@ func newGitHubTokens(app ghapi.App, org, remediate bool) *githubTokens {
 		governance:  app.Source(governance),
 		alerts:      app.Source(ghapi.Permissions{"security_events": "read", "vulnerability_alerts": "read", "secret_scanning_alerts": "read"}),
 		leaks:       app.Source(ghapi.Permissions{"secret_scanning_alerts": "read"}),
-		templates: app.Source(ghapi.Permissions{"administration": "write", "contents": "write", "metadata": "read",
-			"organization_custom_properties": "write", "members": "read"}),
-		decisions: app.Source(ghapi.Permissions{"contents": "read"}),
-		catalog:   app.Source(ghapi.Permissions{"contents": "read", "metadata": "read"}),
-		catchup:   app.Source(ghapi.Permissions{"organization_hooks": "write"}),
+		templates:   app.Source(templates),
+		decisions:   app.Source(ghapi.Permissions{"contents": "read"}),
+		catalog:     app.Source(ghapi.Permissions{"contents": "read", "metadata": "read"}),
+		catchup:     app.Source(ghapi.Permissions{"organization_hooks": "write"}),
 	}
 }
 

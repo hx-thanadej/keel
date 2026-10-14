@@ -15,6 +15,7 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/ghapi"
 	"github.com/hx-thanadej/keel/internal/ghapi/ghapitest"
+	"github.com/hx-thanadej/keel/internal/templates"
 )
 
 // The permission each caller needs, from GitHub's "Permissions required for
@@ -32,6 +33,7 @@ var (
 		"catalog":     {"contents": "read", "metadata": "read"},
 		"catchup":     {"organization_hooks": "write"},
 	}
+	workflowsWrite = ghapi.Permissions{"administration": "write", "contents": "write", "metadata": "read", "organization_custom_properties": "write", "members": "read", "workflows": "write"}
 	wantGovernance = map[[2]bool]ghapi.Permissions{ // [org, remediate]
 		{true, false}:  {"organization_administration": "write", "organization_custom_properties": "read", "organization_plan": "read", "metadata": "read"},
 		{true, true}:   {"organization_administration": "write", "organization_custom_properties": "admin", "organization_plan": "read", "administration": "write", "metadata": "read"},
@@ -41,10 +43,16 @@ var (
 )
 
 func TestEachGitHubCallerAsksOnlyForItsPermissions(t *testing.T) {
+	for _, workflows := range []bool{false, true} {
+		testEachCaller(t, workflows)
+	}
+}
+
+func testEachCaller(t *testing.T, workflows bool) {
 	for mode, wantGov := range wantGovernance {
 		org, remediate := mode[0], mode[1]
 		gh := ghapitest.NewServer(t, "acme", http.NotFoundHandler())
-		tokens := newGitHubTokens(gh.App(), org, remediate)
+		tokens := newGitHubTokens(gh.App(), org, remediate, workflows)
 		sources := map[string]*ghapi.TokenSource{
 			"rightsizing": tokens.rightsizing, "admission": tokens.admission, "promotion": tokens.promotion,
 			"governance": tokens.governance, "alerts": tokens.alerts, "leaks": tokens.leaks, "templates": tokens.templates,
@@ -52,6 +60,9 @@ func TestEachGitHubCallerAsksOnlyForItsPermissions(t *testing.T) {
 		}
 		want := maps.Clone(wantPermissions)
 		want["governance"] = wantGov
+		if workflows {
+			want["templates"] = workflowsWrite
+		}
 		if len(sources) != len(want) {
 			t.Fatalf("%d token sources, %d expected", len(sources), len(want))
 		}
@@ -65,7 +76,7 @@ func TestEachGitHubCallerAsksOnlyForItsPermissions(t *testing.T) {
 				t.Fatalf("%s: %d mints, want 1", name, len(asked)-before)
 			}
 			if got := asked[len(asked)-1]; !maps.Equal(got, want[name]) {
-				t.Errorf("org=%v remediate=%v %s asked %v, want exactly %v", org, remediate, name, got, want[name])
+				t.Errorf("org=%v remediate=%v workflows=%v %s asked %v, want exactly %v", org, remediate, workflows, name, got, want[name])
 			}
 		}
 	}
@@ -84,6 +95,10 @@ func TestGitHubAppConfig(t *testing.T) {
 		enabled bool
 		errHas  string
 	}{
+		{"leftover admin token", map[string]string{"KEEL_GITHUB_ADMIN_TOKEN": "ghp_x"}, false, "KEEL_GITHUB_ADMIN_TOKEN"},
+		{"leftover write token", map[string]string{"KEEL_GITHUB_WRITE_TOKEN": "ghp_x"}, false, "KEEL_GITHUB_WRITE_TOKEN"},
+		{"leftover token", map[string]string{"KEEL_GITHUB_TOKEN": "ghp_x"}, false, "KEEL_GITHUB_APP_ID"},
+		{"leftover token beside the app", merge(app, map[string]string{"KEEL_GITHUB_OWNER": "acme", "KEEL_GITHUB_TOKEN": "ghp_x"}), true, ""},
 		{"no github integration", nil, false, ""},
 		{"owner without the app", map[string]string{"KEEL_GITHUB_OWNER": "acme"}, false, "KEEL_GITHUB_APP_ID"},
 		{"webhook without the app", map[string]string{"KEEL_GITHUB_WEBHOOK_SECRET": "s"}, false, "KEEL_GITHUB_APP_PRIVATE_KEY"},
@@ -95,7 +110,7 @@ func TestGitHubAppConfig(t *testing.T) {
 		{"configured", merge(app, map[string]string{"KEEL_GITHUB_OWNER": "acme"}), true, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			for _, k := range []string{"KEEL_GITHUB_OWNER", "KEEL_GITHUB_WEBHOOK_SECRET", "KEEL_TEMPLATES", "KEEL_GITHUB_APP_ID", "KEEL_GITHUB_APP_INSTALLATION_ID", "KEEL_GITHUB_APP_PRIVATE_KEY"} {
+			for _, k := range []string{"KEEL_GITHUB_OWNER", "KEEL_GITHUB_WEBHOOK_SECRET", "KEEL_TEMPLATES", "KEEL_GITHUB_APP_ID", "KEEL_GITHUB_APP_INSTALLATION_ID", "KEEL_GITHUB_APP_PRIVATE_KEY", "KEEL_GITHUB_ADMIN_TOKEN", "KEEL_GITHUB_WRITE_TOKEN", "KEEL_GITHUB_TOKEN"} {
 				t.Setenv(k, c.env[k])
 			}
 			got, err := githubApp(nil)
@@ -132,7 +147,7 @@ func TestNoGitHubPersonalAccessTokenRemains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := map[string]bool{"docs/adr/0020-github-app-key-exception.md": true, "docs/runbooks/delivery.md": true}
+	allowed := map[string]bool{"docs/adr/0020-github-app-key-exception.md": true, "docs/runbooks/delivery.md": true, "cmd/keel-api/main.go": true, "cmd/keel-api/github_test.go": true}
 	scanned := 0
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -165,5 +180,21 @@ func TestNoGitHubPersonalAccessTokenRemains(t *testing.T) {
 	}
 	if scanned < 100 {
 		t.Fatalf("scanned %d files under %s; the walk missed the repository", scanned, root)
+	}
+}
+
+func TestTemplatesTokenCanWriteTheReusableWorkflow(t *testing.T) {
+	gh := ghapitest.NewServer(t, "acme", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	tokens := newGitHubTokens(gh.App(), true, false, true)
+	git := templates.GitHub{Client: ghapi.Client{BaseURL: gh.URL, HTTP: tokens.templates.Client(gh.Server.Client())}}
+	if _, err := git.PutFile(t.Context(), "acme/svc", "main", ".github/workflows/keel.yml", "ci", []byte("x")); err != nil {
+		t.Fatalf("writing .github/workflows/keel.yml: %v", err)
 	}
 }

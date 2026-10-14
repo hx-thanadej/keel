@@ -35,6 +35,7 @@ the App holds, and each caller asks for less (the per-caller table is in
 | Repository: Administration | Read and write | governance remediation, Service Templates |
 | Repository: Contents | Read and write | rightsizing, admission-policy and promotion pull requests, Service Templates, decision index, catalog sync |
 | Repository: Metadata | Read | everything (GitHub grants it to every App) |
+| Repository: Workflows | Read and write | Service Templates, only when `KEEL_REUSABLE_WORKFLOW` is set (the token asks for it only then) |
 | Repository: Pull requests | Read and write | rightsizing, admission-policy and promotion pull requests |
 | Repository: Code scanning alerts | Read | alert sync |
 | Repository: Dependabot alerts | Read | alert sync |
@@ -60,8 +61,10 @@ Set it up as an organisation owner:
 
 Keel refuses to start when `KEEL_GITHUB_OWNER`, `KEEL_GITHUB_WEBHOOK_SECRET`
 or `KEEL_TEMPLATES` is set and any of the three App settings is missing or
-malformed, and when the App is set without `KEEL_GITHUB_OWNER`. The error
-names the missing settings.
+malformed, when the App is set without `KEEL_GITHUB_OWNER`, and when one of
+the removed `KEEL_GITHUB_ADMIN_TOKEN`, `KEEL_GITHUB_WRITE_TOKEN` or
+`KEEL_GITHUB_TOKEN` is set and the App is not. The error names the missing
+settings or the removed variable.
 
 #### Rotating the GitHub App key
 
@@ -85,10 +88,12 @@ succeeds. Every GitHub integration fails until the new key is deployed.
 ### Moving from personal access tokens
 
 Keel before #231 read `KEEL_GITHUB_ADMIN_TOKEN`, `KEEL_GITHUB_WRITE_TOKEN`
-and `KEEL_GITHUB_TOKEN`. It now ignores them. In this order:
+and `KEEL_GITHUB_TOKEN`. It no longer reads them, and refuses to start when
+any is set without the App. In this order:
 
 1. Add the permissions in the table above to the existing Keel App, exactly
-   those. GitHub then asks the organisation to accept the new permissions on
+   those. If you set `KEEL_REUSABLE_WORKFLOW`, include Repository: Workflows,
+   Read and write, or template creation fails. GitHub then asks the organisation to accept the new permissions on
    the installation (**Settings > GitHub Apps > Keel > Review request**). An
    organisation owner accepts. Until then mints that ask for a new
    permission fail.

@@ -17,7 +17,8 @@ import (
 	"github.com/hx-thanadej/keel/internal/ghapi"
 )
 
-// Token is the installation token the fake mints.
+// Token prefixes every installation token the fake mints. Each mint gets its
+// own token so the fake can enforce the permissions that mint asked for.
 const Token = "ghs_ghapitest"
 
 const installation = 1
@@ -35,14 +36,15 @@ type Server struct {
 	*httptest.Server
 	Owner string
 
-	mu    sync.Mutex
-	asked []ghapi.Permissions
+	mu     sync.Mutex
+	asked  []ghapi.Permissions
+	tokens map[string]ghapi.Permissions
 }
 
 // NewServer serves the installation endpoints and passes every other
 // request to next, answering 401 to any that does not carry Token.
 func NewServer(t testing.TB, owner string, next http.Handler) *Server {
-	s := &Server{Owner: owner}
+	s := &Server{Owner: owner, tokens: map[string]ghapi.Permissions{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/app/installations/%d", installation):
@@ -57,19 +59,46 @@ func NewServer(t testing.TB, owner string, next http.Handler) *Server {
 			}
 			s.mu.Lock()
 			s.asked = append(s.asked, body.Permissions)
+			tok := fmt.Sprintf("%s_%d", Token, len(s.asked))
+			s.tokens[tok] = body.Permissions
 			s.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]string{"token": Token, "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": tok, "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
 		case strings.HasPrefix(r.URL.Path, "/app/"):
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
-		case r.Header.Get("Authorization") != "Bearer "+Token:
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
 		default:
+			perms, ok := s.permissions(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+			if !ok {
+				http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+				return
+			}
+			if needs := requiredPermission(r); needs != "" && perms[needs] != "write" && perms[needs] != "admin" {
+				http.Error(w, fmt.Sprintf(`{"message":"Resource not accessible by integration (needs %s: write)"}`, needs), http.StatusForbidden)
+				return
+			}
 			next.ServeHTTP(w, r)
 		}
 	}))
 	t.Cleanup(s.Close)
 	return s
+}
+
+func (s *Server) permissions(token string) (ghapi.Permissions, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.tokens[token]
+	return p, ok
+}
+
+// requiredPermission is the permission GitHub's "Permissions required for
+// GitHub Apps" adds to a request beyond what the endpoint's own resource
+// needs. Writing a file under .github/workflows needs Workflows: write in
+// addition to Contents.
+func requiredPermission(r *http.Request) string {
+	if r.Method != http.MethodGet && strings.Contains(r.URL.Path, "/contents/.github/workflows/") {
+		return "workflows"
+	}
+	return ""
 }
 
 // App is the installation as Keel configures it.
