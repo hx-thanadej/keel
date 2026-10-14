@@ -687,6 +687,9 @@ func githubApp(httpc *http.Client) (*ghapi.App, error) {
 	case owner == "":
 		return nil, errors.New("the GitHub App needs KEEL_GITHUB_OWNER, the account its installation must be on")
 	}
+	for _, k := range legacy {
+		slog.Warn("ignored GitHub personal access token is still set; revoke it and remove it from the environment", "variable", k, "runbook", "docs/runbooks/delivery.md#moving-from-personal-access-tokens")
+	}
 	inst, err := strconv.ParseInt(os.Getenv("KEEL_GITHUB_APP_INSTALLATION_ID"), 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("KEEL_GITHUB_APP_INSTALLATION_ID: %w", err)
