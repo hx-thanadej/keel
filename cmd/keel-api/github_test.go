@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"net/http"
 	"os"
@@ -130,6 +132,46 @@ func TestGitHubAppConfig(t *testing.T) {
 				t.Fatalf("app %+v", got)
 			}
 		})
+	}
+}
+
+func TestLeftoverGitHubTokensWarnWithoutLeakingValues(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"KEEL_GITHUB_APP_ID": "123", "KEEL_GITHUB_APP_INSTALLATION_ID": "77", "KEEL_GITHUB_OWNER": "acme",
+		"KEEL_GITHUB_APP_PRIVATE_KEY": string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
+		"KEEL_GITHUB_ADMIN_TOKEN":     "ghp_secret_admin", "KEEL_GITHUB_WRITE_TOKEN": "ghp_secret_write", "KEEL_GITHUB_TOKEN": "ghp_secret_read",
+	}
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if _, err := githubApp(nil); err != nil {
+		t.Fatal(err)
+	}
+	out := logs.String()
+	for _, name := range []string{"KEEL_GITHUB_ADMIN_TOKEN", "KEEL_GITHUB_WRITE_TOKEN", "KEEL_GITHUB_TOKEN"} {
+		var found bool
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "level=WARN") && strings.Contains(line, "variable="+name+" ") && strings.Contains(line, "docs/runbooks/delivery.md") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no warning naming %s and docs/runbooks/delivery.md in logs:\n%s", name, out)
+		}
+	}
+	for _, v := range []string{"ghp_secret_admin", "ghp_secret_write", "ghp_secret_read"} {
+		if strings.Contains(out, v) {
+			t.Errorf("logs contain the token value %s", v)
+		}
 	}
 }
 

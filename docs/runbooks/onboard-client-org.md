@@ -226,8 +226,10 @@ Keel never does these:
    Compute Optimizer's under-provisioned finding is a performance one: a
    specification that does not meet the workload's needs
    ([EC2 findings](https://docs.aws.amazon.com/compute-optimizer/latest/ug/view-ec2-recommendations.html)),
-   with no saving to list. So Keel never shows a client's under-provisioned
-   instances. Keel does not read Compute Optimizer directly; a client that
+   with no saving to list. From these two pages we infer that Cost
+   Optimization Hub does not carry under-provisioned findings. No AWS page
+   states that gap, so treat it as an inference. On that inference Keel
+   never shows a client's under-provisioned instances. Keel does not read Compute Optimizer directly; a client that
    wants under-provisioning watched reads it in the Compute Optimizer
    console. Reading it through Keel would add `compute-optimizer` read
    actions to the role and the session policy.
@@ -376,6 +378,14 @@ environment variable; client payers are data.
    fails resolves and withdraws nothing. Keel's own Cost Optimization Hub
    import (`KEEL_AWS_COH=1`) withdraws its own advice by the same rule,
    never a client payer's.
+
+   Withdrawal began with the #234 deploy. Advice AWS had already stopped
+   reporting before that deploy stays `open`, and Keel does not withdraw
+   it. Dismiss each by hand: list the Tenant's recommendations
+   (`GET /v1/tenants/{tenant}/recommendations`), pick the open
+   `native:aws_coh` ones the payer's Cost Optimization Hub no longer lists,
+   and `POST /v1/tenants/{tenant}/recommendations/{id}/dismiss` with a JSON
+   body `{"reason": "..."}`. The caller needs `recommendation.decide`.
 6. **Keel's own side.** Before trying any client role, each run checks
    Keel's own identity for that provider once: it must load (on AWS, from a
    keyless source) and STS must accept it (`GetCallerIdentity`). If either
