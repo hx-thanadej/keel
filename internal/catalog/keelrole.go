@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -12,7 +13,7 @@ import (
 
 // KeelAccount is a provider account Keel's own roles may enter: one no
 // Tenant holds as client-owned (ADR-0018). Only ReachKeelAccount builds one,
-// and Enter checks again for every assumption, so a KeelAccount kept across
+// and Enter and Check check again on every use, so a KeelAccount kept across
 // an ownership switch is refused. The zero KeelAccount is refused.
 type KeelAccount struct {
 	st                   *store.Store
@@ -23,7 +24,7 @@ type KeelAccount struct {
 // it. The error wraps ErrClientOwned when a Tenant holds it as client-owned.
 func ReachKeelAccount(ctx context.Context, st *store.Store, provider, externalID string) (KeelAccount, error) {
 	a := KeelAccount{st: st, provider: provider, externalID: externalID}
-	if err := a.Enter(ctx, func() error { return nil }); err != nil {
+	if err := a.Check(ctx); err != nil {
 		return KeelAccount{}, err
 	}
 	return a, nil
@@ -32,30 +33,56 @@ func ReachKeelAccount(ctx context.Context, st *store.Store, provider, externalID
 // ID is the account's id at its provider.
 func (a KeelAccount) ID() string { return a.externalID }
 
+// leaseFor bounds how long an ownership switch waits for one assumption.
+// It outlasts the STS client's 60-second request timeout.
+const leaseFor = 2 * time.Minute
+
 // Enter runs assume, which assumes Keel's role in the account, only while
-// no Tenant holds the account as client-owned. It holds the account's
-// ownership lock shared until assume returns, and every write that can make
-// the account client-owned takes that lock exclusively (migration 00055):
-// such a write waits for assume, and one already in flight commits before
-// the check reads. The error wraps ErrClientOwned when the account is
-// client-owned, archived or not.
-func (a KeelAccount) Enter(ctx context.Context, assume func() error) error {
-	if a.st == nil {
-		return errors.New("keel's own role: the account was not checked with ReachKeelAccount")
+// no Tenant holds the account as client-owned. It checks ownership under
+// the account's ownership lock and leases the account, holding no
+// connection while assume runs; every write that can make the account
+// client-owned takes that lock and waits out the leases (migrations 00055,
+// 00056). Such a write in flight is waited for and then seen; one that
+// starts during assume waits for it. If assume outlives the lease, it is
+// refused unless the account is still Keel's. The error wraps
+// ErrClientOwned when the account is client-owned, archived or not.
+func (a KeelAccount) Enter(ctx context.Context, assume func() error) (err error) {
+	lease, err := a.enter(ctx, leaseFor)
+	if err != nil {
+		return err
 	}
-	return pgx.BeginFunc(ctx, a.st.AppPool(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(account_lock_key($1, $2))`, a.provider, a.externalID); err != nil {
-			return fmt.Errorf("ownership lock of %s account %s: %w", a.provider, a.externalID, err)
+	defer func() {
+		var live *bool
+		if lerr := a.st.AppPool().QueryRow(context.WithoutCancel(ctx), `SELECT leave_keel_account($1)`, lease).Scan(&live); lerr != nil {
+			err = errors.Join(err, fmt.Errorf("leave %s account %s: %w", a.provider, a.externalID, lerr))
+		} else if err == nil && (live == nil || !*live) {
+			err = a.Check(ctx)
 		}
-		var ownership *string
-		if err := tx.QueryRow(ctx, `SELECT account_ownership($1, $2)`, a.provider, a.externalID).Scan(&ownership); err != nil {
-			return fmt.Errorf("ownership of %s account %s: %w", a.provider, a.externalID, err)
-		}
-		if ownership != nil && Ownership(*ownership) == OwnershipClient {
-			return fmt.Errorf("keel's own role in %s account %s: %w", a.provider, a.externalID, ErrClientOwned)
-		}
-		return assume()
-	})
+	}()
+	return assume()
+}
+
+// Check is nil while no Tenant holds the account as client-owned; an
+// ownership switch in flight is waited for and then seen. Keel's cached
+// sessions in the account are checked with it on every use. The error
+// wraps ErrClientOwned when the account is client-owned, archived or not.
+func (a KeelAccount) Check(ctx context.Context) error {
+	_, err := a.enter(ctx, 0)
+	return err
+}
+
+func (a KeelAccount) enter(ctx context.Context, lease time.Duration) (int64, error) {
+	if a.st == nil {
+		return 0, errors.New("keel's own role: the account was not checked with ReachKeelAccount")
+	}
+	var id *int64
+	if err := a.st.AppPool().QueryRow(ctx, `SELECT enter_keel_account($1, $2, $3)`, a.provider, a.externalID, lease).Scan(&id); err != nil {
+		return 0, fmt.Errorf("ownership of %s account %s: %w", a.provider, a.externalID, err)
+	}
+	if id == nil {
+		return 0, fmt.Errorf("keel's own role in %s account %s: %w", a.provider, a.externalID, ErrClientOwned)
+	}
+	return *id, nil
 }
 
 // ClientReadRole is the read-only role a client granted Keel in its payer,

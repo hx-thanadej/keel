@@ -21,8 +21,10 @@ import (
 // KeelRole is one of Keel's own roles in an account, assumed from Keel's
 // keyless base identity so Keel reaches each account with short-lived
 // credentials scoped to it (ADR-0006, ADR-0007). It is assumed only inside
-// account.Enter, which refuses a client-owned account (ADR-0018), and it
-// never sends an ExternalId: a client's role is a ClientRole.
+// account.Enter, which refuses a client-owned account (ADR-0018), and its
+// cached session is handed out only after account.Check, so no replica
+// uses it once the account is client-owned. It never sends an ExternalId:
+// a client's role is a ClientRole.
 type KeelRole struct {
 	base     common.Provider
 	account  catalog.KeelAccount
@@ -48,8 +50,12 @@ func (k *KeelRole) RoleArn() string {
 	return fmt.Sprintf("qcs::cam::uin/%s:roleName/%s", k.account.ID(), k.role)
 }
 
-// GetCredential implements common.Provider.
+// GetCredential implements common.Provider. A Tencent SDK client keeps the
+// credential it was built with, so build clients per job, not per process.
 func (k *KeelRole) GetCredential() (common.CredentialIface, error) {
+	if err := k.account.Check(context.Background()); err != nil {
+		return nil, err
+	}
 	return k.get(func() (cred common.CredentialIface, expires time.Time, err error) {
 		err = k.account.Enter(context.Background(), func() error {
 			cred, expires, err = assumeRole(k.base, k.region, k.endpoint, k.RoleArn(), nil, "")

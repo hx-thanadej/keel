@@ -16,8 +16,11 @@ import (
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
 
-// tenantScoped lists every table that must be isolated per Tenant. Adding a
-// table to the schema without adding it here fails TestEveryTableIsListed.
+// tenantScoped lists every table that must be isolated per Tenant, and
+// ownerOnly every table only the schema owner's functions touch. Adding a
+// table to the schema without adding it to one fails TestEveryTableIsListed.
+var ownerOnly = []string{"keel_role_leases"}
+
 var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps", "releases", "promotions", "exceptions", "scan_runs", "release_attestations", "release_sboms", "release_components", "vex_statements", "access_roles", "access_grants", "breakglass_identities", "breakglass_uses", "webhook_deliveries", "scorecard_snapshots", "decision_records", "tenant_reports", "maturity_assessments", "pdpa_settings", "pdpa_breaches", "client_payers"}
 
 type fixture struct {
@@ -353,6 +356,9 @@ func TestEveryTableIsListed(t *testing.T) {
 	for _, table := range tenantScoped {
 		listed[table] = true
 	}
+	for _, table := range ownerOnly {
+		listed[table] = true
+	}
 	for rows.Next() {
 		var name string
 		var rls, force bool
@@ -368,6 +374,11 @@ func TestEveryTableIsListed(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+	for _, table := range ownerOnly {
+		if _, err := s.AppPool().Exec(context.Background(), fmt.Sprintf("SELECT FROM %s", pgx.Identifier{table}.Sanitize())); err == nil {
+			t.Errorf("app role reads owner-only %s", table)
+		}
 	}
 }
 
