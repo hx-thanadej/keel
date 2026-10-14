@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +15,7 @@ import (
 	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/ghalerts"
 	"github.com/hx-thanadej/keel/internal/ghapi"
+	"github.com/hx-thanadej/keel/internal/ghapi/ghapitest"
 	"github.com/hx-thanadej/keel/internal/scans"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
@@ -23,7 +23,7 @@ import (
 // gitHub serves acme/crm-api's code scanning alerts.
 type gitHub struct {
 	t        *testing.T
-	srv      *httptest.Server
+	srv      *ghapitest.Server
 	alerts   []map[string]any // most recently updated first, as GitHub sorts them
 	requests []string
 	// capClosed makes the dismissed and fixed lists end in a next link on
@@ -33,7 +33,7 @@ type gitHub struct {
 
 func newGitHub(t *testing.T) *gitHub {
 	g := &gitHub{t: t}
-	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.srv = ghapitest.NewServer(t, "acme", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/acme/crm-api/code-scanning/alerts" {
 			t.Errorf("unexpected request %s", r.URL)
 			w.WriteHeader(http.StatusNotFound)
@@ -59,12 +59,12 @@ func newGitHub(t *testing.T) *gitHub {
 		}
 		_ = json.NewEncoder(w).Encode(page)
 	}))
-	t.Cleanup(g.srv.Close)
 	return g
 }
 
 func (g *gitHub) source() ghalerts.GitHub {
-	return ghalerts.GitHub{Client: ghapi.Client{BaseURL: g.srv.URL}}
+	return ghalerts.GitHub{Client: ghapi.Client{BaseURL: g.srv.URL,
+		HTTP: g.srv.Client(ghapi.Permissions{"security_events": "read", "vulnerability_alerts": "read", "secret_scanning_alerts": "read"})}}
 }
 
 // alert opens CodeQL alert number on rule at path:line, or updates it.

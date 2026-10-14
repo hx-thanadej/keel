@@ -5,13 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/catalogsync"
+	"github.com/hx-thanadej/keel/internal/ghapi"
+	"github.com/hx-thanadej/keel/internal/ghapi/ghapitest"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
@@ -62,15 +63,12 @@ func TestParse(t *testing.T) {
 	}
 }
 
-// fakeGitHub serves the two REST endpoints the sync uses.
-func fakeGitHub(t *testing.T, files map[string]string, token string) *httptest.Server {
+// fakeGitHub serves the two REST endpoints the sync uses, behind a GitHub
+// App installation on hx.
+func fakeGitHub(t *testing.T, files map[string]string) *ghapitest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/{owner}/repos", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+token {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
 		if r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1" {
 			_, _ = w.Write([]byte("[]"))
 			return
@@ -90,9 +88,7 @@ func fakeGitHub(t *testing.T, files map[string]string, token string) *httptest.S
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(body))})
 	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
+	return ghapitest.NewServer(t, "hx", mux)
 }
 
 func seed(t *testing.T, s *store.Store) (home, tat string) {
@@ -122,8 +118,8 @@ func TestSyncCreatesServicesAndReportsProblems(t *testing.T) {
 		"crm":      crmDescriptor,
 		"orphan":   "apiVersion: backstage.io/v1alpha1\nkind: Component\nmetadata:\n  name: orphan\n  annotations:\n    keel.dev/tenant: tat\nspec:\n  system: tat-crm\n",
 		"bad-yaml": "kind: [",
-	}, "tok")
-	syncer := &catalogsync.Syncer{Store: s, Source: &catalogsync.GitHub{BaseURL: gh.URL, Owner: "hx", Token: "tok", Client: gh.Client()}}
+	})
+	syncer := &catalogsync.Syncer{Store: s, Source: &catalogsync.GitHub{BaseURL: gh.URL, Owner: "hx", Client: gh.Client(ghapi.Permissions{"contents": "read", "metadata": "read"})}}
 
 	rep, err := syncer.Run(context.Background())
 	if err != nil {
@@ -193,8 +189,8 @@ func TestUnknownTenantOrProjectReported(t *testing.T) {
 	gh := fakeGitHub(t, map[string]string{
 		"crm":    strings.ReplaceAll(crmDescriptor, "system: tat-crm", "system: nope"),
 		"orphan": strings.ReplaceAll(crmDescriptor, "keel.dev/tenant: tat", "keel.dev/tenant: ghost"),
-	}, "tok")
-	syncer := &catalogsync.Syncer{Store: s, Source: &catalogsync.GitHub{BaseURL: gh.URL, Owner: "hx", Token: "tok", Client: gh.Client()}}
+	})
+	syncer := &catalogsync.Syncer{Store: s, Source: &catalogsync.GitHub{BaseURL: gh.URL, Owner: "hx", Client: gh.Client(ghapi.Permissions{"contents": "read", "metadata": "read"})}}
 	rep, err := syncer.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)

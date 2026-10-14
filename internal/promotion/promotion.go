@@ -427,7 +427,7 @@ var unsafeRef = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 func (s *Service) pullRequest(ctx context.Context, p Promotion, f facts) (string, error) {
 	if s.Git == nil {
-		return "", errors.New("promotion pull requests are not configured (KEEL_GITHUB_WRITE_TOKEN)")
+		return "", errors.New("promotion pull requests are not configured (the GitHub App, KEEL_GITHUB_APP_ID)")
 	}
 	repo, path := f.configRepo, render(s.PathTemplate, f.projectSlug, f.envName, f.serviceSlug)
 	base, err := s.Git.DefaultBranch(ctx, repo)

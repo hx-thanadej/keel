@@ -8,7 +8,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +17,8 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/apply"
+	"github.com/hx-thanadej/keel/internal/ghapi"
+	"github.com/hx-thanadej/keel/internal/ghapi/ghapitest"
 	"github.com/hx-thanadej/keel/internal/rightsize"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
@@ -136,8 +137,7 @@ func setup(t *testing.T, files map[string]string, repo string) (apply.Applier, *
 		t.Fatal(err)
 	}
 	gh := &fakeGitHub{files: files, branches: map[string]map[string]string{}}
-	srv := httptest.NewServer(gh.handler(t))
-	t.Cleanup(srv.Close)
+	srv := ghapitest.NewServer(t, "acme", gh.handler(t))
 	recs := rightsize.Service{Store: s}
 	r, _, err := recs.Upsert(ctx, tat, rightsize.Recommendation{Source: "engine:k8s", Provider: "k8s", ResourceID: "tke/tat-crm-prod/api/app", ResourceType: "k8s_workload",
 		ProjectID: &project, Action: "resize_requests", Current: map[string]any{"cpu": "2000m", "memory": "4096Mi"}, Recommended: map[string]any{"cpu": "410m", "memory": "1531Mi"},
@@ -145,7 +145,7 @@ func setup(t *testing.T, files map[string]string, repo string) (apply.Applier, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	return apply.Applier{Recs: recs, Git: apply.GitHub{BaseURL: srv.URL, Token: "t", Client: srv.Client()}}, gh, tat, r.ID
+	return apply.Applier{Recs: recs, Git: apply.GitHub{BaseURL: srv.URL, Client: srv.Client(ghapi.Permissions{"contents": "write", "pull_requests": "write", "metadata": "read"})}}, gh, tat, r.ID
 }
 
 var by = activity.Actor{Type: activity.ActorHuman, UID: "user:lead@harmonyx.co"}

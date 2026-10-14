@@ -45,11 +45,12 @@ matches against deployed software start the EU CRA reporting clock
 
 ## GitHub alerts
 
-With `KEEL_GITHUB_ADMIN_TOKEN` set, Keel syncs GitHub Dependabot and secret
-scanning alerts for every Service with a GitHub `repository` every 6 hours
-(#121). It also syncs code scanning alerts for the Services that choose
-GitHub as their code scanning source. The token needs read access to code
-scanning, Dependabot and secret scanning alerts.
+With the Keel GitHub App configured
+([delivery.md](delivery.md#the-keel-github-app)), Keel syncs GitHub Dependabot
+and secret scanning alerts for every Service with a GitHub `repository` every
+6 hours (#121). It also syncs code scanning alerts for the Services that
+choose GitHub as their code scanning source. Its token asks only for read
+access to code scanning, Dependabot and secret scanning alerts.
 
 - Each Service has one code scanning source, `code_scanning_source`. It is
   `keel` by default, which means CI's SARIF uploads. The other value is

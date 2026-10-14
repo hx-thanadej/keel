@@ -33,8 +33,9 @@ Set a Tenant's time zone: `PATCH /v1/tenants/{tenant}` with
 
 ## 3. Pull requests
 
-`KEEL_GITHUB_WRITE_TOKEN` (fine-grained: contents + pull requests write on the
-repositories that hold manifests). "Open pull request" on a Finding patches
+Keel opens them as the Keel GitHub App
+([delivery.md](delivery.md#the-keel-github-app)), with a token limited to
+contents and pull requests write. "Open pull request" on a Finding patches
 the workload's requests; merged PRs mark the recommendation applied, closed
 ones reopen it.
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
@@ -12,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/hx-thanadej/keel/internal/ghapi"
+	"github.com/hx-thanadej/keel/internal/ghapi/ghapitest"
 	"github.com/hx-thanadej/keel/internal/githubgov"
 	"github.com/hx-thanadej/keel/internal/store"
 	"github.com/hx-thanadej/keel/internal/store/storetest"
@@ -47,7 +47,7 @@ func (f *fakeGitHub) repo(name string) *fakeRepo {
 
 func write(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(v) }
 
-func (f *fakeGitHub) server(t *testing.T) *httptest.Server {
+func (f *fakeGitHub) server(t *testing.T) *ghapitest.Server {
 	mux := http.NewServeMux()
 	lock := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -164,9 +164,7 @@ func (f *fakeGitHub) server(t *testing.T) *httptest.Server {
 		rp.SS, rp.PP = true, true
 		write(w, map[string]any{})
 	}))
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
+	return ghapitest.NewServer(t, "acme", mux)
 }
 
 type world struct {
@@ -206,6 +204,11 @@ func findings(t *testing.T, w world, tenant string) map[string]string {
 
 var policy = githubgov.Default([]string{"ci / test"})
 
+// governance is the installation permission set Keel asks for when it
+// remediates an organisation (#231).
+var governance = ghapi.Permissions{"organization_administration": "write", "organization_custom_properties": "admin",
+	"organization_plan": "read", "administration": "write", "metadata": "read"}
+
 func TestTeamPlanOrgIsReconciled(t *testing.T) {
 	w := setup(t)
 	f := &fakeGitHub{plan: "team", rulesets: map[int64]githubgov.Ruleset{}, subKeys: []string{"repo", "context"},
@@ -214,7 +217,7 @@ func TestTeamPlanOrgIsReconciled(t *testing.T) {
 			{Name: "scratch", Private: true, Props: map[string]string{}, SS: true, PP: true, Rulesets: map[int64]githubgov.Ruleset{}},
 		}}
 	srv := f.server(t)
-	api := githubgov.GitHub{Client: ghapi.Client{BaseURL: srv.URL}, Login: "acme", Org: true}
+	api := githubgov.GitHub{Client: ghapi.Client{BaseURL: srv.URL, HTTP: srv.Client(governance)}, Login: "acme", Org: true}
 	ctx := context.Background()
 	clock := storetest.Clock()
 
@@ -283,7 +286,7 @@ func TestFreePlanFallsBackAndReportsWhatItCannotEnforce(t *testing.T) {
 			{Name: "secret", Private: true, Props: map[string]string{"keel-tenant": "tat", "keel-project": "web", "keel-tier": "prod"}, Rulesets: map[int64]githubgov.Ruleset{}},
 		}}
 	srv := f.server(t)
-	api := githubgov.GitHub{Client: ghapi.Client{BaseURL: srv.URL}, Login: "acme", Org: true}
+	api := githubgov.GitHub{Client: ghapi.Client{BaseURL: srv.URL, HTTP: srv.Client(governance)}, Login: "acme", Org: true}
 	rep, err := githubgov.Reconciler{Store: w.s, API: api, Policy: policy, Remediate: true}.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)

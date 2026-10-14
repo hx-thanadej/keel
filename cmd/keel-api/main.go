@@ -41,19 +41,18 @@
 //	KEEL_AWS_COH=1      import AWS Cost Optimization Hub recommendations (management account, web identity)
 //	KEEL_WASTE_CLEANUP=1      allow deleting waste in opted-in non-prod Environments after the grace period
 //	KEEL_WASTE_GRACE_DAYS     days a waste recommendation must stay open first (default 7)
-//	KEEL_GITHUB_WRITE_TOKEN   lets Keel open rightsizing pull requests (contents:write, pull_requests:write)
 //	KEEL_OPENCOST       cluster=url[,cluster=url]: per-namespace daily cost for k8s allocation rules
-//	KEEL_GITHUB_ADMIN_TOKEN  also syncs GitHub Dependabot and secret scanning alerts into Findings every 6h, and
-//	                    code scanning alerts for Services whose code_scanning_source is github (alerts: read for each)
-//	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min
+//	KEEL_GITHUB_OWNER   user/org whose repos' catalog-info.yaml are synced every 10 min; enables Keel's GitHub
+//	                    integrations: catalog sync, decision index, governance, alert sync (Dependabot, secret and
+//	                    code scanning, every 6h), Service Templates, and rightsizing, admission-policy and promotion PRs
 //	KEEL_GITHUB_ORG=1   KEEL_GITHUB_OWNER is an organisation
-//	KEEL_GITHUB_TOKEN   read-only token (contents + metadata)
 //	KEEL_GITHUB_WEBHOOK_SECRET  signs the organisation webhook at POST /v1/webhooks/github: secret-scanning
 //	                    alerts, and governance events when KEEL_GITHUB_OWNER is an organisation
 //	KEEL_GITHUB_WEBHOOK_HOOK_ID  id of that webhook; every 15 min Keel asks GitHub to redeliver the failed deliveries
-//	                    of the last 24h, as the GitHub App below (organisation Webhooks: read & write)
-//	KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID, KEEL_GITHUB_APP_PRIVATE_KEY (PEM)  the App and its
-//	                    installation on KEEL_GITHUB_OWNER; Keel mints a one-hour installation token per run
+//	                    of the last 24h
+//	KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID, KEEL_GITHUB_APP_PRIVATE_KEY (PEM)  the GitHub App and its
+//	                    installation on KEEL_GITHUB_OWNER, required by every GitHub integration (ADR-0020). Each
+//	                    caller mints its own one-hour installation token with only its permissions (#231)
 //	KEEL_PDPA_REGIONS   default data region set for Tenants with no PDPA settings (default ap-bangkok,ap-southeast-7)
 //	KEEL_DB_REGION      region of Keel's Postgres; unset, each PDPA residency run reports the database as not checked; see docs/runbooks/deploy-regions.md
 //	KEEL_GCP_BILL_BUCKET_REGION    region of KEEL_GCP_BILL_BUCKET; required with it (PDPA residency)
@@ -227,14 +226,24 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	st := store.New(pool)
+	githubHTTP := &http.Client{Timeout: 30 * time.Second}
+	app, err := githubApp(githubHTTP)
+	if err != nil {
+		pool.Close()
+		return api.Deps{}, noop, err
+	}
+	var gh *githubTokens
+	if app != nil {
+		gh = newGitHubTokens(*app, os.Getenv("KEEL_GITHUB_ORG") == "1", os.Getenv("KEEL_GITHUB_REMEDIATE") == "1", os.Getenv("KEEL_REUSABLE_WORKFLOW") != "")
+	}
 	deps := api.Deps{Catalog: catalog.New(st, az), Discovery: map[string]discovery.Source{},
 		Cost:    &api.CostDeps{Authz: az, Queries: cost.Queries{Store: st}, Ingester: &cost.Ingester{Store: st}, Rules: cost.Rules{Store: st}},
 		Budgets: &api.BudgetDeps{Authz: az, Budgets: budget.Service{Store: st}}}
 	deps.Budgets.Catalog = deps.Catalog
 	deps.Authz = az
 	deps.Rightsize = &api.RightsizeDeps{Authz: az, Service: rightsize.Service{Store: st}}
-	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
-		deps.Rightsize.Applier = &apply.Applier{Recs: rightsize.Service{Store: st}, Git: apply.GitHub{Token: tok}}
+	if gh != nil {
+		deps.Rightsize.Applier = &apply.Applier{Recs: rightsize.Service{Store: st}, Git: apply.GitHub{Client: gh.rightsizing.Client(githubHTTP)}}
 	}
 	promoSvc := promotion.Service{Store: st, PathTemplate: os.Getenv("KEEL_PROMOTION_PATH"), AppTemplate: os.Getenv("KEEL_ARGOCD_APP"),
 		RequireVSA: os.Getenv("KEEL_REQUIRE_VSA") != "0"}
@@ -307,8 +316,8 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		})
 	}
 	adm := admission.Service{Store: st, Registry: os.Getenv("KEEL_TCR_DOMAIN"), BuilderSubject: os.Getenv("KEEL_TRUSTED_BUILDER") + "*", RekorURL: os.Getenv("KEEL_REKOR_URL")}
-	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
-		adm.Git = apply.GitHub{Token: tok}
+	if gh != nil {
+		adm.Git = apply.GitHub{Client: gh.admission.Client(githubHTTP)}
 	}
 	deps.Admission = &api.AdmissionDeps{Authz: az, Service: adm}
 	if adm.Git != nil && adm.Registry != "" && os.Getenv("KEEL_TRUSTED_BUILDER") != "" {
@@ -320,8 +329,8 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return err
 		})
 	}
-	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
-		promoSvc.Git = apply.GitHub{Token: tok}
+	if gh != nil {
+		promoSvc.Git = apply.GitHub{Client: gh.promotion.Client(githubHTTP)}
 	}
 	if u := os.Getenv("KEEL_ARGOCD_URL"); u != "" {
 		promoSvc.Argo = promotion.ArgoCD{BaseURL: u, Token: os.Getenv("KEEL_ARGOCD_TOKEN")}
@@ -371,7 +380,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	})
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
-	if err := startUtilisation(ctx, st); err != nil {
+	if err := startUtilisation(ctx, st, deps.Rightsize.Applier); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
@@ -387,9 +396,9 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		deps.Discovery["tencent"] = tencent.OrgSource{Region: region, Creds: tencent.Credentials()}
 	}
-	if tok := os.Getenv("KEEL_GITHUB_ADMIN_TOKEN"); tok != "" && os.Getenv("KEEL_GITHUB_OWNER") != "" {
+	if gh != nil {
 		gov := githubgov.Reconciler{Store: st, Policy: githubPolicy(), Remediate: os.Getenv("KEEL_GITHUB_REMEDIATE") == "1",
-			API: githubgov.GitHub{Client: ghapi.Client{Token: tok}, Login: os.Getenv("KEEL_GITHUB_OWNER"), Org: os.Getenv("KEEL_GITHUB_ORG") == "1"}}
+			API: githubgov.GitHub{Client: ghapi.Client{HTTP: gh.governance.Client(githubHTTP)}, Login: app.Owner, Org: os.Getenv("KEEL_GITHUB_ORG") == "1"}}
 		go every(ctx, time.Hour, "github governance", func(ctx context.Context) error {
 			rep, err := gov.Run(ctx)
 			if err == nil {
@@ -398,10 +407,8 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return err
 		})
 	}
-	if tok := os.Getenv("KEEL_GITHUB_ADMIN_TOKEN"); tok != "" {
-		// Needs read access to code scanning, Dependabot and secret
-		// scanning alerts (#121).
-		alerts := ghalerts.Syncer{Store: st, Source: ghalerts.GitHub{Client: ghapi.Client{Token: tok}}}
+	if gh != nil {
+		alerts := ghalerts.Syncer{Store: st, Source: ghalerts.GitHub{Client: ghapi.Client{HTTP: gh.alerts.Client(githubHTTP)}}}
 		go every(ctx, 6*time.Hour, "github alert sync", func(ctx context.Context) error {
 			res, err := alerts.Run(ctx)
 			if err != nil {
@@ -419,8 +426,8 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return nil
 		})
 	}
-	if tok := os.Getenv("KEEL_GITHUB_TOKEN"); tok != "" {
-		ix := decisions.Indexer{Store: st, Source: decisions.GitHub{Client: ghapi.Client{Token: tok}}}
+	if gh != nil {
+		ix := decisions.Indexer{Store: st, Source: decisions.GitHub{Client: ghapi.Client{HTTP: gh.decisions.Client(githubHTTP)}}}
 		go every(ctx, 6*time.Hour, "decision index", func(ctx context.Context) error {
 			res, err := ix.Run(ctx)
 			if err == nil && res.Changed > 0 {
@@ -429,8 +436,8 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return err
 		})
 	}
-	if owner := os.Getenv("KEEL_GITHUB_OWNER"); owner != "" {
-		syncer := &catalogsync.Syncer{Store: st, Source: &catalogsync.GitHub{Owner: owner, Org: os.Getenv("KEEL_GITHUB_ORG") == "1", Token: os.Getenv("KEEL_GITHUB_TOKEN")}}
+	if gh != nil {
+		syncer := &catalogsync.Syncer{Store: st, Source: &catalogsync.GitHub{Owner: app.Owner, Org: os.Getenv("KEEL_GITHUB_ORG") == "1", Client: gh.catalog.Client(githubHTTP)}}
 		go syncer.Every(ctx, 10*time.Minute)
 	}
 	if err := startBillSync(ctx, st, evaluator); err != nil {
@@ -451,7 +458,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	vendors := vendors(ctx, st)
-	creator, err := templateCreator(st)
+	creator, err := templateCreator(st, gh, githubHTTP)
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
@@ -507,8 +514,10 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 			return err
 		})
 	}
-	lk := &leaks.Service{Store: st, WebhookSecret: []byte(os.Getenv("KEEL_GITHUB_WEBHOOK_SECRET")), Keys: map[string]leaks.Keys{},
-		Alerts: leaks.GitHubAlerts{Client: ghapi.Client{Token: os.Getenv("KEEL_GITHUB_ADMIN_TOKEN")}}}
+	lk := &leaks.Service{Store: st, WebhookSecret: []byte(os.Getenv("KEEL_GITHUB_WEBHOOK_SECRET")), Keys: map[string]leaks.Keys{}}
+	if gh != nil {
+		lk.Alerts = leaks.GitHubAlerts{Client: ghapi.Client{HTTP: gh.leaks.Client(githubHTTP)}}
+	}
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		lk.Keys["tencent"] = tencent.AccessKeys{API: func(account string) (tencent.KeyAPI, error) {
@@ -519,7 +528,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		deps.Webhooks = &api.WebhookDeps{Leaks: lk}
 		if owner := os.Getenv("KEEL_GITHUB_OWNER"); owner != "" && os.Getenv("KEEL_GITHUB_ORG") == "1" {
 			deps.Webhooks.Governance = &githubgov.Receiver{Store: st, Owner: owner, Policy: githubPolicy()}
-			if err := startWebhookCatchup(ctx, st, owner); err != nil {
+			if err := startWebhookCatchup(ctx, st, owner, gh.catchup, githubHTTP); err != nil {
 				pool.Close()
 				return api.Deps{}, noop, err
 			}
@@ -621,10 +630,9 @@ func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
 }
 
 // startWebhookCatchup redelivers failed organisation webhook deliveries
-// every 15 minutes, looking back 24 hours (#226). It authenticates as the
-// GitHub App installation with only organisation webhooks write, and only
-// when that installation is on org (ADR-0020).
-func startWebhookCatchup(ctx context.Context, st *store.Store, org string) error {
+// every 15 minutes, looking back 24 hours (#226), with an installation
+// token carrying only organisation webhooks write (ADR-0020).
+func startWebhookCatchup(ctx context.Context, st *store.Store, org string, tokens *ghapi.TokenSource, httpc *http.Client) error {
 	hookID := os.Getenv("KEEL_GITHUB_WEBHOOK_HOOK_ID")
 	if hookID == "" {
 		slog.Warn("github webhook catch-up disabled: KEEL_GITHUB_WEBHOOK_HOOK_ID is unset, so failed deliveries are not redelivered")
@@ -634,30 +642,106 @@ func startWebhookCatchup(ctx context.Context, st *store.Store, org string) error
 	if err != nil {
 		return fmt.Errorf("KEEL_GITHUB_WEBHOOK_HOOK_ID: %w", err)
 	}
-	appID, installation, pemKey := os.Getenv("KEEL_GITHUB_APP_ID"), os.Getenv("KEEL_GITHUB_APP_INSTALLATION_ID"), os.Getenv("KEEL_GITHUB_APP_PRIVATE_KEY")
-	if appID == "" || installation == "" || pemKey == "" {
-		return errors.New("KEEL_GITHUB_WEBHOOK_HOOK_ID needs KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID and KEEL_GITHUB_APP_PRIVATE_KEY")
-	}
-	inst, err := strconv.ParseInt(installation, 10, 64)
-	if err != nil {
-		return fmt.Errorf("KEEL_GITHUB_APP_INSTALLATION_ID: %w", err)
-	}
-	key, err := ghapi.ParseAppKey([]byte(pemKey))
-	if err != nil {
-		return fmt.Errorf("KEEL_GITHUB_APP_PRIVATE_KEY: %w", err)
-	}
-	httpc := &http.Client{Timeout: 30 * time.Second}
-	app := ghapi.App{ID: appID, Installation: inst, Owner: org, Key: key, HTTP: httpc}
-	job := githubgov.Catchup{Store: st, Org: org, HookID: hook, Window: 24 * time.Hour, Pause: time.Second, HTTP: httpc,
-		Token: func(ctx context.Context) (string, error) {
-			return app.Token(ctx, map[string]string{"organization_hooks": "write"})
-		}}
+	job := githubgov.Catchup{Store: st, Org: org, HookID: hook, Window: 24 * time.Hour, Pause: time.Second, HTTP: httpc, Token: tokens.Token}
 	go every(ctx, 15*time.Minute, "github webhook catch-up", func(ctx context.Context) error {
 		res, err := job.Run(ctx)
 		slog.Info("github webhook catch-up", "attempts", res.Attempts, "missed", res.Missed, "redelivered", res.Redelivered)
 		return err
 	})
 	return nil
+}
+
+// githubApp reads the Keel GitHub App, through which every GitHub
+// integration authenticates (ADR-0020). It returns nil when no integration
+// is configured, and an error naming what is missing when one is but the
+// App is not, so Keel never starts with a GitHub integration silently off.
+func githubApp(httpc *http.Client) (*ghapi.App, error) {
+	var set, missing []string
+	for _, k := range []string{"KEEL_GITHUB_APP_ID", "KEEL_GITHUB_APP_INSTALLATION_ID", "KEEL_GITHUB_APP_PRIVATE_KEY"} {
+		if os.Getenv(k) == "" {
+			missing = append(missing, k)
+		} else {
+			set = append(set, k)
+		}
+	}
+	var enabledBy []string
+	for _, k := range []string{"KEEL_GITHUB_OWNER", "KEEL_GITHUB_WEBHOOK_SECRET", "KEEL_TEMPLATES"} {
+		if os.Getenv(k) != "" {
+			enabledBy = append(enabledBy, k)
+		}
+	}
+	var legacy []string
+	for _, k := range []string{"KEEL_GITHUB_ADMIN_TOKEN", "KEEL_GITHUB_WRITE_TOKEN", "KEEL_GITHUB_TOKEN"} {
+		if os.Getenv(k) != "" {
+			legacy = append(legacy, k)
+		}
+	}
+	owner := os.Getenv("KEEL_GITHUB_OWNER")
+	switch {
+	case len(set) == 0 && len(legacy) > 0:
+		return nil, fmt.Errorf("%s no longer enable GitHub integrations (#231): configure the GitHub App (KEEL_GITHUB_APP_ID, KEEL_GITHUB_APP_INSTALLATION_ID, KEEL_GITHUB_APP_PRIVATE_KEY, KEEL_GITHUB_OWNER) and remove the token", strings.Join(legacy, ", "))
+	case len(set) == 0 && len(enabledBy) == 0:
+		return nil, nil
+	case len(missing) > 0:
+		return nil, fmt.Errorf("github integration (%s) needs the GitHub App: set %s", strings.Join(append(enabledBy, set...), ", "), strings.Join(missing, ", "))
+	case owner == "":
+		return nil, errors.New("the GitHub App needs KEEL_GITHUB_OWNER, the account its installation must be on")
+	}
+	inst, err := strconv.ParseInt(os.Getenv("KEEL_GITHUB_APP_INSTALLATION_ID"), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("KEEL_GITHUB_APP_INSTALLATION_ID: %w", err)
+	}
+	key, err := ghapi.ParseAppKey([]byte(os.Getenv("KEEL_GITHUB_APP_PRIVATE_KEY")))
+	if err != nil {
+		return nil, fmt.Errorf("KEEL_GITHUB_APP_PRIVATE_KEY: %w", err)
+	}
+	return &ghapi.App{ID: os.Getenv("KEEL_GITHUB_APP_ID"), Installation: inst, Owner: owner, Key: key, HTTP: httpc}, nil
+}
+
+// githubTokens is one installation token source per GitHub caller (#231).
+// Each asks only for the permissions its endpoints need, per GitHub's
+// "Permissions required for GitHub Apps"; ADR-0020 maps them to endpoints.
+type githubTokens struct {
+	rightsizing, admission, promotion *ghapi.TokenSource
+	governance, alerts, leaks         *ghapi.TokenSource
+	templates, decisions, catalog     *ghapi.TokenSource
+	catchup                           *ghapi.TokenSource
+}
+
+// workflows is true when Service Templates write .github/workflows/*
+// (KEEL_REUSABLE_WORKFLOW set), which GitHub gates behind Workflows: write.
+func newGitHubTokens(app ghapi.App, org, remediate, workflows bool) *githubTokens {
+	pullRequests := ghapi.Permissions{"contents": "write", "pull_requests": "write", "metadata": "read"}
+	governance := ghapi.Permissions{"metadata": "read"}
+	if org {
+		// GitHub lists organisation rulesets only to administration write.
+		governance["organization_administration"] = "write"
+		governance["organization_custom_properties"] = "read"
+		governance["organization_plan"] = "read"
+	}
+	if remediate {
+		governance["administration"] = "write"
+		if org {
+			governance["organization_custom_properties"] = "admin"
+		}
+	}
+	templates := ghapi.Permissions{"administration": "write", "contents": "write", "metadata": "read",
+		"organization_custom_properties": "write", "members": "read"}
+	if workflows {
+		templates["workflows"] = "write"
+	}
+	return &githubTokens{
+		rightsizing: app.Source(pullRequests),
+		admission:   app.Source(pullRequests),
+		promotion:   app.Source(pullRequests),
+		governance:  app.Source(governance),
+		alerts:      app.Source(ghapi.Permissions{"security_events": "read", "vulnerability_alerts": "read", "secret_scanning_alerts": "read"}),
+		leaks:       app.Source(ghapi.Permissions{"secret_scanning_alerts": "read"}),
+		templates:   app.Source(templates),
+		decisions:   app.Source(ghapi.Permissions{"contents": "read"}),
+		catalog:     app.Source(ghapi.Permissions{"contents": "read", "metadata": "read"}),
+		catchup:     app.Source(ghapi.Permissions{"organization_hooks": "write"}),
+	}
 }
 
 // daily runs fn now and then every 24h until ctx ends.
@@ -701,12 +785,12 @@ func githubPolicy() githubgov.Policy {
 
 // templateCreator configures Service Templates (#92) from
 // KEEL_TEMPLATES="name=owner/repo@sha,..." in the KEEL_GITHUB_OWNER org.
-func templateCreator(st *store.Store) (*templates.Creator, error) {
-	raw, tok := os.Getenv("KEEL_TEMPLATES"), os.Getenv("KEEL_GITHUB_ADMIN_TOKEN")
-	if raw == "" || tok == "" {
+func templateCreator(st *store.Store, gh *githubTokens, httpc *http.Client) (*templates.Creator, error) {
+	raw := os.Getenv("KEEL_TEMPLATES")
+	if raw == "" || gh == nil {
 		return nil, nil
 	}
-	c := &templates.Creator{Store: st, Git: templates.GitHub{Client: ghapi.Client{Token: tok}}, Org: os.Getenv("KEEL_GITHUB_OWNER"),
+	c := &templates.Creator{Store: st, Git: templates.GitHub{Client: ghapi.Client{HTTP: gh.templates.Client(httpc)}}, Org: os.Getenv("KEEL_GITHUB_OWNER"),
 		ReusableWorkflow: os.Getenv("KEEL_REUSABLE_WORKFLOW"), KeelURL: os.Getenv("KEEL_BASE_URL"), Templates: map[string]templates.Template{},
 		AgeProd: os.Getenv("KEEL_SOPS_AGE_PROD"), AgeNonProd: os.Getenv("KEEL_SOPS_AGE_NONPROD")}
 	for _, kv := range strings.Split(raw, ",") {
@@ -1604,7 +1688,7 @@ func startMirrors(ctx context.Context, st *store.Store) error {
 
 // startUtilisation collects rightsizing evidence (#68): a 14-day backfill at
 // start, then every 6h the last two days (late samples settle).
-func startUtilisation(ctx context.Context, st *store.Store) error {
+func startUtilisation(ctx context.Context, st *store.Store, prs *apply.Applier) error {
 	job := utilisation.Job{Store: utilisation.Store{Store: st}}
 	if raw := os.Getenv("KEEL_PROMETHEUS"); raw != "" {
 		for _, kv := range strings.Split(raw, ",") {
@@ -1629,7 +1713,7 @@ func startUtilisation(ctx context.Context, st *store.Store) error {
 				slog.Error("utilisation backfill", "day", today.AddDate(0, 0, -d).Format("2006-01-02"), "err", err)
 			}
 		}
-		rightsizeAll(ctx, st)
+		rightsizeAll(ctx, st, prs)
 		t := time.NewTicker(6 * time.Hour)
 		defer t.Stop()
 		for {
@@ -1644,17 +1728,17 @@ func startUtilisation(ctx context.Context, st *store.Store) error {
 					slog.Error("utilisation collection", "err", err)
 				}
 			}
-			rightsizeAll(ctx, st)
+			rightsizeAll(ctx, st, prs)
 		}
 	}()
 	return nil
 }
 
-// rightsizeAll runs Keel's rightsizing engines over fresh utilisation.
-func rightsizeAll(ctx context.Context, st *store.Store) {
-	if tok := os.Getenv("KEEL_GITHUB_WRITE_TOKEN"); tok != "" {
-		a := apply.Applier{Recs: rightsize.Service{Store: st}, Git: apply.GitHub{Token: tok}}
-		if res, err := a.Sync(ctx); err != nil {
+// rightsizeAll runs Keel's rightsizing engines over fresh utilisation, and
+// syncs rightsizing pull requests when prs is set.
+func rightsizeAll(ctx context.Context, st *store.Store, prs *apply.Applier) {
+	if prs != nil {
+		if res, err := prs.Sync(ctx); err != nil {
 			slog.Error("rightsizing PR sync", "err", err)
 		} else if res.Applied+res.Reopened > 0 {
 			slog.Info("rightsizing PRs", "applied", res.Applied, "reopened", res.Reopened)
