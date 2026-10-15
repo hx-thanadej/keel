@@ -129,7 +129,7 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
               />
             )}
             {active === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
-            {active === 'connections' && <ConnectionsView />}
+            {active === 'connections' && <ConnectionsView tenantId={current.id} />}
           </>
         )}
       </main>

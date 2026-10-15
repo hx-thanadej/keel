@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { NoCostData } from './BillSyncStatus'
 import { api, finops, fmtMoney, windowFor, ApiError, type Budget, type BudgetStatus, type Environment, type Period, type Project } from './api'
 import { BudgetChart } from './BudgetChart'
 import { Breakdown } from './Breakdown'
@@ -58,7 +59,12 @@ export function BudgetsView({ tenantId }: { tenantId: string }) {
           </select>
         </div>
       )}
-      {budgets.length === 0 && <p className="muted">No budgets yet.</p>}
+      {budgets.length === 0 && (
+        <>
+          <p className="muted">No budgets yet.</p>
+          <NoCostData tenantId={tenantId} />
+        </>
+      )}
       {current && <BudgetDetail key={current.id} tenantId={tenantId} budget={current} scope={scope(current)} />}
       <NewBudget tenantId={tenantId} projects={projects} envs={envs} onCreated={() => setReload((n) => n + 1)} />
     </section>

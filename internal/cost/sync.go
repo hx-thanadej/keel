@@ -91,22 +91,35 @@ type SyncReport struct {
 var billExt = []string{".csv", ".csv.gz", ".gz", ".zip", ".parquet"}
 
 // Run loads every period with new files, and finalises periods whose
-// provider finality time has passed.
+// provider finality time has passed. Each run's outcome is saved as the
+// payer's bill sync status, in the Tenant that sees its costs.
 func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 	now := time.Now
 	if b.Now != nil {
 		now = b.Now
 	}
-	var rep SyncReport
 	home, err := b.home(ctx)
 	if err != nil {
-		return rep, err
+		return SyncReport{}, err
 	}
 	// A client payer's blocked periods are its client's to see and fix.
 	blockedIn := home
 	if b.Tenant != "" {
 		blockedIn = b.Tenant
 	}
+	run := syncRun{tenant: blockedIn, provider: b.Provider, account: b.BillingAccountID, source: "files", at: now()}
+	rep, periodErr, fatal := b.run(ctx, home, blockedIn, now, &run)
+	switch {
+	case fatal != nil:
+		run.failRun(fatal)
+	case rep.BillFiles == 0:
+		run.state, run.reason = RunEmpty, ReasonNoBillFiles
+	}
+	return rep, errors.Join(fatal, periodErr, recordSync(ctx, b.Ingester.Store, run))
+}
+
+func (b *BillSync) run(ctx context.Context, home, blockedIn string, now func() time.Time, run *syncRun) (rep SyncReport, periodErr, fatal error) {
+	var err error
 	var objects []ObjectInfo
 	if el, ok := b.Objects.(ETagLister); ok {
 		objects, err = el.ListWithETag(ctx, b.Prefix)
@@ -118,7 +131,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		}
 	}
 	if err != nil {
-		return rep, fmt.Errorf("list bills: %w", err)
+		return rep, nil, fmt.Errorf("list bills: %w", err)
 	}
 	type fileInfo struct {
 		key, etag string
@@ -164,7 +177,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		return err
 	})
 	if err != nil {
-		return rep, err
+		return rep, nil, err
 	}
 	seen := map[string]bool{}
 	for _, f := range known {
@@ -192,12 +205,12 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		if skip == nil {
 			raw, err := b.Objects.Get(ctx, key)
 			if err != nil {
-				return rep, fmt.Errorf("get %s: %w", key, err)
+				return rep, nil, fmt.Errorf("get %s: %w", key, err)
 			}
 			if lines, err = ParseFOCUS(raw); errors.Is(err, ErrNotFOCUS) {
 				skip = err
 			} else if err != nil {
-				return rep, fmt.Errorf("%s: %w", key, err)
+				return rep, nil, fmt.Errorf("%s: %w", key, err)
 			}
 		}
 		if skip != nil {
@@ -208,7 +221,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 					StatusDetail: detail})
 				return err
 			}); err != nil {
-				return rep, err
+				return rep, nil, err
 			}
 			rep.NotFOCUS = append(rep.NotFOCUS, key)
 			continue
@@ -227,7 +240,7 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 			return nil
 		})
 		if err != nil {
-			return rep, err
+			return rep, nil, err
 		}
 		rep.NewFiles++
 		for p := range counts {
@@ -296,11 +309,11 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		for _, key := range files {
 			raw, err := b.Objects.Get(ctx, key)
 			if err != nil {
-				return rep, fmt.Errorf("get %s: %w", key, err)
+				return rep, nil, fmt.Errorf("get %s: %w", key, err)
 			}
 			ls, err := ParseFOCUS(raw)
 			if err != nil {
-				return rep, fmt.Errorf("%s: %w", key, err)
+				return rep, nil, fmt.Errorf("%s: %w", key, err)
 			}
 			for _, l := range ls {
 				if !monthOf(l.BillingPeriodStart).Equal(p) {
@@ -324,8 +337,9 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 			title := fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, p.Format("2006-01"), pair[0], pair[1], b.overlapHint())
 			changed, err := b.block(ctx, blockedIn, p, files, title, "keel.cost.bill_files_overlap", overlap, now())
 			if err != nil {
-				return rep, err
+				return rep, nil, err
 			}
+			run.month(SyncMonth{Month: p.Format("2006-01"), State: MonthBlocked, Reason: ReasonFilesOverlap})
 			rep.Blocked = append(rep.Blocked, p.Format("2006-01"))
 			if changed {
 				failed = append(failed, fmt.Errorf("period %s: %w", p.Format("2006-01"), overlap))
@@ -339,20 +353,25 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 			continue
 		}
 		if err != nil {
-			return rep, fmt.Errorf("load %s: %w", p.Format("2006-01"), err)
+			return rep, nil, fmt.Errorf("load %s: %w", p.Format("2006-01"), err)
 		}
 		if err := b.resolveBlocked(ctx, blockedIn, p, now()); err != nil {
-			return rep, err
+			return rep, nil, err
 		}
+		m, err := loadedMonth(ctx, b.Ingester.Store, home, res.LoadID, p.Format("2006-01"))
+		if err != nil {
+			return rep, nil, err
+		}
+		run.month(m)
 		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Dropped: res.Dropped, Unallocated: res.Unallocated, Reconcile: "pending"}
 		if b.Invoices != nil {
 			if sl.Reconcile, err = b.reconcile(ctx, home, res.LoadID, p); err != nil {
-				return rep, err
+				return rep, nil, err
 			}
 		}
 		rep.Loads = append(rep.Loads, sl)
 	}
-	return rep, errors.Join(failed...)
+	return rep, errors.Join(failed...), nil
 }
 
 // overlapHint names where the payer's mode is set: Keel's env var for its

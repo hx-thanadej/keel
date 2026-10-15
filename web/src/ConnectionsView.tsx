@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import { connections, type CloudConnection, type ConnectionKeys } from './api'
+import { BillSyncSection } from './BillSyncStatus'
 
 const when = (iso: string) => new Date(iso).toLocaleString()
 const message = (e: unknown) => String((e as Error)?.message ?? e)
@@ -8,7 +9,7 @@ const message = (e: unknown) => String((e as Error)?.message ?? e)
  * Cloud connections (ADR-0022): Tencent keys a platform admin stores in Keel.
  * Key fields are write-only: they are sent once and cleared, and the API never returns the secret key.
  */
-export function ConnectionsView() {
+export function ConnectionsView({ tenantId }: { tenantId?: string }) {
   const [items, setItems] = useState<CloudConnection[] | null>(null)
   const [error, setError] = useState<string>()
 
@@ -37,6 +38,7 @@ export function ConnectionsView() {
         <ConnectionCard key={c.id} connection={c} onChange={replace} onDeleted={() => setItems((xs) => (xs ?? []).filter((x) => x.id !== c.id))} />
       ))}
       {items?.length === 0 && <AddConnection onAdded={(c) => setItems([c])} />}
+      {tenantId && <BillSyncSection tenantId={tenantId} />}
     </section>
   )
 }

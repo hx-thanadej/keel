@@ -117,6 +117,18 @@ func mountCost(mux Mux, a auth.Authenticator, d CostDeps) {
 		writeJSON(w, http.StatusOK, items(rows))
 		return nil
 	}))
+	mux.Handle("GET /v1/tenants/{tenant}/bill-sync", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenant := r.PathValue("tenant")
+		if err := d.allow(r, p, "bill_sync.read", tenant); err != nil {
+			return err
+		}
+		out, err := d.Queries.BillSync(r.Context(), tenant)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
 	mux.Handle("GET /v1/tenants/{tenant}/costs/unallocated", authed(a, t, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tenant := r.PathValue("tenant")
 		if err := d.allow(r, p, "cost.read_unallocated", tenant); err != nil {

@@ -41,6 +41,7 @@ type fakeBilling struct {
 	months    map[string][]map[string]any // "2026-09" → BillDetail objects
 	throttle  int                         // RequestLimitExceeded replies still to give
 	failAt    int                         // offset that fails with InternalError; -1 for none
+	failMsg   string                      // the failure's message; the code when empty
 	invoice   string
 	calls     []detailCall
 	throttled int
@@ -67,7 +68,11 @@ func (f *fakeBilling) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"Response": resp})
 	}
 	fail := func(code string) {
-		reply(map[string]any{"Error": map[string]any{"Code": code, "Message": code}})
+		msg := code
+		if f.failMsg != "" {
+			msg = f.failMsg
+		}
+		reply(map[string]any{"Error": map[string]any{"Code": code, "Message": msg}})
 	}
 	if f.throttle > 0 {
 		f.throttle--

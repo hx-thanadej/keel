@@ -51,16 +51,25 @@ type PullReport struct {
 
 // Run pulls and loads each open month. A failed pull leaves that month's
 // current load in place and is returned, joined, after the other months run.
+// Each run's outcome is saved as the payer's bill sync status.
 func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 	now := time.Now
 	if b.Now != nil {
 		now = b.Now
 	}
-	var rep PullReport
 	home, err := homeTenant(ctx, b.Ingester.Store)
 	if err != nil {
-		return rep, err
+		return PullReport{}, err
 	}
+	run := syncRun{tenant: home, provider: b.Provider, account: b.BillingAccountID, source: "api", at: now()}
+	rep, monthErr, fatal := b.run(ctx, home, now, &run)
+	if fatal != nil {
+		run.failRun(fatal)
+	}
+	return rep, errors.Join(fatal, monthErr, recordSync(ctx, b.Ingester.Store, run))
+}
+
+func (b *BillPull) run(ctx context.Context, home string, now func() time.Time, run *syncRun) (rep PullReport, monthErr, fatal error) {
 	bs := &BillSync{Ingester: b.Ingester, Provider: b.Provider, BillingAccountID: b.BillingAccountID, Invoices: b.Invoices}
 	// Tencent's months are UTC+8 months (finality.go).
 	local := now().In(beijing)
@@ -70,9 +79,10 @@ func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 		month := p.Format("2006-01")
 		var source string
 		var loaded, wasFinal bool
+		var kept SyncMonth
 		err := b.Ingester.Store.InTenant(ctx, home, func(tx pgx.Tx) error {
-			err := tx.QueryRow(ctx, `SELECT source, is_final FROM cost_loads WHERE provider = $1 AND billing_account_id = $2 AND billing_period = $3 AND superseded_at IS NULL
-				ORDER BY loaded_at DESC LIMIT 1`, b.Provider, b.BillingAccountID, p).Scan(&source, &wasFinal)
+			err := tx.QueryRow(ctx, `SELECT source, is_final, line_count, to_char(total_billed, 'FM999999999990.00'), currency FROM cost_loads WHERE provider = $1 AND billing_account_id = $2 AND billing_period = $3 AND superseded_at IS NULL
+				ORDER BY loaded_at DESC LIMIT 1`, b.Provider, b.BillingAccountID, p).Scan(&source, &wasFinal, &kept.Lines, &kept.Total, &kept.Currency)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
@@ -80,7 +90,7 @@ func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 			return err
 		})
 		if err != nil {
-			return rep, err
+			return rep, nil, err
 		}
 		if wasFinal {
 			continue
@@ -90,8 +100,9 @@ func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 			title := fmt.Sprintf("%s bill pull blocked for %s %s: %v", b.Provider, b.BillingAccountID, month, err)
 			changed, err := bs.block(ctx, home, p, nil, title, "keel.cost.bill_currency_unknown", err, now())
 			if err != nil {
-				return rep, err
+				return rep, nil, err
 			}
+			run.month(SyncMonth{Month: month, State: MonthBlocked, Reason: ReasonCurrencyUnknown})
 			rep.Blocked = append(rep.Blocked, month)
 			if changed {
 				failed = append(failed, fmt.Errorf("pull %s: %s", month, title))
@@ -99,17 +110,21 @@ func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 			continue
 		}
 		if err != nil {
+			run.month(failedMonth(month, err))
 			failed = append(failed, fmt.Errorf("pull %s: %w", month, err))
 			continue
 		}
 		lines := pulled.Lines
 		if len(lines) == 0 {
+			run.month(SyncMonth{Month: month, State: MonthEmpty})
 			rep.Empty = append(rep.Empty, month)
 			continue
 		}
 		final := PeriodFinal(b.Provider, p, now(), false)
 		src := pullSource(month, lines)
 		if loaded && src == source && !final {
+			kept.Month, kept.State = month, MonthUnchanged
+			run.month(kept)
 			rep.Unchanged = append(rep.Unchanged, month)
 			continue
 		}
@@ -119,20 +134,25 @@ func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 			continue
 		}
 		if err != nil {
-			return rep, fmt.Errorf("load %s: %w", month, err)
+			return rep, nil, fmt.Errorf("load %s: %w", month, err)
 		}
 		if err := bs.resolveBlocked(ctx, home, p, now()); err != nil {
-			return rep, err
+			return rep, nil, err
 		}
+		m, err := loadedMonth(ctx, b.Ingester.Store, home, res.LoadID, month)
+		if err != nil {
+			return rep, nil, err
+		}
+		run.month(m)
 		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Dropped: res.Dropped, Unallocated: res.Unallocated, Reconcile: "pending"}
 		if b.Invoices != nil {
 			if sl.Reconcile, err = bs.reconcile(ctx, home, res.LoadID, p); err != nil {
-				return rep, err
+				return rep, nil, err
 			}
 		}
 		rep.Loads = append(rep.Loads, sl)
 	}
-	return rep, errors.Join(failed...)
+	return rep, errors.Join(failed...), nil
 }
 
 // pullSource names a pull by its month and a digest of its lines, in any

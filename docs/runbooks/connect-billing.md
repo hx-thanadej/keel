@@ -213,6 +213,23 @@ RegionId raw (Tencent numeric id, not mapped to a region code)
 "Defaulted to Usage" counts lines whose `ActionType` matched no Purchase or
 Adjustment rule, by code.
 
+#### Bill sync status (#257)
+
+Every bill sync run, by API or from files and for Keel's own and client
+payers, saves its outcome per payer and month: loaded or unchanged (lines,
+total, currency), empty (the provider returned no lines), blocked (a reason
+code such as `currency_unknown`, `role_unusable` or `no_bill_files`) or failed
+(an error class such as `denied` or `timeout`, plus the provider's error code;
+never its message). The Connections tab shows it in plain words with the next
+step, and empty Costs and Budgets pages explain why they are empty. The API is
+`GET /v1/tenants/{tenant}/bill-sync`. A client payer's status lives in the
+client's Tenant.
+
+A `keel.cost.bill_sync_changed` Activity is recorded only when a payer's
+outcome changes, not on every hourly run. Loaded and unchanged count as the
+same outcome, so a month that gains lines each hour does not repeat it; the
+load itself still records `keel.cost.loaded`.
+
 #### First real load checklist
 
 Run this once, on the first load from a real payer, before relying on the
