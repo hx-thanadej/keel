@@ -95,6 +95,7 @@ KEEL_TENCENT_BILL_SOURCE=api
 KEEL_TENCENT_PAYER_UIN=200045645249
 KEEL_TENCENT_BILL_ROLE=<role name>    # recommended, as in step 2
 KEEL_TENCENT_REGION=ap-bangkok
+KEEL_TENCENT_BILL_CURRENCY=USD        # optional; see "Currency" below
 ```
 
 `KEEL_TENCENT_BILL_SOURCE` is `cos` by default. With `api`, Keel refuses to
@@ -155,26 +156,86 @@ Each detail component becomes one FOCUS line.
 | ChargePeriodStart / End | `FeeBeginTime` / `FeeEndTime`, read as UTC+8. An end at `:59` seconds is inclusive and gets one second added. |
 | ChargeCategory | `ActionType`: `prepay*`, `pre_*` and `ripay*` map to Purchase, `recon*` to Adjustment, anything else to Usage |
 | ServiceName | `BusinessCodeName` without its trailing acronym ("Cloud Virtual Machine CVM" becomes "Cloud Virtual Machine") |
-| RegionId / AvailabilityZone | `RegionId` (Tencent's numeric id; `RegionName` goes in `x_RegionName`) / `ZoneName` |
+| RegionId / AvailabilityZone | `RegionId`, raw: Tencent's numeric id such as `23`, not a code like `ap-bangkok`. No offline source maps one to the other (the SDK's region list has codes only), so it is not mapped. `RegionName` goes in `x_RegionName`. / `ZoneName` |
 | ResourceId / ResourceName | `ResourceId` / `ResourceName` |
 | ListCost | component `Cost`, left empty when Tencent shows `-` (contract price) |
 | BilledCost | component `RealCost`, after discounts. `DescribeBillSummaryByPayMode`'s `RealTotalCost` sums the same figure. |
 | EffectiveCost | from `Normalize`: BilledCost, or spread over the term for a multi-day Purchase |
 | PricingQuantity / Unit | `UsedAmount` / `UsedAmountUnit` |
-| BillingCurrency | the prefix of `PriceUnit` (e.g. `USD/core/hour`). The response has no currency field. A month in two currencies fails, and a month with none is taken as USD. |
+| BillingCurrency | the prefix of `PriceUnit` (e.g. `USD/core/hour`), or `KEEL_TENCENT_BILL_CURRENCY`. The response has no currency field. See "Currency" below. |
 | Tags | `Tags` (`TagKey` to `TagValue`) |
 | x_ columns | `VoucherPayAmount`, `CashPayAmount`, `IncentivePayAmount`, `TransferPayAmount`, `Discount`, `DiscountType`, `ActionType`, `BillId`, `ComponentCodeName` and others |
 
 Vouchers pay for a line. They do not lower `RealCost`, so BilledCost includes
 them and `x_VoucherPayAmount` records how much they paid.
 
+#### Currency
+
+Keel never guesses a currency. It requests the billing API in English
+(`en-US`), since under the SDK's default `zh-CN` a `PriceUnit` can read
+`元/核/小时`. A `PriceUnit` prefix counts only when it is three letters A to Z
+and a currency Keel stores rates for (`internal/fx` `Kept`: EUR, USD, THB,
+CNY). An empty or `-` `PriceUnit` (contract price) names no currency.
+
+A month does not load when:
+
+- a line's `PriceUnit` names something other than a supported code,
+- `KEEL_TENCENT_BILL_CURRENCY` is unset and the lines name no currency (every
+  `PriceUnit` is `-`) or more than one,
+- `KEEL_TENCENT_BILL_CURRENCY` is set and a line names another currency.
+
+The month's previous load stays current, and a `bill_sync_blocked` Finding
+opens whose title names `KEEL_TENCENT_BILL_CURRENCY`. The run alerts once per
+new cause. Set `KEEL_TENCENT_BILL_CURRENCY` to the currency the console's
+bill shows for the payer when the payer bills under contract prices. The next
+load resolves the Finding. Keel refuses to start when the variable is not a
+supported ISO 4217 code, or is set with `KEEL_TENCENT_BILL_SOURCE=cos` (FOCUS
+files carry their own currency).
+
+#### Assumptions recorded on each load
+
 Not confirmed from Tencent's docs: the time zone of `FeeBeginTime` and
 `FeeEndTime` (assumed UTC+8, as Tencent's billing day is), the full set of
-`ActionType` codes (only `pre_to_post` appears in the docs), and the exact
-action strings `finance:DescribeBillDetail` and
-`finance:DescribeBillSummaryByPayMode` (the docs show only
-`finance:DescribeBill*`). Check the first real load against the console's
-bill and its `reconcile_status`.
+`ActionType` codes (only `pre_to_post` appears in the docs), what numeric
+`RegionId` values mean, and the exact action strings
+`finance:DescribeBillDetail` and `finance:DescribeBillSummaryByPayMode` (the
+docs show only `finance:DescribeBill*`).
+
+Each pulled load's `keel.cost.loaded` Activity lists the assumptions it used,
+for example:
+
+```
+tencent 200045645249 2026-09 final=false; assumptions: FeeBeginTime/FeeEndTime read as UTC+8;
+currency USD from PriceUnit; ActionType defaulted to Usage: 302 lines (postpay_deduct_h 302);
+RegionId raw (Tencent numeric id, not mapped to a region code)
+```
+
+"Defaulted to Usage" counts lines whose `ActionType` matched no Purchase or
+Adjustment rule, by code.
+
+#### First real load checklist
+
+Run this once, on the first load from a real payer, before relying on the
+numbers.
+
+1. **Currency.** The load's Activity names the currency and where it came
+   from. It matches the currency on the console's bill (Billing Center, Bill
+   Details). If the pull is blocked instead, read the Finding's error and set
+   `KEEL_TENCENT_BILL_CURRENCY` to the console's currency.
+2. **Total.** The load's `reconcile_status` is `ok`, or `not_ready` for an
+   open month. A `mismatch` stops the checklist.
+3. **Time zone.** Pick a resource billed hourly. Its first charge hour in
+   Keel's `charge_period_start` (UTC) is 8 hours behind the hour the console
+   shows. If it is not, the UTC+8 assumption is wrong: daily attribution is off
+   by 8 hours, month totals are not.
+4. **ActionType.** Every code in "defaulted to Usage" is a usage charge in the
+   console. A prepaid purchase or refund listed there is misclassed: its
+   effective cost is not amortized. Add a rule in `tencentChargeCategory` and
+   reload.
+5. **Region.** Note the `RegionId` values and their `x_RegionName`. Region
+   filters do not join API lines with COS lines until these are mapped.
+6. **CAM.** The pull ran with the exact actions above. If it needed the
+   `finance:DescribeBill*` wildcard, record which.
 
 ## Tencent Cloud client-owned payer (ADR-0018, #182)
 

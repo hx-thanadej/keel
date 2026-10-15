@@ -33,16 +33,26 @@ type BillDetails struct {
 	Creds    common.Provider
 	Endpoint string               // scheme://host, for tests
 	Backoff  profile.DurationFunc // nil: exponential, 1s, 2s, 4s, ...
-	Currency string               // when no line names one; default USD
+	// Currency is KEEL_TENCENT_BILL_CURRENCY: when set, the payer's billing
+	// currency, and a line naming another blocks the month.
+	Currency string
+}
+
+// billingProfile asks the billing API for English: under the SDK's zh-CN
+// default PriceUnit can read "元/核/小时" rather than naming a currency code.
+func billingProfile(endpoint string) *profile.ClientProfile {
+	cpf := clientProfile(endpoint)
+	cpf.Language = "en-US"
+	return cpf
 }
 
 // MonthLines implements cost.BillDetails. Any page failing fails the month.
-func (d *BillDetails) MonthLines(ctx context.Context, payer string, month time.Time) ([]cost.Line, error) {
+func (d *BillDetails) MonthLines(ctx context.Context, payer string, month time.Time) (cost.BillMonth, error) {
 	cred, err := d.Creds.GetCredential()
 	if err != nil {
-		return nil, fmt.Errorf("tencent credentials: %w", err)
+		return cost.BillMonth{}, fmt.Errorf("tencent credentials: %w", err)
 	}
-	cpf := clientProfile(d.Endpoint)
+	cpf := billingProfile(d.Endpoint)
 	cpf.RateLimitExceededMaxRetries = 5
 	cpf.RateLimitExceededRetryDuration = d.Backoff
 	if d.Backoff == nil {
@@ -50,7 +60,7 @@ func (d *BillDetails) MonthLines(ctx context.Context, payer string, month time.T
 	}
 	client, err := billing.NewClient(cred, d.Region, cpf)
 	if err != nil {
-		return nil, err
+		return cost.BillMonth{}, err
 	}
 	m := month.Format("2006-01")
 	var details []*billing.BillDetail
@@ -59,7 +69,7 @@ func (d *BillDetails) MonthLines(ctx context.Context, payer string, month time.T
 		if page > 0 {
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return cost.BillMonth{}, ctx.Err()
 			case <-time.After(billDetailInterval):
 			}
 		}
@@ -68,20 +78,16 @@ func (d *BillDetails) MonthLines(ctx context.Context, payer string, month time.T
 		req.Month, req.PayerUin, req.Offset, req.Limit, req.Context = &m, &payer, &offset, &limit, next
 		res, err := client.DescribeBillDetailWithContext(ctx, req)
 		if err != nil {
-			return nil, fmt.Errorf("DescribeBillDetail %s offset %d: %w", m, offset, err)
+			return cost.BillMonth{}, fmt.Errorf("DescribeBillDetail %s offset %d: %w", m, offset, err)
 		}
 		if res.Response == nil {
-			return nil, fmt.Errorf("DescribeBillDetail %s offset %d: empty response", m, offset)
+			return cost.BillMonth{}, fmt.Errorf("DescribeBillDetail %s offset %d: empty response", m, offset)
 		}
 		details = append(details, res.Response.DetailSet...)
 		if len(res.Response.DetailSet) < billDetailPage {
-			currency := d.Currency
-			if currency == "" {
-				currency = "USD"
-			}
-			return cost.TencentBillLines(month, details, currency)
+			return cost.TencentBillLines(month, details, d.Currency)
 		}
 		next = res.Response.Context
 	}
-	return nil, fmt.Errorf("DescribeBillDetail %s: more than %d pages", m, billDetailMaxPages)
+	return cost.BillMonth{}, fmt.Errorf("DescribeBillDetail %s: more than %d pages", m, billDetailMaxPages)
 }

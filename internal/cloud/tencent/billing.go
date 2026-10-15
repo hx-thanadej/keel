@@ -26,7 +26,7 @@ func (i Invoices) InvoiceTotal(ctx context.Context, payerUIN string, period time
 	if err != nil {
 		return "", false, fmt.Errorf("tencent credentials: %w", err)
 	}
-	client, err := billing.NewClient(cred, i.Region, clientProfile(i.Endpoint))
+	client, err := billing.NewClient(cred, i.Region, billingProfile(i.Endpoint))
 	if err != nil {
 		return "", false, err
 	}

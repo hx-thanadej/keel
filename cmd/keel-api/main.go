@@ -26,6 +26,8 @@
 //	KEEL_TENCENT_BILL_PREFIX   cos: object prefix of the FOCUS bill files
 //	KEEL_TENCENT_PAYER_UIN     payer account id (FOCUS BillingAccountId)
 //	KEEL_TENCENT_BILL_ROLE     name of the payer CAM role Keel's base identity assumes for bill sync and invoices
+//	KEEL_TENCENT_BILL_CURRENCY api: optional ISO 4217 billing currency of the payer; a pulled line naming another blocks the month.
+//	                           Unset, the currency comes from the lines' PriceUnit, and a month naming none or several blocks.
 //	KEEL_TENCENT_BILL_MODE     cos: per-day (default) | cumulative (daily FOCUS files are month-to-date); confirm on first delivery
 //	KEEL_TENCENT_REGION        region for billing API and COS (default ap-bangkok)
 //	                           client payers (ADR-0018) are data, not env: client_payers rows on client-owned Cloud Accounts
@@ -1221,6 +1223,7 @@ func tencentBillRun(st *store.Store, base common.Provider, endpoint string) (fun
 	payer := os.Getenv("KEEL_TENCENT_PAYER_UIN")
 	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
 	source := envOr("KEEL_TENCENT_BILL_SOURCE", "cos")
+	currency := os.Getenv("KEEL_TENCENT_BILL_CURRENCY")
 	switch source {
 	case "cos":
 		if bucket == "" {
@@ -1229,6 +1232,9 @@ func tencentBillRun(st *store.Store, base common.Provider, endpoint string) (fun
 		if payer == "" {
 			return nil, errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_BUCKET")
 		}
+		if currency != "" {
+			return nil, errors.New("KEEL_TENCENT_BILL_CURRENCY applies only to KEEL_TENCENT_BILL_SOURCE=api; FOCUS files name their currency")
+		}
 	case "api":
 		if payer == "" {
 			return nil, errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_SOURCE=api")
@@ -1236,6 +1242,11 @@ func tencentBillRun(st *store.Store, base common.Provider, endpoint string) (fun
 		for _, v := range []string{"KEEL_TENCENT_BILL_BUCKET", "KEEL_TENCENT_BILL_PREFIX", "KEEL_TENCENT_BILL_MODE"} {
 			if os.Getenv(v) != "" {
 				return nil, fmt.Errorf("%s applies only to KEEL_TENCENT_BILL_SOURCE=cos; unset it with source api", v)
+			}
+		}
+		if currency != "" {
+			if _, err := cost.ParseCurrency(currency); err != nil {
+				return nil, fmt.Errorf("KEEL_TENCENT_BILL_CURRENCY: %w", err)
 			}
 		}
 	default:
@@ -1249,10 +1260,10 @@ func tencentBillRun(st *store.Store, base common.Provider, endpoint string) (fun
 	in := &cost.Ingester{Store: st}
 	if source == "api" {
 		bp := &cost.BillPull{Ingester: in, Provider: "tencent", BillingAccountID: payer, Invoices: invoices,
-			Details: &tencent.BillDetails{Region: region, Creds: creds, Endpoint: endpoint}}
+			Details: &tencent.BillDetails{Region: region, Creds: creds, Endpoint: endpoint, Currency: currency}}
 		return func(ctx context.Context) ([]cost.SyncedLoad, error) {
 			rep, err := bp.Run(ctx)
-			slog.Info("tencent bill pull", "loads", len(rep.Loads), "unchanged", rep.Unchanged, "empty", rep.Empty)
+			slog.Info("tencent bill pull", "loads", len(rep.Loads), "unchanged", rep.Unchanged, "empty", rep.Empty, "blocked", rep.Blocked)
 			return rep.Loads, err
 		}, nil
 	}

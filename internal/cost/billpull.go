@@ -14,9 +14,17 @@ import (
 )
 
 // BillDetails pulls a payer's whole month of bill lines from a provider's
-// billing API. It returns every line or an error, never a partial month.
+// billing API. It returns every line or an error, never a partial month. An
+// error wrapping ErrBillCurrency blocks the month instead of failing the run.
 type BillDetails interface {
-	MonthLines(ctx context.Context, payer string, month time.Time) ([]Line, error)
+	MonthLines(ctx context.Context, payer string, month time.Time) (BillMonth, error)
+}
+
+// BillMonth is a month of pulled lines and the mapping's unconfirmed
+// assumptions, which the load's Activity records.
+type BillMonth struct {
+	Lines       []Line
+	Assumptions []string
 }
 
 // BillPull keeps a payer's loads current from a billing API instead of bill
@@ -38,6 +46,7 @@ type PullReport struct {
 	Loads     []SyncedLoad `json:"loads"`
 	Unchanged []string     `json:"unchanged"` // periods (YYYY-MM) whose pull matched the current load
 	Empty     []string     `json:"empty"`     // periods with no lines yet
+	Blocked   []string     `json:"blocked"`   // periods whose currency could not be read; previous load kept
 }
 
 // Run pulls and loads each open month. A failed pull leaves that month's
@@ -76,11 +85,24 @@ func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 		if wasFinal {
 			continue
 		}
-		lines, err := b.Details.MonthLines(ctx, b.BillingAccountID, p)
+		pulled, err := b.Details.MonthLines(ctx, b.BillingAccountID, p)
+		if errors.Is(err, ErrBillCurrency) {
+			title := fmt.Sprintf("%s bill pull blocked for %s %s: %v", b.Provider, b.BillingAccountID, month, err)
+			changed, err := bs.block(ctx, home, p, nil, title, "keel.cost.bill_currency_unknown", err, now())
+			if err != nil {
+				return rep, err
+			}
+			rep.Blocked = append(rep.Blocked, month)
+			if changed {
+				failed = append(failed, fmt.Errorf("pull %s: %s", month, title))
+			}
+			continue
+		}
 		if err != nil {
 			failed = append(failed, fmt.Errorf("pull %s: %w", month, err))
 			continue
 		}
+		lines := pulled.Lines
 		if len(lines) == 0 {
 			rep.Empty = append(rep.Empty, month)
 			continue
@@ -92,7 +114,7 @@ func (b *BillPull) Run(ctx context.Context) (PullReport, error) {
 			continue
 		}
 		res, err := b.Ingester.Load(ctx, Load{Provider: b.Provider, BillingAccountID: b.BillingAccountID, BillingPeriod: p,
-			Source: src, Final: final, Lines: lines})
+			Source: src, Final: final, Lines: lines, Assumptions: pulled.Assumptions})
 		if errors.Is(err, ErrPeriodFinal) {
 			continue
 		}

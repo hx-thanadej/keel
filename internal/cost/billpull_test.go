@@ -3,6 +3,7 @@ package cost_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,6 +44,7 @@ type fakeBilling struct {
 	invoice   string
 	calls     []detailCall
 	throttled int
+	languages map[string]bool // X-TC-Language of every request
 }
 
 func newFakeBilling(t *testing.T) (*fakeBilling, *httptest.Server) {
@@ -55,6 +57,10 @@ func newFakeBilling(t *testing.T) (*fakeBilling, *httptest.Server) {
 func (f *fakeBilling) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.languages == nil {
+		f.languages = map[string]bool{}
+	}
+	f.languages[r.Header.Get("X-TC-Language")] = true
 	body, _ := io.ReadAll(r.Body)
 	reply := func(resp map[string]any) {
 		resp["RequestId"] = "req"
@@ -204,6 +210,18 @@ func TestBillPullPagesMapsAndReconciles(t *testing.T) {
 		tags != "prod" || voucher != "3.00" || cash != "5.00" || !start.Equal(time.Date(2026, 8, 31, 16, 0, 0, 0, time.UTC)) {
 		t.Errorf("prod fact list=%s eff=%s cur=%s svc=%q cat=%q env=%s voucher=%s cash=%s start=%s", list, eff, cur, svc, cat, tags, voucher, cash, start)
 	}
+	if len(f.languages) != 1 || !f.languages["en-US"] {
+		t.Errorf("request languages %v, want only en-US so PriceUnit names an ISO currency", f.languages)
+	}
+	var detail string
+	must(t, w.s.InTenant(context.Background(), w.home, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `SELECT event::text FROM activities WHERE type = 'keel.cost.loaded' AND subject = 'cost_load/' || $1`, l.LoadID).Scan(&detail)
+	}))
+	for _, want := range []string{"FeeBeginTime/FeeEndTime read as UTC+8", "currency USD from PriceUnit", "ActionType defaulted to Usage: 302 lines (postpay_deduct_h 302)", "RegionId raw"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("load activity %s lacks the assumption %q", detail, want)
+		}
+	}
 	if aug := f.callsFor("2026-08"); len(aug) != 1 {
 		t.Errorf("August pulled %d times, want once (the previous month is not final yet)", len(aug))
 	}
@@ -322,14 +340,90 @@ func TestBillPullResolvesBlockedFinding(t *testing.T) {
 	}
 }
 
-func TestBillPullRejectsMixedCurrencies(t *testing.T) {
+func blockedFinding(t *testing.T, w world) (status, title string) {
+	t.Helper()
+	ctx := context.Background()
+	must(t, w.s.InTenant(ctx, w.home, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT status, title FROM findings WHERE fingerprint = $1 ORDER BY first_seen_at DESC LIMIT 1`,
+			"bill_sync_blocked:tencent/"+payer+"/2026-09").Scan(&status, &title)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}))
+	return status, title
+}
+
+func withUnit(details []map[string]any, unit string) []map[string]any {
+	for _, d := range details {
+		d["ComponentSet"].([]any)[0].(map[string]any)["PriceUnit"] = unit
+	}
+	return details
+}
+
+// A month whose currency cannot be read is never loaded under a guessed
+// currency: the previous load stays and the period is blocked until it can.
+func TestBillPullBlocksUnreadableCurrency(t *testing.T) {
+	for name, month := range map[string][]map[string]any{
+		"yuan unit":       withUnit(september(), "元/核/小时"),
+		"contract prices": withUnit(september(), "-"),
+		"mixed USD and CNY": append(september(), detail("200046202634", "ins-cny", "Cloud Virtual Machine CVM", "1.00", "1.00",
+			map[string]any{"c.PriceUnit": "CNY/core/hour"})),
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := setup(t)
+			f, srv := newFakeBilling(t)
+			f.set("2026-09", september())
+			now := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+			bp := pullFor(w, srv, nil, &now)
+			_, err := bp.Run(context.Background())
+			must(t, err)
+
+			f.set("2026-09", month)
+			rep, err := bp.Run(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "KEEL_TENCENT_BILL_CURRENCY") || len(rep.Loads) != 0 || len(rep.Blocked) != 1 {
+				t.Fatalf("err %v report %+v, want a block naming KEEL_TENCENT_BILL_CURRENCY and no load", err, rep)
+			}
+			if all, _ := loadCount(t, w); all != 1 || billedTotal(t, w) != "38.00" {
+				t.Errorf("%d loads, billed %s: want the previous load kept", all, billedTotal(t, w))
+			}
+			if status, title := blockedFinding(t, w); status != "open" || !strings.Contains(title, "KEEL_TENCENT_BILL_CURRENCY") {
+				t.Errorf("bill_sync_blocked %q %q, want open with the hint", status, title)
+			}
+			rep, err = bp.Run(context.Background())
+			if err != nil || len(rep.Blocked) != 1 {
+				t.Errorf("unchanged block rerun: err %v report %+v, want it blocked without alerting again", err, rep)
+			}
+		})
+	}
+}
+
+func TestBillPullExplicitCurrency(t *testing.T) {
 	w := setup(t)
 	f, srv := newFakeBilling(t)
-	f.set("2026-09", append(september(), detail("200046202634", "ins-cny", "Cloud Virtual Machine CVM", "1.00", "1.00",
-		map[string]any{"c.PriceUnit": "CNY/core/hour"})))
+	f.set("2026-09", withUnit(september(), "-"))
 	now := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
-	rep, err := pullFor(w, srv, nil, &now).Run(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "currenc") || len(rep.Loads) != 0 {
-		t.Fatalf("mixed USD and CNY: err %v loads %+v, want an error and no load", err, rep.Loads)
+	bp := pullFor(w, srv, nil, &now)
+	bp.Details.(*tencent.BillDetails).Currency = "CNY"
+	rep, err := bp.Run(context.Background())
+	must(t, err)
+	if len(rep.Loads) != 1 || sum(t, w, w.tat, "billing_currency = 'CNY'") != "38.00" {
+		t.Fatalf("contract-price month with KEEL_TENCENT_BILL_CURRENCY=CNY: %+v, want it loaded in CNY", rep)
+	}
+
+	f.set("2026-09", september())
+	rep, err = bp.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "KEEL_TENCENT_BILL_CURRENCY") || len(rep.Loads) != 0 {
+		t.Fatalf("USD lines against CNY: err %v report %+v, want blocked", err, rep)
+	}
+	if status, _ := blockedFinding(t, w); status != "open" || sum(t, w, w.tat, "billing_currency = 'CNY'") != "38.00" {
+		t.Errorf("finding %q, want open with the CNY load kept", status)
+	}
+
+	bp.Details.(*tencent.BillDetails).Currency = "USD"
+	_, err = bp.Run(context.Background())
+	must(t, err)
+	if status, _ := blockedFinding(t, w); status != "resolved" {
+		t.Errorf("finding %q after the currency agreed, want resolved by the load", status)
 	}
 }

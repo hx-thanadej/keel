@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,6 +32,8 @@ type Load struct {
 	// that Tenant. Empty for Keel's own payers, whose lines never attribute
 	// to a client-owned account.
 	Tenant string
+	// Assumptions the source's mapping made, recorded on the load's Activity.
+	Assumptions []string
 }
 
 // LoadResult summarises a load.
@@ -229,7 +232,7 @@ func (in *Ingester) Load(ctx context.Context, l Load) (LoadResult, error) {
 			_, err = activity.Record(ctx, tx, activity.Activity{
 				TenantID: tenant, Source: "keel/cost", Type: "keel.cost.loaded", Subject: "cost_load/" + res.LoadID,
 				Operation: "LoadCosts", Kind: activity.Create, Actor: actor, Outcome: activity.Success,
-				StatusDetail: fmt.Sprintf("%s %s %s final=%v", l.Provider, l.BillingAccountID, period.Format("2006-01"), l.Final),
+				StatusDetail: loadDetail(l, period),
 			})
 			return err
 		})
@@ -254,4 +257,12 @@ func union(a, b []string) []string {
 		}
 	}
 	return out
+}
+
+func loadDetail(l Load, period time.Time) string {
+	d := fmt.Sprintf("%s %s %s final=%v", l.Provider, l.BillingAccountID, period.Format("2006-01"), l.Final)
+	if len(l.Assumptions) > 0 {
+		d += "; assumptions: " + strings.Join(l.Assumptions, "; ")
+	}
+	return d
 }

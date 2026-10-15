@@ -24,9 +24,12 @@ func TestTencentBillSourceIsValidated(t *testing.T) {
 		{"api refuses a bucket", map[string]string{"KEEL_TENCENT_BILL_SOURCE": "api", "KEEL_TENCENT_PAYER_UIN": "200045645249", "KEEL_TENCENT_BILL_BUCKET": "b"}, "KEEL_TENCENT_BILL_BUCKET applies only"},
 		{"api refuses a file mode", map[string]string{"KEEL_TENCENT_BILL_SOURCE": "api", "KEEL_TENCENT_PAYER_UIN": "200045645249", "KEEL_TENCENT_BILL_MODE": "cumulative"}, "KEEL_TENCENT_BILL_MODE applies only"},
 		{"cos needs the payer", map[string]string{"KEEL_TENCENT_BILL_BUCKET": "b"}, "KEEL_TENCENT_PAYER_UIN is required"},
+		{"api refuses a non-ISO currency", map[string]string{"KEEL_TENCENT_BILL_SOURCE": "api", "KEEL_TENCENT_PAYER_UIN": "200045645249", "KEEL_TENCENT_BILL_CURRENCY": "元"}, "KEEL_TENCENT_BILL_CURRENCY"},
+		{"api refuses an unsupported currency", map[string]string{"KEEL_TENCENT_BILL_SOURCE": "api", "KEEL_TENCENT_PAYER_UIN": "200045645249", "KEEL_TENCENT_BILL_CURRENCY": "JPY"}, "KEEL_TENCENT_BILL_CURRENCY"},
+		{"cos refuses a currency", map[string]string{"KEEL_TENCENT_BILL_BUCKET": "b", "KEEL_TENCENT_PAYER_UIN": "200045645249", "KEEL_TENCENT_BILL_CURRENCY": "USD"}, "KEEL_TENCENT_BILL_CURRENCY applies only"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			for _, k := range []string{"KEEL_TENCENT_BILL_SOURCE", "KEEL_TENCENT_PAYER_UIN", "KEEL_TENCENT_BILL_BUCKET", "KEEL_TENCENT_BILL_PREFIX", "KEEL_TENCENT_BILL_MODE", "KEEL_TENCENT_BILL_ROLE"} {
+			for _, k := range []string{"KEEL_TENCENT_BILL_SOURCE", "KEEL_TENCENT_PAYER_UIN", "KEEL_TENCENT_BILL_BUCKET", "KEEL_TENCENT_BILL_PREFIX", "KEEL_TENCENT_BILL_MODE", "KEEL_TENCENT_BILL_ROLE", "KEEL_TENCENT_BILL_CURRENCY"} {
 				t.Setenv(k, c.env[k])
 			}
 			run, err := tencentBillRun(nil, staticCreds{id: "base-id"}, "http://127.0.0.1:1")
@@ -72,7 +75,7 @@ func TestTencentBillSourceAPIPullsTheBill(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("KEEL_TENCENT_BILL_SOURCE", "api")
 	t.Setenv("KEEL_TENCENT_PAYER_UIN", "200045645249")
-	for _, k := range []string{"KEEL_TENCENT_BILL_BUCKET", "KEEL_TENCENT_BILL_PREFIX", "KEEL_TENCENT_BILL_MODE", "KEEL_TENCENT_BILL_ROLE"} {
+	for _, k := range []string{"KEEL_TENCENT_BILL_BUCKET", "KEEL_TENCENT_BILL_PREFIX", "KEEL_TENCENT_BILL_MODE", "KEEL_TENCENT_BILL_ROLE", "KEEL_TENCENT_BILL_CURRENCY"} {
 		t.Setenv(k, "")
 	}
 	run, err := tencentBillRun(st, staticCreds{id: "base-id"}, srv.URL)
