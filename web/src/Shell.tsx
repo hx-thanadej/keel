@@ -11,8 +11,9 @@ import { SecurityView } from './SecurityView'
 import { AccessView } from './AccessView'
 import { InsightsView } from './InsightsView'
 import { ComplianceView } from './ComplianceView'
+import { ConnectionsView } from './ConnectionsView'
 
-type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'delivery' | 'security' | 'compliance' | 'access' | 'insights' | 'catalog' | 'activity'
+type Tab = 'budgets' | 'costs' | 'findings' | 'savings' | 'delivery' | 'security' | 'compliance' | 'access' | 'insights' | 'catalog' | 'activity' | 'connections'
 const tabs: [Tab, string][] = [
   ['budgets', 'Budgets'],
   ['costs', 'Costs'],
@@ -52,6 +53,10 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
     onSignedOut()
   }
   const current = tenants.find((t) => t.id === selected)
+  // Cloud connections are platform data in the home Tenant, managed by its platform admins (ADR-0022).
+  const isAdmin = (tenantId: string) => me.bindings.some((b) => b.tenant_id === tenantId && b.role === 'platform_admin')
+  const shown: [Tab, string][] = current?.is_home && isAdmin(current.id) ? [...tabs, ['connections', 'Connections']] : tabs
+  const active = shown.some(([id]) => id === tab) ? tab : 'budgets'
 
   return (
     <div className="shell">
@@ -89,11 +94,11 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
           <>
             <h1>{current.name}</h1>
             <div role="tablist">
-              {tabs.map(([id, name]) => (
+              {shown.map(([id, name]) => (
                 <button
                   key={id}
                   role="tab"
-                  aria-selected={tab === id}
+                  aria-selected={active === id}
                   onClick={() => {
                     setFocusFinding(undefined)
                     setTab(id)
@@ -103,16 +108,16 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
                 </button>
               ))}
             </div>
-            {tab === 'budgets' && <BudgetsView key={current.id} tenantId={current.id} />}
-            {tab === 'costs' && <CostsView key={current.id} tenantId={current.id} />}
-            {tab === 'findings' && <FindingsView key={current.id} tenantId={current.id} focus={focusFinding} />}
-            {tab === 'savings' && <SavingsView key={current.id} tenantId={current.id} />}
-            {tab === 'delivery' && <DeliveryView key={current.id} tenantId={current.id} />}
-            {tab === 'security' && <SecurityView key={current.id} tenantId={current.id} />}
-            {tab === 'compliance' && <ComplianceView key={current.id} tenantId={current.id} onOpenFinding={openFinding} canConfigure={me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin')} />}
-            {tab === 'access' && <AccessView key={current.id} tenantId={current.id} />}
-            {tab === 'insights' && <InsightsView key={current.id} tenantId={current.id} canSubmit={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'tenant_approver'))} canGenerate={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'finops_lead'))} />}
-            {tab === 'catalog' && (
+            {active === 'budgets' && <BudgetsView key={current.id} tenantId={current.id} />}
+            {active === 'costs' && <CostsView key={current.id} tenantId={current.id} />}
+            {active === 'findings' && <FindingsView key={current.id} tenantId={current.id} focus={focusFinding} />}
+            {active === 'savings' && <SavingsView key={current.id} tenantId={current.id} />}
+            {active === 'delivery' && <DeliveryView key={current.id} tenantId={current.id} />}
+            {active === 'security' && <SecurityView key={current.id} tenantId={current.id} />}
+            {active === 'compliance' && <ComplianceView key={current.id} tenantId={current.id} onOpenFinding={openFinding} canConfigure={me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin')} />}
+            {active === 'access' && <AccessView key={current.id} tenantId={current.id} />}
+            {active === 'insights' && <InsightsView key={current.id} tenantId={current.id} canSubmit={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'tenant_approver'))} canGenerate={me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'finops_lead'))} />}
+            {active === 'catalog' && (
               <TenantView
                 key={current.id}
                 tenant={current}
@@ -123,7 +128,8 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
                 }}
               />
             )}
-            {tab === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
+            {active === 'activity' && <ActivityFeed key={current.id} tenantId={current.id} />}
+            {active === 'connections' && <ConnectionsView />}
           </>
         )}
       </main>
