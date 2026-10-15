@@ -69,12 +69,13 @@ type BillSync struct {
 
 // SyncedLoad reports one load made by a sync run.
 type SyncedLoad struct {
-	LoadID    string    `json:"load_id"`
-	Period    time.Time `json:"period"`
-	Final     bool      `json:"final"`
-	Lines     int       `json:"lines"`
-	Dropped   int       `json:"dropped"`
-	Reconcile string    `json:"reconcile"`
+	LoadID      string    `json:"load_id"`
+	Period      time.Time `json:"period"`
+	Final       bool      `json:"final"`
+	Lines       int       `json:"lines"`
+	Dropped     int       `json:"dropped"`
+	Unallocated int       `json:"unallocated"`
+	Reconcile   string    `json:"reconcile"`
 }
 
 // SyncReport summarises a run.
@@ -339,14 +340,10 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		if err != nil {
 			return rep, fmt.Errorf("load %s: %w", p.Format("2006-01"), err)
 		}
-		if err := b.Ingester.Store.InTenant(ctx, blockedIn, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'period loaded'
-				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, b.blockedFingerprint(p), now())
-			return err
-		}); err != nil {
+		if err := b.resolveBlocked(ctx, blockedIn, p, now()); err != nil {
 			return rep, err
 		}
-		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Dropped: res.Dropped, Reconcile: "pending"}
+		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Dropped: res.Dropped, Unallocated: res.Unallocated, Reconcile: "pending"}
 		if b.Invoices != nil {
 			if sl.Reconcile, err = b.reconcile(ctx, home, res.LoadID, p); err != nil {
 				return rep, err
@@ -369,6 +366,15 @@ func (b *BillSync) overlapHint() string {
 
 func (b *BillSync) blockedFingerprint(period time.Time) string {
 	return "bill_sync_blocked:" + b.Provider + "/" + b.BillingAccountID + "/" + period.Format("2006-01")
+}
+
+// resolveBlocked closes the period's bill_sync_blocked Finding: it loaded.
+func (b *BillSync) resolveBlocked(ctx context.Context, tenant string, period, now time.Time) error {
+	return b.Ingester.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'period loaded'
+			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, b.blockedFingerprint(period), now)
+		return err
+	})
 }
 
 // block keeps a period whose files overlap open as one Finding, resolved by

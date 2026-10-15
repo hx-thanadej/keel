@@ -85,6 +85,97 @@ the wizard.
 Until then, a FOCUS export downloaded from the console can be uploaded:
 `POST /v1/tenants/{home}/cost-loads?provider=tencent&billing_account=200045645249&period=YYYY-MM`.
 
+### Billing API instead of COS (#252)
+
+Keel can pull the payer's bill from the billing API instead of reading FOCUS
+files from a bucket. Skip steps 1 and 4 above, and configure:
+
+```
+KEEL_TENCENT_BILL_SOURCE=api
+KEEL_TENCENT_PAYER_UIN=200045645249
+KEEL_TENCENT_BILL_ROLE=<role name>    # recommended, as in step 2
+KEEL_TENCENT_REGION=ap-bangkok
+```
+
+`KEEL_TENCENT_BILL_SOURCE` is `cos` by default. With `api`, Keel refuses to
+start if `KEEL_TENCENT_BILL_BUCKET`, `KEEL_TENCENT_BILL_PREFIX` or
+`KEEL_TENCENT_BILL_MODE` is set, so a half-switched config fails loudly.
+
+The identity (the billing role, else Keel's base identity) needs two read
+actions in the payer. The CAM namespace for Billing Center is `finance`
+([CAM-enabled services](https://www.tencentcloud.com/document/product/598/10588)),
+even though the API's service name is `billing`.
+
+```json
+{
+  "version": "2.0",
+  "statement": [
+    {"effect": "allow", "action": ["finance:DescribeBillDetail", "finance:DescribeBillSummaryByPayMode"], "resource": ["*"]}
+  ]
+}
+```
+
+The `QcloudFinanceBillReadOnlyAccess` preset grants `finance:DescribeBill*`,
+which covers both
+([Granting Billing-related CAM Access](https://www.tencentcloud.com/document/product/555/43522)).
+No COS permission is needed.
+
+How a run works:
+
+- Every hour Keel pulls the current and the previous month (UTC+8 months) with
+  [`DescribeBillDetail`](https://www.tencentcloud.com/document/api/555/30756)
+  for `KEEL_TENCENT_PAYER_UIN`, 300 lines a page (the documented maximum),
+  passing each page's `Context` to the next. It stops on a short page and
+  never trusts `Total`, which Tencent caches for 24 hours. It skips a month
+  that already has a final load.
+- Requests are spaced 250 ms apart (the limit is 5 a second) and run one at a
+  time. On `RequestLimitExceeded` the SDK retries up to 5 times, backing off
+  1, 2, 4, 8 and 16 seconds.
+- A month's lines load only when every page arrived. An error on any page
+  leaves the month's current load in place and fails the run.
+- A pull whose lines match the current load makes no new load. A changed pull
+  supersedes the previous load, as a new COS file does. Finality,
+  reconciliation against `DescribeBillSummaryByPayMode` and
+  `bill_sync_blocked` Findings work as with COS.
+- Lines of accounts not registered in Keel load as unallocated in the home
+  Tenant, as with COS, and each load reports how many.
+
+Tencent recommends COS delivery over the API above about 200,000 lines a
+month, since paging is slow. At 300 lines a page and 4 requests a second,
+200,000 lines take about three minutes.
+
+Each detail component becomes one FOCUS line.
+`cost.TencentBillLines` in `internal/cost/tencentapi.go` holds the mapping.
+
+| FOCUS | DescribeBillDetail |
+| --- | --- |
+| BillingAccountId | `PayerUin` |
+| SubAccountId (Cloud Account) | `OwnerUin`, also in `x_OwnerAccountID` |
+| BillingPeriodStart | the month pulled |
+| ChargePeriodStart / End | `FeeBeginTime` / `FeeEndTime`, read as UTC+8. An end at `:59` seconds is inclusive and gets one second added. |
+| ChargeCategory | `ActionType`: `prepay*`, `pre_*` and `ripay*` map to Purchase, `recon*` to Adjustment, anything else to Usage |
+| ServiceName | `BusinessCodeName` without its trailing acronym ("Cloud Virtual Machine CVM" becomes "Cloud Virtual Machine") |
+| RegionId / AvailabilityZone | `RegionId` (Tencent's numeric id; `RegionName` goes in `x_RegionName`) / `ZoneName` |
+| ResourceId / ResourceName | `ResourceId` / `ResourceName` |
+| ListCost | component `Cost`, left empty when Tencent shows `-` (contract price) |
+| BilledCost | component `RealCost`, after discounts. `DescribeBillSummaryByPayMode`'s `RealTotalCost` sums the same figure. |
+| EffectiveCost | from `Normalize`: BilledCost, or spread over the term for a multi-day Purchase |
+| PricingQuantity / Unit | `UsedAmount` / `UsedAmountUnit` |
+| BillingCurrency | the prefix of `PriceUnit` (e.g. `USD/core/hour`). The response has no currency field. A month in two currencies fails, and a month with none is taken as USD. |
+| Tags | `Tags` (`TagKey` to `TagValue`) |
+| x_ columns | `VoucherPayAmount`, `CashPayAmount`, `IncentivePayAmount`, `TransferPayAmount`, `Discount`, `DiscountType`, `ActionType`, `BillId`, `ComponentCodeName` and others |
+
+Vouchers pay for a line. They do not lower `RealCost`, so BilledCost includes
+them and `x_VoucherPayAmount` records how much they paid.
+
+Not confirmed from Tencent's docs: the time zone of `FeeBeginTime` and
+`FeeEndTime` (assumed UTC+8, as Tencent's billing day is), the full set of
+`ActionType` codes (only `pre_to_post` appears in the docs), and the exact
+action strings `finance:DescribeBillDetail` and
+`finance:DescribeBillSummaryByPayMode` (the docs show only
+`finance:DescribeBill*`). Check the first real load against the console's
+bill and its `reconcile_status`.
+
 ## Tencent Cloud client-owned payer (ADR-0018, #182)
 
 Some Tenants own their Tencent Cloud organisation and pay its bill. Keel reads

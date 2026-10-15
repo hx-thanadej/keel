@@ -555,6 +555,7 @@ var cloudMethods = map[string]string{
 	"tencent.IdentityCenter.UserID":                                     read,
 	"tencent.Inventory.InstanceTypes":                                   read,
 	"tencent.Invoices.InvoiceTotal":                                     read,
+	"tencent.BillDetails.MonthLines":                                    read,
 	"tencent.KeyAPI.ListAccessKeysWithContext":                          read,
 	"tencent.KeyAPI.ListUsersWithContext":                               read,
 	"tencent.KeyAPI.UpdateAccessKeyWithContext":                         "leaked key",
@@ -627,6 +628,7 @@ var cloudMethods = map[string]string{
 // adapter, where cloudMethods classifies it.
 var sdkOutsideCloud = map[string]string{
 	"cmd/keel-api: common.Provider":                          read,
+	"internal/cost: billing.BillDetail":                      read,
 	"internal/utilisation: common.Provider":                  read,
 	"internal/utilisation: monitor.Dimension":                read,
 	"internal/utilisation: monitor.GetMonitorDataRequest":    read,
