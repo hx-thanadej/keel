@@ -35,6 +35,7 @@ rules := {
 	"service.archive": {"platform_admin", "team_lead"},
 	"activity.read": read_roles,
 	"cloud_account.discover": {"platform_admin"},
+	"cloud_account.register": {"platform_admin"},
 	"catalog_sync.read": {"platform_admin", "security_lead"},
 	"cost.read": read_roles,
 	"budget.read": read_roles,

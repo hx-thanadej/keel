@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { api, ApiError, type CloudAccount, type Environment, type Project, type ReadOnlyRole, type RoleHealth, type Tenant } from './api'
 import { accountsIn, grantsBlocking, ownershipOf, readOnlyReason } from './ownership'
 import { GuardedButton, OwnershipBadge } from './OwnershipBadge'
+import { DiscoveredAccounts } from './DiscoveredAccounts'
 
 type Row = { project: Project; envs: Environment[] }
 /** What the signed-in principal may change in this Tenant; a Tenant Member (viewer) gets none of it. */
@@ -9,7 +10,8 @@ export type CatalogRights = { vend: boolean; wasteCleanup: boolean; ownership: b
 
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : null)
 
-export function TenantView({ tenant, rights }: { tenant: Tenant; rights: CatalogRights }) {
+/** discovery lists the organisations discovered accounts may be registered into; set only where discovery runs. */
+export function TenantView({ tenant, rights, discovery }: { tenant: Tenant; rights: CatalogRights; discovery?: Tenant[] }) {
   const [rows, setRows] = useState<Row[] | null>(null)
   const [accounts, setAccounts] = useState<CloudAccount[]>([])
   const [health, setHealth] = useState<RoleHealth[]>([])
@@ -41,8 +43,14 @@ export function TenantView({ tenant, rights }: { tenant: Tenant; rights: Catalog
     }
   }
 
-  if (!rows) return error ? <p className="notice error">{error}</p> : <p className="muted">Loading projects…</p>
-  if (rows.length === 0) return <p className="muted">No projects yet.</p>
+  const discovered = discovery && <DiscoveredAccounts home={tenant} targets={discovery} onRegistered={() => setReload((n) => n + 1)} />
+  if (!rows || rows.length === 0)
+    return (
+      <section>
+        {discovered}
+        {!rows ? error ? <p className="notice error">{error}</p> : <p className="muted">Loading projects…</p> : <p className="muted">No projects yet.</p>}
+      </section>
+    )
 
   const unassigned = accounts.filter((a) => a.environment_id === null)
   const groups: [string, CloudAccount[]][] = [
@@ -54,6 +62,7 @@ export function TenantView({ tenant, rights }: { tenant: Tenant; rights: Catalog
   )
   return (
     <section>
+      {discovered}
       {error && (
         <p className="notice error" role="alert">
           {error}

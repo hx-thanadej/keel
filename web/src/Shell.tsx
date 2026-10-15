@@ -121,6 +121,7 @@ export function Shell({ me, onSignedOut }: { me: Principal; onSignedOut: () => v
               <TenantView
                 key={current.id}
                 tenant={current}
+                discovery={current.is_home && isAdmin(current.id) ? tenants.filter((t) => isAdmin(t.id)) : undefined}
                 rights={{
                   vend: me.bindings.some((b) => b.tenant_id === current.id && b.role === 'platform_admin'),
                   wasteCleanup: me.bindings.some((b) => b.tenant_id === current.id && (b.role === 'platform_admin' || b.role === 'team_lead')),
