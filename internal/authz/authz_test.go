@@ -70,8 +70,6 @@ func TestDecide(t *testing.T) {
 		{"team lead creates environment", principal(home, true, bind(auth.RoleTeamLead, tat, teamA)), "environment.create", authz.Resource{Type: "environment", TenantID: tat, TeamID: teamA}, true},
 		{"only platform admin registers cloud accounts", principal(home, true, bind(auth.RoleTeamLead, tat, teamA)), "cloud_account.create", authz.Resource{Type: "cloud_account", TenantID: tat, TeamID: teamA}, false},
 		{"platform admin bound in tenant registers cloud account", principal(home, true, bind(auth.RolePlatformAdmin, tat)), "cloud_account.create", authz.Resource{Type: "cloud_account", TenantID: tat}, true},
-		{"platform admin registers discovered accounts", principal(home, true, bind(auth.RolePlatformAdmin, tat)), "cloud_account.register", authz.Resource{Type: "cloud_account", TenantID: tat}, true},
-		{"team lead cannot register discovered accounts", principal(home, true, bind(auth.RoleTeamLead, tat)), "cloud_account.register", authz.Resource{Type: "cloud_account", TenantID: tat}, false},
 		{"platform admin manages teams", principal(home, true, bind(auth.RolePlatformAdmin, home)), "team.create", authz.Resource{Type: "team", TenantID: home}, true},
 		{"team lead cannot manage teams", principal(home, true, bind(auth.RoleTeamLead, home)), "team.create", authz.Resource{Type: "team", TenantID: home}, false},
 		{"several matching bindings", principal(home, true, bind(auth.RoleTeamLead, tat, teamA), bind(auth.RoleEngineer, tat, teamA)), "service.create", authz.Resource{Type: "service", TenantID: tat, TeamID: teamA}, true},

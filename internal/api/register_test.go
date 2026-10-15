@@ -1,11 +1,42 @@
 package api_test
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/auth"
+	"github.com/hx-thanadej/keel/internal/authz"
+	"github.com/hx-thanadej/keel/internal/catalog"
+	"github.com/hx-thanadej/keel/internal/discovery"
+	"github.com/hx-thanadej/keel/internal/store/storetest"
 )
+
+// discoveredSetup serves the API with a fake Tencent organisation holding ids,
+// already discovered into the home Tenant.
+func discoveredSetup(t *testing.T, ids ...string) (client, string) {
+	t.Helper()
+	s := storetest.New(t)
+	az, err := authz.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := s.CreateTenant(t.Context(), "harmonyx", "HarmonyX", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	org := fakeOrg{}
+	for _, id := range ids {
+		org = append(org, discovery.Account{Provider: "tencent", ExternalID: id, Name: "acct-" + id})
+	}
+	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: catalog.New(s, az), Discovery: map[string]discovery.Source{"tencent": org}}))
+	t.Cleanup(srv.Close)
+	c := client{t: t, url: srv.URL}
+	st, body := c.as(homeAdmin(home)).do("POST", "/v1/tenants/"+home+"/discoveries/tencent", map[string]any{})
+	mustStatus(t, st, 200, body)
+	return c, home
+}
 
 func registerBody(team string, accounts ...map[string]any) map[string]any {
 	return map[string]any{"team_id": team, "why": "found by discovery", "accounts": accounts}
@@ -25,7 +56,7 @@ func outcomes(t *testing.T, body map[string]any) map[string]map[string]any {
 }
 
 func TestRegisterDiscoveredAccounts(t *testing.T) {
-	c, home := setup(t)
+	c, home := discoveredSetup(t, "200046202634", "200048351622", "200045645249", "200099999999", "200088888888", "200077777777", "200066666666", "200055555555", "1", "2", "3")
 	admin := c.as(homeAdmin(home))
 	_, body := admin.do("POST", "/v1/tenants", map[string]any{"slug": "tat", "name": "TAT"})
 	tat := body["id"].(string)
@@ -160,10 +191,109 @@ func TestRegisterDiscoveredAccounts(t *testing.T) {
 	mustStatus(t, st, 403, body)
 	st, body = admin.do("POST", path, registerBody(team, discovered("200055555555", "tat-crm-stg", "tat-crm", "stg")))
 	mustStatus(t, st, 403, body)
-	if activities()["keel.cloud_account.register.denied"] != 2 {
+	denials := 0
+	for typ, n := range activities() {
+		if strings.HasSuffix(typ, ".denied") {
+			denials += n
+		}
+	}
+	if denials != 2 {
 		t.Errorf("denials not logged: %v", activities())
 	}
 
 	st, body = inTAT.do("POST", path, map[string]any{"team_id": team, "accounts": []any{}})
 	mustStatus(t, st, 400, body)
+}
+
+// A Team-scoped admin may not use registration to reach past its Teams: each
+// step is authorised as its own endpoint would authorise it, all before any
+// write.
+func TestRegisterAuthorizesEachStepLikeItsEndpoint(t *testing.T) {
+	c, home := discoveredSetup(t, "200011111111", "200022222222", "200033333333")
+	admin := c.as(homeAdmin(home))
+	_, body := admin.do("POST", "/v1/tenants", map[string]any{"slug": "tat", "name": "TAT"})
+	tat := body["id"].(string)
+	inTAT := c.as(homeAdmin(home, auth.Binding{Role: auth.RolePlatformAdmin, TenantID: tat}))
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/teams", map[string]any{"slug": "crm", "name": "CRM"})
+	crm := body["id"].(string)
+	_, body = inTAT.do("POST", "/v1/tenants/"+tat+"/teams", map[string]any{"slug": "other", "name": "Other"})
+	other := body["id"].(string)
+	st, body := inTAT.do("POST", "/v1/tenants/"+tat+"/projects", map[string]any{"team_id": other, "slug": "other-proj", "name": "Other"})
+	mustStatus(t, st, 201, body)
+	otherProj := body["id"].(string)
+
+	crmAdmin := c.as(homeAdmin(home, auth.Binding{Role: auth.RolePlatformAdmin, TenantID: tat, TeamIDs: []string{crm}}))
+	path := "/v1/tenants/" + tat + "/cloud-accounts/register"
+	envsOf := func() int {
+		_, body := inTAT.do("GET", "/v1/tenants/"+tat+"/projects/"+otherProj+"/environments", nil)
+		return len(items(t, body))
+	}
+	accounts := func() int {
+		_, body := inTAT.do("GET", "/v1/tenants/"+tat+"/cloud-accounts", nil)
+		return len(items(t, body))
+	}
+
+	// The per-object endpoints deny this principal, so registration must too.
+	st, body = crmAdmin.do("POST", "/v1/tenants/"+tat+"/projects/"+otherProj+"/environments", map[string]any{"name": "sneaky"})
+	mustStatus(t, st, 403, body)
+	st, body = crmAdmin.do("POST", path, registerBody(crm, discovered("200011111111", "sneaky", "other-proj", "sneaky")))
+	mustStatus(t, st, 403, body)
+	st, body = crmAdmin.do("POST", path, registerBody(crm, discovered("200022222222", "loose", "", "")))
+	mustStatus(t, st, 403, body)
+	// One denied account denies the batch: its allowed neighbour is not written.
+	st, body = crmAdmin.do("POST", path, registerBody(crm, discovered("200033333333", "mine", "crm-new", "dev"), discovered("200011111111", "sneaky", "other-proj", "sneaky")))
+	mustStatus(t, st, 403, body)
+	if n, a := envsOf(), accounts(); n != 0 || a != 0 {
+		t.Fatalf("denied registration wrote %d environments and %d accounts", n, a)
+	}
+	_, body = inTAT.do("GET", "/v1/tenants/"+tat+"/projects", nil)
+	if p := items(t, body); len(p) != 1 {
+		t.Fatalf("denied registration created projects: %v", p)
+	}
+
+	// A Tenant-wide admin registers into another Team's existing Project; the
+	// request's team only owns new Projects.
+	st, body = inTAT.do("POST", path, registerBody(crm, discovered("200011111111", "other-dev", "other-proj", "dev"), discovered("200022222222", "crm-dev", "crm-app", "dev")))
+	mustStatus(t, st, 200, body)
+	got := outcomes(t, body)
+	if got["200011111111"]["status"] != "registered" || got["200011111111"]["project_created"] != false {
+		t.Errorf("existing project: %v", got["200011111111"])
+	}
+	if got["200022222222"]["status"] != "registered" || got["200022222222"]["project_created"] != true {
+		t.Errorf("new project: %v", got["200022222222"])
+	}
+	_, body = inTAT.do("GET", "/v1/tenants/"+tat+"/projects", nil)
+	for _, p := range items(t, body) {
+		want := map[string]string{"other-proj": other, "crm-app": crm}[p["slug"].(string)]
+		if p["team_id"] != want {
+			t.Errorf("project %v owned by %v, want %s", p["slug"], p["team_id"], want)
+		}
+	}
+}
+
+// Registration is for accounts discovery found; any other id goes through
+// POST /cloud-accounts.
+func TestRegisterOnlyDiscoveredAccounts(t *testing.T) {
+	c, home := discoveredSetup(t, "200011111111")
+	admin := c.as(homeAdmin(home))
+	path := "/v1/tenants/" + home + "/cloud-accounts/register"
+	st, body := admin.do("POST", path, registerBody("", discovered("200011111111", "found", "", ""), discovered("999999999999", "invented", "", ""),
+		map[string]any{"provider": "aws", "external_id": "200011111111", "name": "wrong provider"}))
+	mustStatus(t, st, 200, body)
+	got := map[string]map[string]any{}
+	for _, o := range items(t, body) {
+		got[o["provider"].(string)+"/"+o["external_id"].(string)] = o
+	}
+	if got["tencent/200011111111"]["status"] != "registered" {
+		t.Errorf("discovered: %v", got["tencent/200011111111"])
+	}
+	for _, k := range []string{"tencent/999999999999", "aws/200011111111"} {
+		if o := got[k]; o["status"] != "failed" || !strings.Contains(o["error"].(string), "not found by discovery") {
+			t.Errorf("%s: %v", k, o)
+		}
+	}
+	_, body = admin.do("GET", "/v1/tenants/"+home+"/cloud-accounts", nil)
+	if a := items(t, body); len(a) != 1 {
+		t.Errorf("cloud accounts = %v", a)
+	}
 }
