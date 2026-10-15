@@ -69,12 +69,13 @@ type BillSync struct {
 
 // SyncedLoad reports one load made by a sync run.
 type SyncedLoad struct {
-	LoadID    string    `json:"load_id"`
-	Period    time.Time `json:"period"`
-	Final     bool      `json:"final"`
-	Lines     int       `json:"lines"`
-	Dropped   int       `json:"dropped"`
-	Reconcile string    `json:"reconcile"`
+	LoadID      string    `json:"load_id"`
+	Period      time.Time `json:"period"`
+	Final       bool      `json:"final"`
+	Lines       int       `json:"lines"`
+	Dropped     int       `json:"dropped"`
+	Unallocated int       `json:"unallocated"`
+	Reconcile   string    `json:"reconcile"`
 }
 
 // SyncReport summarises a run.
@@ -320,7 +321,8 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 			}
 		}
 		if overlap != nil {
-			changed, err := b.block(ctx, blockedIn, p, files, pair, overlap, now())
+			title := fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, p.Format("2006-01"), pair[0], pair[1], b.overlapHint())
+			changed, err := b.block(ctx, blockedIn, p, files, title, "keel.cost.bill_files_overlap", overlap, now())
 			if err != nil {
 				return rep, err
 			}
@@ -339,14 +341,10 @@ func (b *BillSync) Run(ctx context.Context) (SyncReport, error) {
 		if err != nil {
 			return rep, fmt.Errorf("load %s: %w", p.Format("2006-01"), err)
 		}
-		if err := b.Ingester.Store.InTenant(ctx, blockedIn, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'period loaded'
-				WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, b.blockedFingerprint(p), now())
-			return err
-		}); err != nil {
+		if err := b.resolveBlocked(ctx, blockedIn, p, now()); err != nil {
 			return rep, err
 		}
-		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Dropped: res.Dropped, Reconcile: "pending"}
+		sl := SyncedLoad{LoadID: res.LoadID, Period: p, Final: final, Lines: res.Lines, Dropped: res.Dropped, Unallocated: res.Unallocated, Reconcile: "pending"}
 		if b.Invoices != nil {
 			if sl.Reconcile, err = b.reconcile(ctx, home, res.LoadID, p); err != nil {
 				return rep, err
@@ -371,35 +369,45 @@ func (b *BillSync) blockedFingerprint(period time.Time) string {
 	return "bill_sync_blocked:" + b.Provider + "/" + b.BillingAccountID + "/" + period.Format("2006-01")
 }
 
-// block keeps a period whose files overlap open as one Finding, resolved by
-// the period's next load. It records an Activity and reports changed only
-// when the Finding is new or the period's files differ from those it last
-// saw, so a period retried every hour after finality alerts once.
-func (b *BillSync) block(ctx context.Context, tenant string, period time.Time, files []string, pair [2]string, cause error, now time.Time) (changed bool, err error) {
+// resolveBlocked closes the period's bill_sync_blocked Finding: it loaded.
+func (b *BillSync) resolveBlocked(ctx context.Context, tenant string, period, now time.Time) error {
+	return b.Ingester.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE findings SET status = 'resolved', resolved_at = $2, resolution = 'period loaded'
+			WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, b.blockedFingerprint(period), now)
+		return err
+	})
+}
+
+// block keeps a period that cannot load open as one Finding, resolved by the
+// period's next load. It records an Activity of activityType and reports
+// changed only when the Finding is new or the period's files or cause
+// differ from those it last saw, so a period retried every hour alerts once.
+func (b *BillSync) block(ctx context.Context, tenant string, period time.Time, files []string, title, activityType string, cause error, now time.Time) (changed bool, err error) {
 	fp := b.blockedFingerprint(period)
 	month := period.Format("2006-01")
 	err = b.Ingester.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
 		var seen []string
-		err := tx.QueryRow(ctx, `SELECT detail->'files' FROM findings WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp).Scan(&seen)
+		var seenCause string
+		err := tx.QueryRow(ctx, `SELECT detail->'files', coalesce(detail->>'error', '') FROM findings WHERE tenant_id = current_tenant_id() AND fingerprint = $1 AND status = 'open'`, fp).
+			Scan(&seen, &seenCause)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			changed = true
 		case err != nil:
 			return err
 		default:
-			changed = !slices.Equal(seen, files)
+			changed = !slices.Equal(seen, files) || seenCause != cause.Error()
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO findings (tenant_id, kind, fingerprint, severity, title, detail, first_seen_at)
 			VALUES ($1, 'bill_sync_blocked', $2, 'high', $3, jsonb_build_object('provider', $4::text, 'billing_account', $5::text, 'period', $6::text, 'files', to_jsonb($7::text[]), 'error', $8::text), $9)
 			ON CONFLICT (tenant_id, fingerprint) WHERE status = 'open' DO UPDATE SET last_seen_at = excluded.first_seen_at, detail = excluded.detail`,
-			tenant, fp, fmt.Sprintf("%s bill sync blocked for %s %s: %s and %s %s", b.Provider, b.BillingAccountID, month, pair[0], pair[1], b.overlapHint()),
-			b.Provider, b.BillingAccountID, month, files, cause.Error(), now); err != nil {
+			tenant, fp, title, b.Provider, b.BillingAccountID, month, files, cause.Error(), now); err != nil {
 			return err
 		}
 		if !changed {
 			return nil
 		}
-		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/cost", Type: "keel.cost.bill_files_overlap",
+		_, err = activity.Record(ctx, tx, activity.Activity{TenantID: tenant, Source: "keel/cost", Type: activityType,
 			Subject: "cost_period/" + b.Provider + "/" + b.BillingAccountID + "/" + month, Operation: "LoadBill",
 			Kind: activity.Read, Actor: actor, Outcome: activity.Failure, StatusDetail: cause.Error()})
 		return err

@@ -9,15 +9,15 @@ import (
 
 	billing "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing/v20180709"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // Invoices reads a payer's monthly total for reconciliation (#32) via
 // DescribeBillSummaryByPayMode. Credentials must belong to (or be allowed to
 // read) the payer account; member accounts see nothing (research/04).
 type Invoices struct {
-	Region string
-	Creds  common.Provider
+	Region   string
+	Creds    common.Provider
+	Endpoint string // scheme://host, for tests
 }
 
 // InvoiceTotal sums RealTotalCost (after discounts) across pay modes.
@@ -26,7 +26,7 @@ func (i Invoices) InvoiceTotal(ctx context.Context, payerUIN string, period time
 	if err != nil {
 		return "", false, fmt.Errorf("tencent credentials: %w", err)
 	}
-	client, err := billing.NewClient(cred, i.Region, profile.NewClientProfile())
+	client, err := billing.NewClient(cred, i.Region, billingProfile(i.Endpoint))
 	if err != nil {
 		return "", false, err
 	}

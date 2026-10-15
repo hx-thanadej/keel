@@ -21,11 +21,14 @@
 //	KEEL_ARCHIVE_ENDPOINT tencent: e.g. cos.ap-bangkok.myqcloud.com; aws: optional, default s3.<region>.amazonaws.com
 //	KEEL_ARCHIVE_RETENTION_DAYS  aws: COMPLIANCE retention per object, default 2555 (7 years), minimum 365
 //	                    credentials are keyless: aws web identity or instance role; tencent STS
-//	KEEL_TENCENT_BILL_BUCKET   COS bucket where the payer's Bill Storage delivers FOCUS bills
-//	KEEL_TENCENT_BILL_PREFIX   object prefix of the FOCUS bill files
+//	KEEL_TENCENT_BILL_SOURCE   cos (default: FOCUS files in a COS bucket) | api (pull DescribeBillDetail; needs only KEEL_TENCENT_PAYER_UIN)
+//	KEEL_TENCENT_BILL_BUCKET   cos: COS bucket where the payer's Bill Storage delivers FOCUS bills
+//	KEEL_TENCENT_BILL_PREFIX   cos: object prefix of the FOCUS bill files
 //	KEEL_TENCENT_PAYER_UIN     payer account id (FOCUS BillingAccountId)
 //	KEEL_TENCENT_BILL_ROLE     name of the payer CAM role Keel's base identity assumes for bill sync and invoices
-//	KEEL_TENCENT_BILL_MODE     per-day (default) | cumulative (daily FOCUS files are month-to-date); confirm on first delivery
+//	KEEL_TENCENT_BILL_CURRENCY api: optional ISO 4217 billing currency of the payer; a pulled line naming another blocks the month.
+//	                           Unset, the currency comes from the lines' PriceUnit, and a month naming none or several blocks.
+//	KEEL_TENCENT_BILL_MODE     cos: per-day (default) | cumulative (daily FOCUS files are month-to-date); confirm on first delivery
 //	KEEL_TENCENT_REGION        region for billing API and COS (default ap-bangkok)
 //	                           client payers (ADR-0018) are data, not env: client_payers rows on client-owned Cloud Accounts
 //	KEEL_AWS_BILL_BUCKET      S3 bucket of the AWS Data Exports FOCUS 1.2 export (CSV)
@@ -1174,56 +1177,31 @@ func printReport(r integrity.Report) error {
 	return nil
 }
 
-// startBillSync loads the Tencent payer's FOCUS bills hourly and reconciles
-// them against the billing API (#31–#33).
+// startBillSync loads the Tencent payer's bill hourly, from COS FOCUS files
+// or the billing API, and reconciles it against the invoice (#31–#33, #252).
 func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) error {
-	bucket := os.Getenv("KEEL_TENCENT_BILL_BUCKET")
-	if bucket == "" {
-		return nil
-	}
-	payer := os.Getenv("KEEL_TENCENT_PAYER_UIN")
-	if payer == "" {
-		return errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_BUCKET")
-	}
-	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
-	creds, err := billCredentials(st, tencent.Credentials(), payer, os.Getenv("KEEL_TENCENT_BILL_ROLE"), region, "")
-	if err != nil {
+	run, err := tencentBillRun(st, tencent.Credentials(), "")
+	if err != nil || run == nil {
 		return err
 	}
-	objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
-		Creds: archive.Refreshing(tencent.STS{Creds: creds}, 10*time.Minute)})
-	if err != nil {
-		return err
-	}
-	mode := cost.PerDayFiles
-	switch os.Getenv("KEEL_TENCENT_BILL_MODE") {
-	case "", "per-day":
-	case "cumulative":
-		mode = cost.CumulativeFiles
-	default:
-		return errors.New("KEEL_TENCENT_BILL_MODE must be per-day or cumulative")
-	}
-	bs := &cost.BillSync{Ingester: &cost.Ingester{Store: st}, Objects: billObjects{objs}, Provider: "tencent", BillingAccountID: payer,
-		Prefix: os.Getenv("KEEL_TENCENT_BILL_PREFIX"), Mode: mode, Invoices: tencent.Invoices{Region: region, Creds: creds}}
 	go func() {
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {
-			// A blocked period (overlapping per-day files) still leaves the
-			// other periods' loads to reconcile and evaluate. Run errors on a
-			// block only when it is new or its files changed; its Finding
-			// stays open until the period loads.
-			rep, err := bs.Run(ctx)
+			// A blocked period (overlapping per-day files) or a failed pull
+			// still leaves the other periods' loads to reconcile and
+			// evaluate. A block errors only when it is new or its files
+			// changed; its Finding stays open until the period loads.
+			loads, err := run(ctx)
 			if err != nil {
 				slog.Error("ALERT tencent bill sync failed", "err", err)
 			}
-			slog.Info("tencent bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads), "skipped", len(rep.Skipped), "not_focus", rep.NotFOCUS, "blocked", rep.Blocked)
-			for _, l := range rep.Loads {
+			for _, l := range loads {
 				if l.Reconcile == "mismatch" {
 					slog.Error("ALERT tencent bill does not reconcile with invoice", "period", l.Period.Format("2006-01"), "load", l.LoadID)
 				}
 			}
-			if len(rep.Loads) > 0 {
+			if len(loads) > 0 {
 				evaluate(ctx, ev)
 			}
 			select {
@@ -1234,6 +1212,81 @@ func startBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator) er
 		}
 	}()
 	return nil
+}
+
+// tencentBillRun builds one run of Keel's own Tencent payer's bill sync from
+// KEEL_TENCENT_BILL_SOURCE, or nil when bill sync is off. base is the
+// identity that reads the bill, directly or by assuming KEEL_TENCENT_BILL_ROLE.
+// endpoint overrides the STS and billing API hosts (scheme://host), for tests.
+func tencentBillRun(st *store.Store, base common.Provider, endpoint string) (func(context.Context) ([]cost.SyncedLoad, error), error) {
+	bucket := os.Getenv("KEEL_TENCENT_BILL_BUCKET")
+	payer := os.Getenv("KEEL_TENCENT_PAYER_UIN")
+	region := envOr("KEEL_TENCENT_REGION", "ap-bangkok")
+	source := envOr("KEEL_TENCENT_BILL_SOURCE", "cos")
+	currency := os.Getenv("KEEL_TENCENT_BILL_CURRENCY")
+	switch source {
+	case "cos":
+		if bucket == "" {
+			return nil, nil
+		}
+		if payer == "" {
+			return nil, errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_BUCKET")
+		}
+		if currency != "" {
+			return nil, errors.New("KEEL_TENCENT_BILL_CURRENCY applies only to KEEL_TENCENT_BILL_SOURCE=api; FOCUS files name their currency")
+		}
+	case "api":
+		if payer == "" {
+			return nil, errors.New("KEEL_TENCENT_PAYER_UIN is required with KEEL_TENCENT_BILL_SOURCE=api")
+		}
+		for _, v := range []string{"KEEL_TENCENT_BILL_BUCKET", "KEEL_TENCENT_BILL_PREFIX", "KEEL_TENCENT_BILL_MODE"} {
+			if os.Getenv(v) != "" {
+				return nil, fmt.Errorf("%s applies only to KEEL_TENCENT_BILL_SOURCE=cos; unset it with source api", v)
+			}
+		}
+		if currency != "" {
+			if _, err := cost.ParseCurrency(currency); err != nil {
+				return nil, fmt.Errorf("KEEL_TENCENT_BILL_CURRENCY: %w", err)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("KEEL_TENCENT_BILL_SOURCE must be cos or api, not %q", source)
+	}
+	creds, err := billCredentials(st, base, payer, os.Getenv("KEEL_TENCENT_BILL_ROLE"), region, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	invoices := tencent.Invoices{Region: region, Creds: creds, Endpoint: endpoint}
+	in := &cost.Ingester{Store: st}
+	if source == "api" {
+		bp := &cost.BillPull{Ingester: in, Provider: "tencent", BillingAccountID: payer, Invoices: invoices,
+			Details: &tencent.BillDetails{Region: region, Creds: creds, Endpoint: endpoint, Currency: currency}}
+		return func(ctx context.Context) ([]cost.SyncedLoad, error) {
+			rep, err := bp.Run(ctx)
+			slog.Info("tencent bill pull", "loads", len(rep.Loads), "unchanged", rep.Unchanged, "empty", rep.Empty, "blocked", rep.Blocked)
+			return rep.Loads, err
+		}, nil
+	}
+	objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
+		Creds: archive.Refreshing(tencent.STS{Creds: creds}, 10*time.Minute)})
+	if err != nil {
+		return nil, err
+	}
+	mode := cost.PerDayFiles
+	switch os.Getenv("KEEL_TENCENT_BILL_MODE") {
+	case "", "per-day":
+	case "cumulative":
+		mode = cost.CumulativeFiles
+	default:
+		return nil, errors.New("KEEL_TENCENT_BILL_MODE must be per-day or cumulative")
+	}
+	bs := &cost.BillSync{Ingester: in, Objects: billObjects{objs}, Provider: "tencent", BillingAccountID: payer,
+		Prefix: os.Getenv("KEEL_TENCENT_BILL_PREFIX"), Mode: mode, Invoices: invoices}
+	return func(ctx context.Context) ([]cost.SyncedLoad, error) {
+		rep, err := bs.Run(ctx)
+		slog.Info("tencent bill sync", "new_files", rep.NewFiles, "loads", len(rep.Loads), "skipped", len(rep.Skipped), "not_focus", rep.NotFOCUS, "blocked", rep.Blocked)
+		return rep.Loads, err
+	}, nil
 }
 
 // billCredentials is the identity that reads the payer's bills and invoices.
