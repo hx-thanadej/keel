@@ -85,6 +85,9 @@ func (c *ClientBillSync) Run(ctx context.Context) ([]ClientSync, error) {
 	}
 	if c.Ready != nil {
 		if err := c.keelReady(ctx, len(payers)); err != nil {
+			for _, p := range payers {
+				err = errors.Join(err, c.blocked(ctx, p, ReasonKeelIdentity))
+			}
 			return nil, err
 		}
 	}
@@ -117,19 +120,19 @@ func (c *ClientBillSync) one(ctx context.Context, p ClientPayer) (ClientSync, er
 	}
 	if p.Bucket == "" {
 		cs.NoDelivery = true
-		return cs, c.noDelivery(ctx, p, "no Bill Storage bucket is recorded for this payer")
+		return cs, errors.Join(c.noDelivery(ctx, p, "no Bill Storage bucket is recorded for this payer"), c.blocked(ctx, p, ReasonNoBucket))
 	}
 	objs, inv, err := c.Connect(p)
 	var roleErr *RoleError
 	if errors.As(err, &roleErr) {
-		return cs, errors.Join(err, c.roleUnusable(ctx, p, err))
+		return cs, errors.Join(err, c.roleUnusable(ctx, p, err), c.blocked(ctx, p, ReasonRoleUnusable))
 	}
 	if err := c.assumed(ctx, p); err != nil {
 		return cs, err
 	}
 	if err != nil {
 		cs.NoDelivery = true
-		return cs, errors.Join(err, c.noDelivery(ctx, p, "Keel assumed the role but cannot open the bucket: "+err.Error()))
+		return cs, errors.Join(err, c.noDelivery(ctx, p, "Keel assumed the role but cannot open the bucket: "+err.Error()), c.blocked(ctx, p, ReasonBucketUnreadable))
 	}
 	bs := &BillSync{Ingester: c.Ingester, Objects: objs, Provider: c.Provider, BillingAccountID: p.PayerID,
 		Prefix: p.Prefix, Mode: p.Mode, Invoices: inv, Now: c.Now, Tenant: p.TenantID}
@@ -142,6 +145,12 @@ func (c *ClientBillSync) one(ctx context.Context, p ClientPayer) (ClientSync, er
 		return cs, c.noDelivery(ctx, p, fmt.Sprintf("bucket %s holds no bill files under prefix %q", p.Bucket, p.Prefix))
 	}
 	return cs, c.resolve(ctx, p, findings.BillDeliveryMissing, "bills delivered")
+}
+
+// blocked saves a payer's status when the run stops before its bills.
+func (c *ClientBillSync) blocked(ctx context.Context, p ClientPayer, reason string) error {
+	return recordSync(ctx, c.Ingester.Store, syncRun{tenant: p.TenantID, provider: c.Provider, account: p.PayerID, source: "files",
+		at: c.now(), state: RunBlocked, reason: reason})
 }
 
 func (c *ClientBillSync) now() time.Time {

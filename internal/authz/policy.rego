@@ -37,6 +37,7 @@ rules := {
 	"cloud_account.discover": {"platform_admin"},
 	"catalog_sync.read": {"platform_admin", "security_lead"},
 	"cost.read": read_roles,
+	"bill_sync.read": read_roles,
 	"budget.read": read_roles,
 	"finding.read": read_roles,
 	"recommendation.read": read_roles,

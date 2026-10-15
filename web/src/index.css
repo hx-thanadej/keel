@@ -166,3 +166,24 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .role-health dd { margin: 0; overflow-wrap: anywhere; }
 .role-health ul { margin: 0; padding-left: 16px; }
 @media (max-width: 640px) { .role-health { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- Bill sync status (#257) ---- */
+.sync { margin-top: 16px; }
+.sync h2 { font-size: 1.05rem; }
+.sync-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; justify-content: space-between; }
+.sync-head h3 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.sync-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 4px 0 8px; font-size: 0.9em; }
+.sync-meta time, .sync-empty time { text-decoration: underline dotted; cursor: help; }
+.sync-months { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.sync-months li { display: grid; grid-template-columns: 10.5em minmax(0, 1fr); gap: 4px 12px; align-items: baseline; padding-top: 8px; border-top: 1px solid var(--border); }
+.sync-months p, .sync-empty p { margin: 0 0 4px; overflow-wrap: anywhere; }
+.sync-headline { font-weight: 600; }
+.sync-code { font-size: 0.85em; }
+.sync-empty h2 { font-size: 1.05rem; margin: 0 0 6px; }
+.sync-details { margin-top: 8px; }
+.sync-details summary { cursor: pointer; color: var(--accent); }
+.sync-details[open] summary { margin-bottom: 8px; }
+.sync-discovery { padding-left: 18px; }
+@media (max-width: 640px) {
+  .sync-months li { grid-template-columns: 1fr; }
+}

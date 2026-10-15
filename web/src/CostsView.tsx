@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { finops, fmtMoney, type DailyCost } from './api'
 import { Breakdown } from './Breakdown'
+import { NoCostsForMonth } from './BillSyncStatus'
 
 const thisMonth = () => new Date().toISOString().slice(0, 7)
 
@@ -47,7 +48,7 @@ export function CostsView({ tenantId }: { tenantId: string }) {
         </a>
       </div>
       {error && <p className="notice error">{error}</p>}
-      {rows && rows.length === 0 && <p className="muted">No cost data for this month yet.</p>}
+      {rows && rows.length === 0 && <NoCostsForMonth key={month} tenantId={tenantId} month={month} />}
       {totals.length > 0 && (
         <div className="card table-wrap">
           <table className="data-table">
