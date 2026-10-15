@@ -38,19 +38,33 @@ read-only.
   role session assumed from one. The rule sits at the Tencent client layer
   (`internal/cloud/tencent/readonly.go`). A stored key is a `readOnly`
   credential, and a session assumed from a `readOnly` credential is
-  `readOnly` too, whatever the target role allows. Every SDK client the
-  package builds passes through `guard`. When the client's credential is
-  `readOnly`, `guard` installs a transport that sends only `Describe*`,
-  `List*`, `Get*` and `LookUp*` actions and `AssumeRole`, and refuses
-  everything else with `ErrReadOnly` before a byte leaves Keel. COS is not
-  behind the SDK, so the archive writer takes its credentials from
-  `WriteSTS`, which refuses a `readOnly` credential. Vending, landing-zone
-  remediation, CI identity sync, permission boundaries, leaked-key disable,
-  Identity Center grants, TCR, native budget mirrors, waste cleanup and
-  archive writes all refuse. `TestStoredKeyRefusesEveryWritePath` proves
-  each sends nothing, and `TestEverySDKClientIsGuarded` fails when a new
-  client skips `guard`. The list is an allow-list, so a write Keel adds
-  later is refused without anyone naming it.
+  `readOnly` too, whatever the target role allows. Every Tencent SDK
+  client in Keel, in any package, is built inside `guard`. When the
+  client's credential is `readOnly`, `guard` installs a transport that
+  sends only the exact `service:Action` reads Keel makes, plus
+  `sts:AssumeRole` and `sts:GetCallerIdentity`, and refuses everything else
+  with `ErrReadOnly` before a byte leaves Keel. The service comes from the
+  request's TC3 signature scope. Actions that mint a credential without the
+  mark (`sts:GetSessionToken`, `GetFederationToken`,
+  `AssumeRoleWithWebIdentity`, `AssumeRoleWithSAML`, `cam:CreateAccessKey`,
+  `tcr:CreateInstanceToken`) are refused even if someone lists them. Reads
+  Keel does not make, including ones that hand out access such as
+  `cvm:DescribeInstanceVncUrl`, are refused too. COS is not behind the SDK.
+  Bill reads use `archive.Reader`, which has no write method and whose
+  transport sends only GET and HEAD. The archive writer takes its
+  credentials from `WriteSTS`, which refuses a `readOnly` credential.
+  `TestStoredKeyRefusesEveryWritePath` and `TestStoredKeyMintsNoCredentials`
+  prove each refused call sends nothing. `TestEverySDKClientIsGuarded`
+  fails when any client in the module, `NewCommonClient` included, skips
+  `guard`. `TestReadsAreExactlyKeelsReads` fails when the allow-list and
+  the reads in Keel's code differ, so a write Keel adds later is refused
+  without anyone naming it, and a new read fails a test rather than
+  production.
+- **No write jobs.** With a stored connection at start, Keel does not start
+  vending, landing-zone, CI identity, boundary, leaked-key disable,
+  Identity Center grant, TCR token, budget mirror, waste cleanup or COS
+  archive jobs, and logs which it left off. The connection fills only the
+  settings reads use; it never fills `KEEL_TENCENT_VENDING_ROLE`.
 - **At rest.** The SecretId and SecretKey are sealed with AES-256-GCM under
   `KEEL_SECRETS_KEY`, a 32-byte key that lives in the platform secret store
   next to Keel's other secrets and never in the database. Each value has
@@ -96,7 +110,7 @@ Nothing in Keel enforces either schedule.
 | `KEEL_SECRETS_KEY` and a database copy leak together. | The key reads only what its CAM user may read. Give that user read-only CAM policies; Keel does not need more, since it never writes with the key. Rotate both. |
 | Keel's own code writes with the key. | The `guard` transport and `WriteSTS` refuse it, tested per write path. |
 | The key belongs to a different account from the one named. | "Test connection" calls `sts:GetCallerIdentity` and fails when the account is not the payer. |
-| A deployment with a stored key silently loses its write jobs. | Each refused write fails its job with `ErrReadOnly`, which names this ADR, so the refusal shows in the job's error. |
+| A deployment with a stored key silently loses its write jobs. | Keel logs at start which write jobs it did not start and why. A write that still reaches the client layer fails with `ErrReadOnly`, which names this ADR. |
 
 ## Considered options
 
@@ -117,8 +131,13 @@ Nothing in Keel enforces either schedule.
 - Keel holds one more long-lived secret, `KEEL_SECRETS_KEY`, and one stored
   cloud key. Its blast radius is what the CAM user may read.
 - Writes still need keyless identity. A deployment that relies on a stored
-  key runs discovery, cost and read jobs, and its write jobs report
-  `ErrReadOnly`.
-- The connection's regions, payer and member role fill unset
-  `KEEL_TENCENT_*` settings at start. Changing them takes effect on the
-  next restart; a key rotation takes effect at once.
+  key runs discovery, cost and read jobs, and does not start its write
+  jobs.
+- Which write jobs start is decided at start. A connection added while
+  Keel runs makes the base identity read-only at once, and the write jobs
+  already running fail with `ErrReadOnly` until the next restart stops them.
+- The connection's regions, payer and member role fill unset read
+  settings at start. Changing them takes effect on the next restart; a key
+  rotation takes effect the next time each client is built. The clients
+  built once at start (TCR, Identity Center) are write clients, which a
+  stored key does not start.

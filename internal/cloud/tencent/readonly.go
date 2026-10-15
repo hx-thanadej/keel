@@ -79,8 +79,8 @@ type sdkClient interface {
 }
 
 // guard takes a freshly built SDK client. When its credential is read-only,
-// every call but a read fails before it leaves Keel. Every client this
-// package builds passes through here (TestEverySDKClientIsGuarded).
+// every call but one of Keel's reads fails before it leaves Keel. Every SDK
+// client in Keel is built inside guard (TestEverySDKClientIsGuarded).
 func guard[C sdkClient](c C, err error) (C, error) {
 	if err != nil {
 		return c, err
@@ -91,12 +91,51 @@ func guard[C sdkClient](c C, err error) (C, error) {
 	return c, nil
 }
 
-// readsOnly sends only read actions. A request with no action header is not
-// known to be a read, so it is refused too.
+// reads are the only actions a read-only identity may send, as
+// service:Action: exactly the reads Keel makes (TestReadsAreExactlyKeelsReads).
+// sts:AssumeRole is one, because assumeRole marks the session it returns
+// read-only.
+var reads = set(
+	"advisor:DescribeStrategies", "advisor:DescribeTaskStrategyRisks",
+	"billing:DescribeBillDetail", "billing:DescribeBillSummaryByPayMode", "billing:DescribeBudget",
+	"cam:DescribeOIDCConfig", "cam:DescribeRoleList", "cam:GetPolicy", "cam:GetRole", "cam:GetRolePermissionBoundary",
+	"cam:ListAccessKeys", "cam:ListPolicies", "cam:ListUsers",
+	"cbs:DescribeDisks",
+	"clb:DescribeLoadBalancers", "clb:DescribeTargets",
+	"cloudaudit:LookUpEvents",
+	"cvm:DescribeInstances", "cvm:DescribeZoneInstanceConfigInfos",
+	"monitor:GetMonitorData",
+	"organization:DescribeOrganizationMembers", "organization:DescribeOrganizationNodes", "organization:DescribePolicy",
+	"organization:ListPolicies", "organization:ListPoliciesForTarget", "organization:ListRoleAssignments",
+	"organization:ListRoleConfigurations", "organization:ListUsers",
+	"sts:AssumeRole", "sts:GetCallerIdentity",
+	"tcr:DescribeImmutableTagRules", "tcr:DescribeNamespaces", "tcr:DescribeTagRetentionRules",
+	"vpc:DescribeAddresses",
+)
+
+// mints are actions that mint a credential which would not carry the
+// read-only mark. They are refused even if one is added to reads.
+var mints = set(
+	"sts:GetSessionToken", "sts:GetFederationToken", "sts:AssumeRoleWithWebIdentity", "sts:AssumeRoleWithSAML",
+	"cam:CreateAccessKey", "tcr:CreateInstanceToken",
+)
+
+func set(xs ...string) map[string]bool {
+	m := make(map[string]bool, len(xs))
+	for _, x := range xs {
+		m[x] = true
+	}
+	return m
+}
+
+// readsOnly sends only reads. The service comes from the request's TC3
+// signature scope, which the SDK computes; a request without one (an older
+// signature, or an unsigned call) is not known to be a read and is refused.
 type readsOnly struct{}
 
 func (readsOnly) RoundTrip(r *http.Request) (*http.Response, error) {
-	if a := r.Header.Get("X-TC-Action"); !isRead(a) {
+	a := service(r.Header.Get("Authorization")) + ":" + r.Header.Get("X-TC-Action")
+	if mints[a] || !reads[a] {
 		if r.Body != nil {
 			_ = r.Body.Close()
 		}
@@ -105,20 +144,17 @@ func (readsOnly) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-// isRead allows Describe*, List*, Get* and LookUp* calls, and AssumeRole,
-// whose session stays read-only (assumeRole marks it). GetFederationToken
-// mints a credential that would not carry the mark.
-func isRead(action string) bool {
-	if action == "AssumeRole" {
-		return true
+// service reads the service from a TC3-HMAC-SHA256 Authorization header,
+// whose credential scope is SecretId/date/service/tc3_request.
+func service(authorization string) string {
+	_, cred, ok := strings.Cut(authorization, "Credential=")
+	if !ok || !strings.HasPrefix(authorization, "TC3-HMAC-SHA256 ") {
+		return ""
 	}
-	if action == "GetFederationToken" {
-		return false
+	cred, _, _ = strings.Cut(cred, ",")
+	parts := strings.Split(cred, "/")
+	if len(parts) < 4 || parts[len(parts)-1] != "tc3_request" {
+		return ""
 	}
-	for _, p := range []string{"Describe", "List", "Get", "LookUp"} {
-		if strings.HasPrefix(action, p) && len(action) > len(p) {
-			return true
-		}
-	}
-	return false
+	return parts[len(parts)-2]
 }

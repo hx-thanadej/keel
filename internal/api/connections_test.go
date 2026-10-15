@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hx-thanadej/keel/internal/activity"
 	"github.com/hx-thanadej/keel/internal/api"
 	"github.com/hx-thanadej/keel/internal/auth"
 	"github.com/hx-thanadej/keel/internal/authz"
@@ -39,6 +40,8 @@ func testSealer(t *testing.T) *secrets.Sealer {
 	}
 	return s
 }
+
+var connActor = activity.Actor{Type: activity.ActorHuman, UID: "user:admin"}
 
 func noKeys(t *testing.T, body map[string]any) {
 	t.Helper()
@@ -144,7 +147,30 @@ func TestCloudConnectionsNeedSecretsKey(t *testing.T) {
 	st, b = admin.do("POST", "/v1/cloud-connections", map[string]any{"provider": "tencent", "name": "x", "payer_uin": "100000000001", "default_region": "ap-bangkok",
 		"keys": map[string]any{"secret_id": connSecretID, "secret_key": connSecretKey}})
 	mustStatus(t, st, 409, b)
-	if !strings.Contains(b["error"].(string), "KEEL_SECRETS_KEY") {
-		t.Fatalf("error %v", b)
+	if b["error"] != connections.ErrNoSecretsKey.Error() {
+		t.Fatalf("error %q, want %q", b["error"], connections.ErrNoSecretsKey.Error())
+	}
+}
+
+// TestUnopenableConnectionSaysWhatToDo: a connection sealed under a key
+// Keel no longer has fails its test with a 409 that tells the admin to add
+// it again, not a bare internal error.
+func TestUnopenableConnectionSaysWhatToDo(t *testing.T) {
+	s := storetest.New(t)
+	az, _ := authz.New()
+	home, _ := s.CreateTenant(t.Context(), "harmonyx", "HarmonyX", true)
+	identify := func(context.Context, connections.Keys, string) (string, error) { return "100000000001", nil }
+	c, err := connections.Service{Store: s, Sealer: testSealer(t), Identify: identify}.Create(t.Context(), connections.Input{Provider: "tencent", Name: "payer",
+		PayerUIN: "100000000001", DefaultRegion: "ap-bangkok", Keys: connections.Keys{SecretID: connSecretID, SecretKey: connSecretKey}}, connActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := &api.ConnectionDeps{Authz: az, Service: connections.Service{Store: s, Sealer: testSealer(t), Identify: identify}, Home: func(*http.Request) (string, error) { return home, nil }}
+	srv := httptest.NewServer(api.NewRouter(api.Info{}, api.Deps{Auth: headerAuth{}, Catalog: catalog.New(s, az), Connections: deps}))
+	t.Cleanup(srv.Close)
+	st, b := client{t: t, url: srv.URL}.as(homeAdmin(home)).do("POST", "/v1/cloud-connections/"+c.ID+"/test", nil)
+	mustStatus(t, st, 409, b)
+	if msg, _ := b["error"].(string); !strings.Contains(msg, "add it again") || strings.Contains(msg, "already exists") {
+		t.Fatalf("error %q", msg)
 	}
 }

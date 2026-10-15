@@ -4,8 +4,9 @@ A cloud connection is a Tencent CAM key pair a platform admin stores in
 Keel. Keel seals it under `KEEL_SECRETS_KEY` and uses it as its base Tencent
 identity, read-only. Writes (vending, landing-zone remediation, CI identity,
 boundaries, leaked-key disable, Identity Center grants, TCR, budget mirrors,
-waste cleanup, archive writes) still need keyless identity and refuse with a
-stored key.
+waste cleanup, archive writes) still need keyless identity. With a stored
+key Keel does not start those jobs, and logs at start which ones it left
+off (`Tencent write jobs not started`).
 
 ## 1. Set `KEEL_SECRETS_KEY`
 
@@ -38,9 +39,12 @@ organisation region, member role and the key. Press **Test connection**: it
 calls `sts:GetCallerIdentity` and passes when the key belongs to the payer.
 
 The organisation region, default region, payer UIN and member role fill
-`KEEL_TENCENT_ORG_REGION`, `KEEL_TENCENT_REGION`, `KEEL_TENCENT_PAYER_UIN`,
-`KEEL_TENCENT_VENDING_ROLE` and `KEEL_TENCENT_MEMBER_ROLE` when those are
-unset. Restart Keel after adding the connection or changing them.
+`KEEL_TENCENT_ORG_REGION`, `KEEL_TENCENT_REGION`, `KEEL_TENCENT_PAYER_UIN`
+and `KEEL_TENCENT_MEMBER_ROLE` when those are unset. These are the settings
+reads use: discovery, bills, Cloud Monitor, and break-glass and standing
+access audits, which read member accounts through the member role. The
+connection never fills `KEEL_TENCENT_VENDING_ROLE`. Restart Keel after
+adding the connection or changing them.
 
 ## 4. Rotate the Tencent key (every 90 days)
 
@@ -60,4 +64,5 @@ unset. Restart Keel after adding the connection or changing them.
 
 If `KEEL_SECRETS_KEY` is lost, the stored keys cannot be opened. Set a new
 `KEEL_SECRETS_KEY` and restart: Keel starts with an alert, and Tencent calls
-fail until a platform admin deletes the connection and adds it again.
+fail until a platform admin deletes the connection and adds it again. **Test
+connection** says so too.

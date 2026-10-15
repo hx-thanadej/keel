@@ -572,6 +572,7 @@ var cloudMethods = map[string]string{
 	"tencent.NewCVM":                                                    read,
 	"tencent.NewCloudAudit":                                             read,
 	"tencent.NewKeyAPI":                                                 read,
+	"tencent.NewMonitor":                                                read,
 	"tencent.NewOrgAPI":                                                 read,
 	"tencent.NewTCR":                                                    read,
 	"tencent.NewWaste":                                                  read,
@@ -636,14 +637,11 @@ var cloudMethods = map[string]string{
 var sdkOutsideCloud = map[string]string{
 	"cmd/keel-api: common.Provider":                          read,
 	"internal/cost: billing.BillDetail":                      read,
-	"internal/utilisation: common.Provider":                  read,
 	"internal/utilisation: monitor.Dimension":                read,
 	"internal/utilisation: monitor.GetMonitorDataRequest":    read,
 	"internal/utilisation: monitor.GetMonitorDataResponse":   read,
 	"internal/utilisation: monitor.Instance":                 read,
-	"internal/utilisation: monitor.NewClient":                read,
 	"internal/utilisation: monitor.NewGetMonitorDataRequest": read,
-	"internal/utilisation: profile.NewClientProfile":         read,
 }
 
 // TestEveryCloudMethodIsClassified keeps cloudMethods and sdkOutsideCloud

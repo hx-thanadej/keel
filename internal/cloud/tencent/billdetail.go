@@ -58,7 +58,7 @@ func (d *BillDetails) MonthLines(ctx context.Context, payer string, month time.T
 	if d.Backoff == nil {
 		cpf.RateLimitExceededRetryDuration = profile.ExponentialBackoff
 	}
-	client, err := billing.NewClient(cred, d.Region, cpf)
+	client, err := guard(billing.NewClient(cred, d.Region, cpf))
 	if err != nil {
 		return cost.BillMonth{}, err
 	}

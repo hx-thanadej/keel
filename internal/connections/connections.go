@@ -28,6 +28,9 @@ var (
 	// ErrNoSecretsKey means Keel has no KEEL_SECRETS_KEY to seal or open
 	// stored keys with.
 	ErrNoSecretsKey = errors.New("KEEL_SECRETS_KEY is not set, so Keel cannot store or use cloud keys")
+	// ErrUnopenable means a stored key opens with neither KEEL_SECRETS_KEY
+	// nor KEEL_SECRETS_KEY_PREVIOUS.
+	ErrUnopenable = errors.New("this connection's keys open with neither KEEL_SECRETS_KEY nor KEEL_SECRETS_KEY_PREVIOUS; restore the key, or delete the connection and add it again")
 )
 
 // Mode is what Keel may do with a connection. Stored keys only read.
@@ -217,11 +220,11 @@ func (s Service) open(tenant, id string, sealedID, sealedKey []byte) (Keys, erro
 	}
 	sid, err := s.Sealer.Open(sealedID, aad(tenant, id, "secret_id"))
 	if err != nil {
-		return Keys{}, fmt.Errorf("cloud connection %s: %w", id, err)
+		return Keys{}, fmt.Errorf("cloud connection %s: %w: %w", id, ErrUnopenable, err)
 	}
 	skey, err := s.Sealer.Open(sealedKey, aad(tenant, id, "secret_key"))
 	if err != nil {
-		return Keys{}, fmt.Errorf("cloud connection %s: %w", id, err)
+		return Keys{}, fmt.Errorf("cloud connection %s: %w: %w", id, ErrUnopenable, err)
 	}
 	return Keys{SecretID: string(sid), SecretKey: string(skey)}, nil
 }

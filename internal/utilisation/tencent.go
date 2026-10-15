@@ -5,23 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	monitor "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor/v20180724"
 )
 
 // MonitorAPI is the slice of Tencent Cloud Monitor the collector uses.
 type MonitorAPI interface {
 	GetMonitorDataWithContext(ctx context.Context, req *monitor.GetMonitorDataRequest) (*monitor.GetMonitorDataResponse, error)
-}
-
-// NewMonitorClient builds a Cloud Monitor client for one account's credentials.
-func NewMonitorClient(region string, creds common.Provider) (MonitorAPI, error) {
-	cred, err := creds.GetCredential()
-	if err != nil {
-		return nil, fmt.Errorf("tencent credentials: %w", err)
-	}
-	return monitor.NewClient(cred, region, profile.NewClientProfile())
 }
 
 // TencentCVM collects CVM CPU and memory utilisation (percent) from Cloud

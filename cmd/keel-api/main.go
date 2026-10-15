@@ -67,8 +67,10 @@
 //	KEEL_SECRETS_KEY_PREVIOUS  the key being rotated out: connections sealed with it open, and are resealed under
 //	                    KEEL_SECRETS_KEY at start (docs/runbooks/connections.md)
 //	                    A stored Tencent connection is Keel's base Tencent identity and only reads. Its regions, payer
-//	                    and member role fill KEEL_TENCENT_ORG_REGION, KEEL_TENCENT_REGION, KEEL_TENCENT_PAYER_UIN,
-//	                    KEEL_TENCENT_VENDING_ROLE and KEEL_TENCENT_MEMBER_ROLE when those are unset, at start
+//	                    and member role fill KEEL_TENCENT_ORG_REGION, KEEL_TENCENT_REGION, KEEL_TENCENT_PAYER_UIN and
+//	                    KEEL_TENCENT_MEMBER_ROLE when those are unset, at start. With one, Keel starts no Tencent
+//	                    write job (vending, leaked-key disable, CIC grants, TCR tokens, budget mirror, waste cleanup,
+//	                    COS archive) and logs which it left off
 //
 // Subcommands:
 //
@@ -238,11 +240,12 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	st := store.New(pool)
-	conns, err := cloudConnections(ctx, st)
+	conns, storedKey, err := cloudConnections(ctx, st)
 	if err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
+	writes := tencentWriteJobs(os.Getenv, storedKey)
 	githubHTTP := &http.Client{Timeout: 30 * time.Second}
 	app, err := githubApp(githubHTTP)
 	if err != nil {
@@ -397,7 +400,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	})
 	evaluator := budget.Evaluator{Service: budget.Service{Store: st}}
 	go fxLoop(ctx, st)
-	if err := startUtilisation(ctx, st, deps.Rightsize.Applier); err != nil {
+	if err := startUtilisation(ctx, st, deps.Rightsize.Applier, writes.WasteCleanup); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
@@ -406,7 +409,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		return api.Deps{}, noop, err
 	}
 	go evaluateLoop(ctx, evaluator)
-	if err := startMirrors(ctx, st); err != nil {
+	if err := startMirrors(ctx, st, writes.BudgetMirror); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
@@ -470,11 +473,11 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	if err := startSealer(ctx, st); err != nil {
+	if err := startSealer(ctx, st, writes.COSArchive); err != nil {
 		pool.Close()
 		return api.Deps{}, noop, err
 	}
-	vendors := vendors(ctx, st)
+	vendors := vendors(ctx, st, writes.Vending)
 	creator, err := templateCreator(st, gh, githubHTTP)
 	if err != nil {
 		pool.Close()
@@ -485,7 +488,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 		defs = append(defs, creator.Def())
 	}
 	var dir access.Directory
-	if zone, region := os.Getenv("KEEL_CIC_ZONE_ID"), os.Getenv("KEEL_TENCENT_ORG_REGION"); zone != "" && region != "" {
+	if zone, region := os.Getenv("KEEL_CIC_ZONE_ID"), os.Getenv("KEEL_TENCENT_ORG_REGION"); writes.CICGrants && zone != "" && region != "" {
 		dir = tencent.IdentityCenter{API: tencent.NewOrgAPI(region, tencentCredentials(st)), ZoneID: zone}
 	}
 	acc, err := access.New(st, dir)
@@ -505,7 +508,12 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	deps.BreakGlass = &api.BreakGlassDeps{Authz: az, Service: bg, Home: home}
 	deps.Connections = &api.ConnectionDeps{Authz: az, Service: conns, Home: home}
 	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
+		// Break-glass audit and standing access only read: with a stored
+		// key they assume the member role, never the vending role.
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
+		if storedKey {
+			accessRole = envOr("KEEL_TENCENT_MEMBER_ROLE", accessRole)
+		}
 		bg.Audit = func(account string) (breakglass.Audit, error) {
 			// The organisation admin account is read with Keel's own role; members through the access role.
 			if account == os.Getenv("KEEL_TENCENT_ORG_ADMIN_UIN") {
@@ -544,7 +552,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	if gh != nil {
 		lk.Alerts = leaks.GitHubAlerts{Client: ghapi.Client{HTTP: gh.leaks.Client(githubHTTP)}}
 	}
-	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
+	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); writes.LeakDisable && region != "" {
 		accessRole := envOr("KEEL_TENCENT_VENDING_ROLE", "OrganizationAccessControlRole")
 		lk.Keys["tencent"] = tencent.AccessKeys{API: func(account string) (tencent.KeyAPI, error) {
 			creds, err := keelRole(st, tencentCredentials(st), account, accessRole, region, "")
@@ -574,7 +582,7 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 	deps.Exception = &api.ExceptionDeps{Authz: az, Service: excs}
 	deps.Scans = &api.ScanDeps{Authz: az, Service: scans.Service{Store: st}}
 	deps.Registry = &api.RegistryDeps{Authz: az, Store: st, Domain: os.Getenv("KEEL_TCR_DOMAIN")}
-	if id := os.Getenv("KEEL_TCR_REGISTRY_ID"); id != "" {
+	if id := os.Getenv("KEEL_TCR_REGISTRY_ID"); writes.TCRTokens && id != "" {
 		if tcrAPI, err := tencent.NewTCR(envOr("KEEL_TENCENT_REGION", "ap-bangkok"), tencentCredentials(st)); err != nil {
 			slog.Error("tcr client", "err", err)
 		} else {
@@ -606,9 +614,9 @@ func buildDeps(ctx context.Context) (api.Deps, func(), error) {
 
 // vendors are the account factories per provider (#88). Tencent vending
 // needs organisation-admin credentials: KEEL_TENCENT_ORG_REGION.
-func vendors(ctx context.Context, st *store.Store) map[string]vending.Vendor {
+func vendors(ctx context.Context, st *store.Store, tencentVending bool) map[string]vending.Vendor {
 	out := map[string]vending.Vendor{}
-	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); region != "" {
+	if region := os.Getenv("KEEL_TENCENT_ORG_REGION"); tencentVending && region != "" {
 		orgAPI := tencent.NewOrgAPI(region, tencentCredentials(st))
 		baseline := landingzone.Tencent(landingzone.Options{AutomationRole: os.Getenv("KEEL_TENCENT_AUTOMATION_ROLE")})
 		guardrails := tencent.Guardrails{API: orgAPI}
@@ -1003,7 +1011,7 @@ func digestKey() (ed25519.PrivateKey, error) {
 
 // startSealer seals every Tenant's Activity Log hourly. Postgres advisory
 // locks make concurrent replicas safe.
-func startSealer(ctx context.Context, st *store.Store) error {
+func startSealer(ctx context.Context, st *store.Store, cosArchive bool) error {
 	key, err := digestKey()
 	if err != nil {
 		return err
@@ -1013,14 +1021,16 @@ func startSealer(ctx context.Context, st *store.Store) error {
 		return nil
 	}
 	sealer := &integrity.Sealer{Store: st, Signer: integrity.NewEd25519(key)}
-	objs, _, err := archiveStore(ctx, tencentCredentials(st))
-	if err != nil {
-		return err
+	var objs *archive.S3
+	if sel, _ := archive.Select(os.Getenv); sel.Provider != "tencent" || cosArchive {
+		if objs, _, err = archiveStore(ctx, tencentCredentials(st)); err != nil {
+			return err
+		}
 	}
 	var exporter *archive.Exporter
 	if objs != nil {
 		exporter = &archive.Exporter{Store: st, Objects: objs}
-	} else {
+	} else if os.Getenv("KEEL_ARCHIVE_BUCKET") == "" {
 		slog.Warn("KEEL_ARCHIVE_BUCKET not set; sealed digests are not shipped to the WORM archive")
 	}
 	go func() {
@@ -1283,7 +1293,7 @@ func tencentBillRun(st *store.Store, base common.Provider, endpoint string) (fun
 			return rep.Loads, err
 		}, nil
 	}
-	objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
+	objs, err := archive.NewReader(archive.S3Config{Endpoint: "cos." + region + ".myqcloud.com", Region: region, Bucket: bucket,
 		Creds: archive.Refreshing(tencent.STS{Creds: creds}, 10*time.Minute)})
 	if err != nil {
 		return nil, err
@@ -1317,41 +1327,77 @@ func billCredentials(st *store.Store, base common.Provider, payer, role, region,
 	return keelRole(st, base, payer, role, region, stsEndpoint)
 }
 
-// keelRole is Keel's own role in a Tencent account. It is never assumed in a
-// client-owned Cloud Account, which Keel reads only through the client's
-// read-only role (ADR-0018, #244). stsEndpoint overrides the STS host, for
-// tests.
 // cloudConnections opens the stored cloud connections (ADR-0022): it fails
-// when connections exist without a key that opens them, reseals any sealed
-// with KEEL_SECRETS_KEY_PREVIOUS, and fills unset Tencent settings from the
-// Tencent connection.
-func cloudConnections(ctx context.Context, st *store.Store) (connections.Service, error) {
+// when connections exist without a key that opens them, and reseals any
+// sealed with KEEL_SECRETS_KEY_PREVIOUS. storedKey reports a Tencent
+// connection, which makes Keel's base Tencent identity read-only; its
+// settings fill only the unset Tencent settings that reads use.
+func cloudConnections(ctx context.Context, st *store.Store) (svc connections.Service, storedKey bool, err error) {
 	sealer, err := secrets.FromEnv(os.Getenv)
 	if err != nil {
-		return connections.Service{}, err
+		return connections.Service{}, false, err
 	}
-	svc := connections.Service{Store: st, Sealer: sealer, Identify: func(_ context.Context, k connections.Keys, region string) (string, error) {
+	svc = connections.Service{Store: st, Sealer: sealer, Identify: func(_ context.Context, k connections.Keys, region string) (string, error) {
 		return tencent.CallerIdentity(tencent.StoredCredential(k.SecretID, k.SecretKey), region, "")
 	}}
 	if err := svc.Prepare(ctx); err != nil {
-		return connections.Service{}, err
+		return connections.Service{}, false, err
 	}
 	c, ok, err := svc.Tencent(ctx)
 	if err != nil || !ok {
-		return svc, err
+		return svc, false, err
 	}
 	var filled []string
 	for env, v := range map[string]string{"KEEL_TENCENT_ORG_REGION": c.OrgRegion, "KEEL_TENCENT_REGION": c.DefaultRegion, "KEEL_TENCENT_PAYER_UIN": c.PayerUIN,
-		"KEEL_TENCENT_VENDING_ROLE": c.MemberRole, "KEEL_TENCENT_MEMBER_ROLE": c.MemberRole} {
+		"KEEL_TENCENT_MEMBER_ROLE": c.MemberRole} {
 		if v != "" && os.Getenv(env) == "" {
 			if err := os.Setenv(env, v); err != nil {
-				return svc, err
+				return svc, true, err
 			}
 			filled = append(filled, env)
 		}
 	}
 	slog.Info("stored Tencent connection is Keel's read-only base identity", "connection", c.Name, "filled", filled)
-	return svc, nil
+	return svc, true, nil
+}
+
+// tencentWrites are the jobs that write to Tencent with Keel's base
+// identity, each on when its settings turn it on.
+type tencentWrites struct {
+	Vending      bool // account vending, landing zone, CI identity sync, permission boundaries
+	LeakDisable  bool // leaked-key auto-disable
+	CICGrants    bool // Identity Center access grants
+	TCRTokens    bool // TCR registry tokens and namespaces
+	BudgetMirror bool // native budget mirror
+	WasteCleanup bool // waste deletion
+	COSArchive   bool // Activity Log digests shipped to a COS archive
+}
+
+// tencentWriteJobs turns on each Tencent write job its settings ask for.
+// With a stored key Keel's base identity only reads (ADR-0022), so none
+// starts, rather than each starting and failing with ErrReadOnly.
+func tencentWriteJobs(getenv func(string) string, storedKey bool) tencentWrites {
+	org := getenv("KEEL_TENCENT_ORG_REGION") != ""
+	sel, _ := archive.Select(getenv)
+	on := tencentWrites{Vending: org, LeakDisable: org, CICGrants: org && getenv("KEEL_CIC_ZONE_ID") != "",
+		TCRTokens: getenv("KEEL_TCR_REGISTRY_ID") != "", BudgetMirror: getenv("KEEL_TENCENT_BUDGETS") == "1",
+		WasteCleanup: getenv("KEEL_WASTE_CLEANUP") == "1", COSArchive: sel.Provider == "tencent"}
+	if !storedKey || on == (tencentWrites{}) {
+		return on
+	}
+	var off []string
+	for _, j := range []struct {
+		on   bool
+		name string
+	}{{on.Vending, "account vending, landing zone, CI identity sync and permission boundaries"}, {on.LeakDisable, "leaked-key auto-disable"},
+		{on.CICGrants, "Identity Center grants"}, {on.TCRTokens, "TCR tokens"}, {on.BudgetMirror, "Tencent budget mirror"},
+		{on.WasteCleanup, "waste cleanup"}, {on.COSArchive, "COS archive of Activity Log digests"}} {
+		if j.on {
+			off = append(off, j.name)
+		}
+	}
+	slog.Warn("Tencent write jobs not started: Keel's Tencent identity is a stored-key connection, which only reads (ADR-0022)", "jobs", off)
+	return tencentWrites{}
 }
 
 // tencentCredentials is Keel's base Tencent identity: the stored connection
@@ -1367,6 +1413,10 @@ func tencentCredentials(st *store.Store) common.Provider {
 	return tencent.Credentials(connections.Service{Store: st, Sealer: sealer}.TencentKey)
 }
 
+// keelRole is Keel's own role in a Tencent account. It is never assumed in a
+// client-owned Cloud Account, which Keel reads only through the client's
+// read-only role (ADR-0018, #244). stsEndpoint overrides the STS host, for
+// tests.
 func keelRole(st *store.Store, base common.Provider, account, role, region, stsEndpoint string) (*tencent.KeelRole, error) {
 	return tencent.NewKeelRole(context.Background(), st, base, account, role, region, stsEndpoint)
 }
@@ -1601,7 +1651,7 @@ func clientPayerConnect(st *store.Store, base common.Provider, stsEndpoint strin
 		if _, err := role.GetCredential(); err != nil {
 			return nil, nil, &cost.RoleError{Err: err}
 		}
-		objs, err := archive.NewS3(archive.S3Config{Endpoint: "cos." + p.Region + ".myqcloud.com", Region: p.Region, Bucket: p.Bucket,
+		objs, err := archive.NewReader(archive.S3Config{Endpoint: "cos." + p.Region + ".myqcloud.com", Region: p.Region, Bucket: p.Bucket,
 			Creds: archive.Refreshing(tencent.STS{Creds: role}, 10*time.Minute)})
 		if err != nil {
 			return nil, nil, err
@@ -1634,7 +1684,7 @@ func awsClientPayerConnect(st *store.Store, base awsadapter.Identity, stsEndpoin
 		if scheme, host, ok := strings.Cut(s3Endpoint, "://"); ok {
 			endpoint, insecure = host, scheme == "http"
 		}
-		objs, err := archive.NewS3(archive.S3Config{Endpoint: endpoint, Insecure: insecure, Region: p.Region, Bucket: p.Bucket,
+		objs, err := archive.NewReader(archive.S3Config{Endpoint: endpoint, Insecure: insecure, Region: p.Region, Bucket: p.Bucket,
 			Creds: archive.Refreshing(role, 10*time.Minute)})
 		if err != nil {
 			return nil, nil, err
@@ -1700,11 +1750,11 @@ func evaluate(ctx context.Context, ev budget.Evaluator) {
 	}
 }
 
-// billObjects adapts an S3 bucket to cost.Objects with ETag versioning.
-type billObjects struct{ *archive.S3 }
+// billObjects adapts a bucket, read-only, to cost.Objects with ETag versioning.
+type billObjects struct{ *archive.Reader }
 
 func (b billObjects) ListWithETag(ctx context.Context, prefix string) ([]cost.ObjectInfo, error) {
-	vs, err := b.S3.ListWithETag(ctx, prefix)
+	vs, err := b.Reader.ListWithETag(ctx, prefix)
 	out := make([]cost.ObjectInfo, len(vs))
 	for i, v := range vs {
 		out[i] = cost.ObjectInfo{Key: v.Key, ETag: v.ETag}
@@ -1725,7 +1775,7 @@ func startAWSBillSync(ctx context.Context, st *store.Store, ev budget.Evaluator)
 		return errors.New("KEEL_AWS_PAYER_ACCOUNT is required with KEEL_AWS_BILL_BUCKET")
 	}
 	region := envOr("KEEL_AWS_REGION", "us-east-1")
-	objs, err := archive.NewS3(archive.S3Config{Endpoint: "s3." + region + ".amazonaws.com", Region: region, Bucket: bucket, Creds: awscreds.NewIAM("")})
+	objs, err := archive.NewReader(archive.S3Config{Endpoint: "s3." + region + ".amazonaws.com", Region: region, Bucket: bucket, Creds: awscreds.NewIAM("")})
 	if err != nil {
 		return err
 	}
@@ -1803,9 +1853,9 @@ func startOpenCost(ctx context.Context, st *store.Store) error {
 
 // startMirrors keeps native provider budgets in step with opted-in Budgets
 // hourly (#39). Provider budgets alert even if Keel is down.
-func startMirrors(ctx context.Context, st *store.Store) error {
+func startMirrors(ctx context.Context, st *store.Store, tencentMirror bool) error {
 	natives := map[string]budget.Native{}
-	if os.Getenv("KEEL_TENCENT_BUDGETS") == "1" {
+	if tencentMirror {
 		natives["tencent"] = tencent.Budgets{Region: envOr("KEEL_TENCENT_REGION", "ap-bangkok"), Creds: tencentCredentials(st)}
 	}
 	if acct := os.Getenv("KEEL_AWS_BUDGET_ACCOUNT"); acct != "" {
@@ -1842,7 +1892,7 @@ func startMirrors(ctx context.Context, st *store.Store) error {
 
 // startUtilisation collects rightsizing evidence (#68): a 14-day backfill at
 // start, then every 6h the last two days (late samples settle).
-func startUtilisation(ctx context.Context, st *store.Store, prs *apply.Applier) error {
+func startUtilisation(ctx context.Context, st *store.Store, prs *apply.Applier, wasteCleanup bool) error {
 	job := utilisation.Job{Store: utilisation.Store{Store: st}}
 	if raw := os.Getenv("KEEL_PROMETHEUS"); raw != "" {
 		for _, kv := range strings.Split(raw, ",") {
@@ -1867,7 +1917,7 @@ func startUtilisation(ctx context.Context, st *store.Store, prs *apply.Applier) 
 				slog.Error("utilisation backfill", "day", today.AddDate(0, 0, -d).Format("2006-01-02"), "err", err)
 			}
 		}
-		rightsizeAll(ctx, st, prs)
+		rightsizeAll(ctx, st, prs, wasteCleanup)
 		t := time.NewTicker(6 * time.Hour)
 		defer t.Stop()
 		for {
@@ -1882,7 +1932,7 @@ func startUtilisation(ctx context.Context, st *store.Store, prs *apply.Applier) 
 					slog.Error("utilisation collection", "err", err)
 				}
 			}
-			rightsizeAll(ctx, st, prs)
+			rightsizeAll(ctx, st, prs, wasteCleanup)
 		}
 	}()
 	return nil
@@ -1890,7 +1940,7 @@ func startUtilisation(ctx context.Context, st *store.Store, prs *apply.Applier) 
 
 // rightsizeAll runs Keel's rightsizing engines over fresh utilisation, and
 // syncs rightsizing pull requests when prs is set.
-func rightsizeAll(ctx context.Context, st *store.Store, prs *apply.Applier) {
+func rightsizeAll(ctx context.Context, st *store.Store, prs *apply.Applier, wasteCleanup bool) {
 	if prs != nil {
 		if res, err := prs.Sync(ctx); err != nil {
 			slog.Error("rightsizing PR sync", "err", err)
@@ -1958,7 +2008,7 @@ func rightsizeAll(ctx context.Context, st *store.Store, prs *apply.Applier) {
 		slog.Info("cvm rightsizing", "raised", res.Raised, "kept", res.Kept, "skipped", res.Skipped)
 	}
 	grace, _ := strconv.Atoi(envOr("KEEL_WASTE_GRACE_DAYS", "7"))
-	waste := rightsize.WasteEngine{Service: rightsize.Service{Store: st}, GraceDays: max(grace, 1), CleanupEnabled: os.Getenv("KEEL_WASTE_CLEANUP") == "1",
+	waste := rightsize.WasteEngine{Service: rightsize.Service{Store: st}, GraceDays: max(grace, 1), CleanupEnabled: wasteCleanup,
 		Scanner: tencentWasteScanner(st, base, role, region, "")}
 	if res, err := waste.Run(ctx); err != nil {
 		slog.Error("waste scan failed", "err", err)
@@ -1981,7 +2031,7 @@ func tencentCVMUtilisation(st *store.Store, base common.Provider, role, region, 
 			}
 			roles[account] = r
 		}
-		api, err := utilisation.NewMonitorClient(region, r)
+		api, err := tencent.NewMonitor(region, r)
 		if err != nil {
 			return nil, err
 		}

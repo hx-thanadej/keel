@@ -40,7 +40,9 @@ func mountConnections(mux Mux, a auth.Authenticator, d ConnectionDeps) {
 		case errors.Is(err, connections.ErrNotFound):
 			return catalog.ErrNotFound
 		case errors.Is(err, connections.ErrConflict), errors.Is(err, connections.ErrNoSecretsKey):
-			return errors.Join(catalog.ErrConflict, err)
+			return conflict{err}
+		case errors.Is(err, connections.ErrUnopenable):
+			return conflict{connections.ErrUnopenable}
 		}
 		return err
 	}
@@ -107,3 +109,9 @@ func mountConnections(mux Mux, a auth.Authenticator, d ConnectionDeps) {
 		return nil
 	}))
 }
+
+// conflict is a 409 whose message is err's alone.
+type conflict struct{ error }
+
+func (c conflict) Is(target error) bool { return target == catalog.ErrConflict }
+func (c conflict) Unwrap() error        { return c.error }
