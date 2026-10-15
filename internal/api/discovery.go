@@ -30,6 +30,25 @@ func mountDiscovery(mux Mux, c *catalog.Service, a auth.Authenticator, sources m
 		writeJSON(w, http.StatusOK, items(out))
 		return nil
 	}))
+	mux.Handle("POST /v1/tenants/{tenant}/cloud-accounts/register", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			TeamID   string                 `json:"team_id"`
+			Why      string                 `json:"why"`
+			Accounts []catalog.Registration `json:"accounts"`
+		}
+		if err := decode(r, &in); err != nil {
+			return err
+		}
+		if in.Why == "" {
+			in.Why = "registered from discovered accounts"
+		}
+		out, err := c.RegisterAccounts(r.Context(), p, r.PathValue("tenant"), in.TeamID, in.Accounts, in.Why)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, items(out))
+		return nil
+	}))
 	mux.Handle("GET /v1/tenants/{tenant}/catalog-sync", authed(a, []string{"tenant"}, func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		out, err := c.LastCatalogSync(r.Context(), p, r.PathValue("tenant"))
 		if err != nil {

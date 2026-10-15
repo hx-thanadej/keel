@@ -23,6 +23,33 @@ export type RoleHealth = {
   last_ingest_at: string | null
   findings: { id: string; kind: string; severity: 'low' | 'medium' | 'high' | 'critical'; title: string }[]
 }
+/** An account Keel found in a provider organisation; suggestion is Keel's guess from its name. */
+export type DiscoveredAccount = {
+  provider: string
+  external_id: string
+  name: string
+  parent: string
+  first_seen_at: string
+  last_seen_at: string
+  registered: boolean
+  suggestion?: { project_slug: string; environment: string }
+}
+/** One account to register; project and environment both blank registers it with no Environment. */
+export type Registration = {
+  provider: string
+  external_id: string
+  name: string
+  project: string
+  environment: string
+} & ({ ownership: 'platform' } | { ownership: 'client'; read_only_role: ReadOnlyRole })
+export type RegistrationOutcome = {
+  provider: string
+  external_id: string
+  status: 'registered' | 'already_registered' | 'failed'
+  project_created: boolean
+  environment_created: boolean
+  error?: string
+}
 export type OwnershipChange = { ownership: 'platform'; why: string } | { ownership: 'client'; read_only_role: ReadOnlyRole; why: string }
 export type Activity = {
   id: string
@@ -111,6 +138,11 @@ export const api = {
     request<Environment>(`/v1/tenants/${t}/projects/${p}/environments/${e}`, { method: 'PATCH', body: JSON.stringify({ waste_cleanup: on, why }) }),
   vend: (t: string, p: string, e: string, provider: string) =>
     request<Flow>(`/v1/tenants/${t}/projects/${p}/environments/${e}/vend`, { method: 'POST', body: JSON.stringify({ provider }) }),
+  discovered: (t: string) => list<DiscoveredAccount>(`/v1/tenants/${t}/discovered-accounts`),
+  discover: (t: string, provider: string) => request<{ items: DiscoveredAccount[] }>(`/v1/tenants/${t}/discoveries/${provider}`, { method: 'POST', body: '{}' }).then((r) => r.items),
+  register: (t: string, teamId: string, accounts: Registration[]) =>
+    request<{ items: RegistrationOutcome[] }>(`/v1/tenants/${t}/cloud-accounts/register`, { method: 'POST', body: JSON.stringify({ team_id: teamId, accounts }) }).then((r) => r.items),
+  createTeam: (t: string, slug: string, name: string) => request<Team>(`/v1/tenants/${t}/teams`, { method: 'POST', body: JSON.stringify({ slug, name, why: 'created while registering discovered accounts' }) }),
   activities: (t: string, f: { actor?: string; type?: string; since?: string; before?: number; limit?: number }) => {
     const q = new URLSearchParams()
     if (f.actor) q.set('actor', f.actor)
