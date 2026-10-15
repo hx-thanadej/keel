@@ -30,7 +30,7 @@ func NewCloudAudit(region string, creds common.Provider) (CloudAudit, error) {
 	if err != nil {
 		return CloudAudit{}, fmt.Errorf("tencent credentials: %w", err)
 	}
-	c, err := cloudaudit.NewClient(cred, region, profile.NewClientProfile())
+	c, err := guard(cloudaudit.NewClient(cred, region, profile.NewClientProfile()))
 	return CloudAudit{API: c}, err
 }
 

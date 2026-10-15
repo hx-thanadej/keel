@@ -456,3 +456,32 @@ export const compliance = {
   pdpa: (t: string) => request<PdpaOverview>(`/v1/tenants/${t}/pdpa`),
   configurePdpa: (t: string, change: PdpaChange) => request<PdpaSettings>(`/v1/tenants/${t}/pdpa/settings`, { method: 'PATCH', body: JSON.stringify(change) }),
 }
+
+/** A stored cloud key (ADR-0022). The API masks the SecretId and never returns the SecretKey. */
+export type CloudConnection = {
+  id: string
+  provider: 'tencent'
+  name: string
+  payer_uin: string
+  default_region: string
+  org_region: string
+  member_role: string
+  mode: 'read_only'
+  secret_id: string
+  created_at: string
+  created_by: string
+  updated_at: string
+  rotated_at: string | null
+  last_test: { at: string; ok: boolean; caller_uin: string; detail: string } | null
+}
+export type ConnectionKeys = { secret_id: string; secret_key: string }
+export type NewConnection = Pick<CloudConnection, 'provider' | 'name' | 'payer_uin' | 'default_region' | 'org_region' | 'member_role'> & { keys: ConnectionKeys }
+export type ConnectionChange = Partial<Pick<CloudConnection, 'name' | 'payer_uin' | 'default_region' | 'org_region' | 'member_role'>> & { keys?: ConnectionKeys }
+
+export const connections = {
+  list: () => list<CloudConnection>('/v1/cloud-connections'),
+  create: (c: NewConnection) => request<CloudConnection>('/v1/cloud-connections', { method: 'POST', body: JSON.stringify(c) }),
+  update: (id: string, c: ConnectionChange) => request<CloudConnection>(`/v1/cloud-connections/${id}`, { method: 'PATCH', body: JSON.stringify(c) }),
+  remove: (id: string) => request<void>(`/v1/cloud-connections/${id}`, { method: 'DELETE' }),
+  test: (id: string) => request<CloudConnection>(`/v1/cloud-connections/${id}/test`, { method: 'POST' }),
+}

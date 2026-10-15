@@ -185,6 +185,12 @@ A credential the platform stores, rotates and injects but no human reads in
 normal operation.
 _Avoid_: password, key, token (when the general concept is meant)
 
+**Cloud Connection**:
+A cloud key a platform admin stores in Keel, sealed at rest and never shown
+again, that becomes Keel's base identity for that provider. Always read-only:
+Keel refuses every write made with it (ADR-0022).
+_Avoid_: credentials, integration, account (a Cloud Account is something else)
+
 ### Cost
 
 **Cost Allocation**:

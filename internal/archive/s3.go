@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strconv"
 	"sync"
@@ -59,11 +60,63 @@ func NewS3(cfg S3Config) (*S3, error) {
 	if cfg.RetentionDays != 0 && cfg.RetentionDays < MinRetentionDays {
 		return nil, fmt.Errorf("object lock retention must be >= %d days, got %d", MinRetentionDays, cfg.RetentionDays)
 	}
-	c, err := minio.New(cfg.Endpoint, &minio.Options{Creds: cfg.Creds, Secure: !cfg.Insecure, Region: cfg.Region, BucketLookup: minio.BucketLookupPath})
+	return newS3(cfg, nil)
+}
+
+func newS3(cfg S3Config, transport http.RoundTripper) (*S3, error) {
+	c, err := minio.New(cfg.Endpoint, &minio.Options{Creds: cfg.Creds, Secure: !cfg.Insecure, Region: cfg.Region, BucketLookup: minio.BucketLookupPath,
+		Transport: transport})
 	if err != nil {
 		return nil, err
 	}
 	return &S3{c: c, bucket: cfg.Bucket, retentionDays: cfg.RetentionDays}, nil
+}
+
+// ErrReadOnly is a write refused by a Reader.
+var ErrReadOnly = errors.New("refused: this bucket client only reads")
+
+// Reader reads a bucket and cannot write to it: it has no write method, and
+// its transport refuses any request but GET and HEAD before it leaves
+// Keel. Bill and COS reads use it, so a read-only identity's credentials
+// never reach a client that could write (ADR-0022).
+type Reader struct{ s *S3 }
+
+// NewReader connects to a bucket for reading.
+func NewReader(cfg S3Config) (*Reader, error) {
+	next, err := minio.DefaultTransport(!cfg.Insecure)
+	if err != nil {
+		return nil, err
+	}
+	s, err := newS3(S3Config{Endpoint: cfg.Endpoint, Region: cfg.Region, Bucket: cfg.Bucket, Insecure: cfg.Insecure, Creds: cfg.Creds}, getsOnly{next})
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{s: s}, nil
+}
+
+// Get returns one object.
+func (r *Reader) Get(ctx context.Context, key string) ([]byte, error) { return r.s.Get(ctx, key) }
+
+// List lists keys under prefix.
+func (r *Reader) List(ctx context.Context, prefix string) ([]string, error) {
+	return r.s.List(ctx, prefix)
+}
+
+// ListWithETag lists keys under prefix with their ETags.
+func (r *Reader) ListWithETag(ctx context.Context, prefix string) ([]ObjectVersion, error) {
+	return r.s.ListWithETag(ctx, prefix)
+}
+
+type getsOnly struct{ next http.RoundTripper }
+
+func (g getsOnly) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if r.Body != nil {
+			_ = r.Body.Close()
+		}
+		return nil, fmt.Errorf("%s %s: %w", r.Method, r.URL.Path, ErrReadOnly)
+	}
+	return g.next.RoundTrip(r)
 }
 
 // Put implements ObjectStore.

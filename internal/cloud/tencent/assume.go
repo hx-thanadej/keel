@@ -148,7 +148,8 @@ func (s *session) get(assume func() (common.CredentialIface, time.Time, error)) 
 }
 
 // assumeRole assumes arn from base, sending externalID and policy (a
-// session policy limiting the session) when set.
+// session policy limiting the session) when set. A session assumed from a
+// read-only base is read-only too, whatever the role allows.
 func assumeRole(base common.Provider, region, endpoint, arn string, externalID *string, policy string) (common.CredentialIface, time.Time, error) {
 	cred, err := base.GetCredential()
 	if err != nil {
@@ -177,7 +178,11 @@ func assumeRole(base common.Provider, region, endpoint, arn string, externalID *
 	if res.Response.ExpiredTime != nil {
 		expires = time.Unix(*res.Response.ExpiredTime, 0)
 	}
-	return common.NewTokenCredential(*cr.TmpSecretId, *cr.TmpSecretKey, *cr.Token), expires, nil
+	var out common.CredentialIface = common.NewTokenCredential(*cr.TmpSecretId, *cr.TmpSecretKey, *cr.Token)
+	if IsReadOnly(cred) {
+		out = readOnly{out}
+	}
+	return out, expires, nil
 }
 
 // stsClient signs with cred. endpoint overrides the STS host
@@ -187,19 +192,25 @@ func stsClient(cred common.CredentialIface, region, endpoint string) (*sts.Clien
 	if scheme, host, ok := strings.Cut(endpoint, "://"); ok {
 		cpf.HttpProfile.Scheme, cpf.HttpProfile.Endpoint = scheme, host
 	}
-	return sts.NewClient(cred, region, cpf)
+	return guard(sts.NewClient(cred, region, cpf))
 }
 
-// CallerIdentity asks STS who cred is. Credentials can load and still be
-// rejected (expired, revoked, deleted), and an AssumeRole made with them
-// fails as if the target role had refused; this tells the two apart. It
-// reads nothing and needs no permission. endpoint overrides the STS host
-// (scheme://host), for tests.
-func CallerIdentity(cred common.CredentialIface, region, endpoint string) error {
+// CallerIdentity asks STS who cred is and returns its account UIN.
+// Credentials can load and still be rejected (expired, revoked, deleted),
+// and an AssumeRole made with them fails as if the target role had refused;
+// this tells the two apart. It reads nothing and needs no permission.
+// endpoint overrides the STS host (scheme://host), for tests.
+func CallerIdentity(cred common.CredentialIface, region, endpoint string) (string, error) {
 	c, err := stsClient(cred, region, endpoint)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = c.GetCallerIdentity(sts.NewGetCallerIdentityRequest())
-	return err
+	res, err := c.GetCallerIdentity(sts.NewGetCallerIdentityRequest())
+	if err != nil {
+		return "", err
+	}
+	if res.Response == nil || res.Response.AccountId == nil {
+		return "", errors.New("GetCallerIdentity: no AccountId in response")
+	}
+	return *res.Response.AccountId, nil
 }

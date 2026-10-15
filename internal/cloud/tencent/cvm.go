@@ -23,7 +23,7 @@ func NewCVM(region string, creds common.Provider, endpoint string) (CVMAPI, erro
 	if err != nil {
 		return nil, err
 	}
-	return cvm.NewClient(cred, region, clientProfile(endpoint))
+	return guard(cvm.NewClient(cred, region, clientProfile(endpoint)))
 }
 
 // Catalog lists on-sale pay-as-you-go instance types with their hourly list

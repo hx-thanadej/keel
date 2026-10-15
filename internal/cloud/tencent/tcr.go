@@ -47,7 +47,7 @@ func NewTCR(region string, creds common.Provider) (TCRAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tencent credentials: %w", err)
 	}
-	return tcr.NewClient(cred, region, profile.NewClientProfile())
+	return guard(tcr.NewClient(cred, region, profile.NewClientProfile()))
 }
 
 // Registry implements registry.Registry on one TCR Enterprise instance.

@@ -572,6 +572,7 @@ var cloudMethods = map[string]string{
 	"tencent.NewCVM":                                                    read,
 	"tencent.NewCloudAudit":                                             read,
 	"tencent.NewKeyAPI":                                                 read,
+	"tencent.NewMonitor":                                                read,
 	"tencent.NewOrgAPI":                                                 read,
 	"tencent.NewTCR":                                                    read,
 	"tencent.NewWaste":                                                  read,
@@ -593,6 +594,13 @@ var cloudMethods = map[string]string{
 	"tencent.Registry.EnsureRetention":                                  "not account-scoped: Keel's shared regional registry",
 	"tencent.Registry.TempToken":                                        "not account-scoped: Keel's shared regional registry",
 	"tencent.STS.Get":                                                   read,
+	"tencent.WriteSTS.Get":                                              "not account-scoped: Keel's own Activity Log archive bucket",
+	"tencent.IsReadOnly":                                                read,
+	"tencent.StoredCredential":                                          read,
+	"tencent.readsOnly.RoundTrip":                                       read,
+	"tencent.sdkClient.GetCredential":                                   read,
+	"tencent.sdkClient.WithHttpTransport":                               read,
+	"tencent.storedFirst.GetCredential":                                 read,
 	"tencent.SpecFromBudget":                                            read,
 	"tencent.SumRealTotalCost":                                          read,
 	"tencent.TCRAPI.CreateImmutableTagRulesWithContext":                 "not account-scoped: Keel's shared regional registry",
@@ -629,14 +637,11 @@ var cloudMethods = map[string]string{
 var sdkOutsideCloud = map[string]string{
 	"cmd/keel-api: common.Provider":                          read,
 	"internal/cost: billing.BillDetail":                      read,
-	"internal/utilisation: common.Provider":                  read,
 	"internal/utilisation: monitor.Dimension":                read,
 	"internal/utilisation: monitor.GetMonitorDataRequest":    read,
 	"internal/utilisation: monitor.GetMonitorDataResponse":   read,
 	"internal/utilisation: monitor.Instance":                 read,
-	"internal/utilisation: monitor.NewClient":                read,
 	"internal/utilisation: monitor.NewGetMonitorDataRequest": read,
-	"internal/utilisation: profile.NewClientProfile":         read,
 }
 
 // TestEveryCloudMethodIsClassified keeps cloudMethods and sdkOutsideCloud

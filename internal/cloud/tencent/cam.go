@@ -32,7 +32,7 @@ func NewCAM(creds common.Provider) (CAMAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tencent credentials: %w", err)
 	}
-	return cam.NewClient(cred, "", profile.NewClientProfile())
+	return guard(cam.NewClient(cred, "", profile.NewClientProfile()))
 }
 
 // CIIdentity implements ciidentity.IAM in one member account.
