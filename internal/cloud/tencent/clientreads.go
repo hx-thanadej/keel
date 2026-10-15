@@ -45,16 +45,16 @@ func NewClientReads(role common.Provider, payer, region, endpoint string) (*Clie
 		return nil, err
 	}
 	c := &ClientReads{payer: payer}
-	if c.billing, err = billing.NewClient(cred, region, clientProfile(endpoint)); err != nil {
+	if c.billing, err = guard(billing.NewClient(cred, region, clientProfile(endpoint))); err != nil {
 		return nil, err
 	}
-	if c.advisor, err = advisor.NewClient(cred, region, clientProfile(endpoint)); err != nil {
+	if c.advisor, err = guard(advisor.NewClient(cred, region, clientProfile(endpoint))); err != nil {
 		return nil, err
 	}
-	if c.monitor, err = monitor.NewClient(cred, region, clientProfile(endpoint)); err != nil {
+	if c.monitor, err = guard(monitor.NewClient(cred, region, clientProfile(endpoint))); err != nil {
 		return nil, err
 	}
-	if c.cvm, err = cvm.NewClient(cred, region, clientProfile(endpoint)); err != nil {
+	if c.cvm, err = guard(cvm.NewClient(cred, region, clientProfile(endpoint))); err != nil {
 		return nil, err
 	}
 	return c, nil

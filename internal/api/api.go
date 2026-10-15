@@ -48,6 +48,8 @@ type Deps struct {
 	Reports    *ReportDeps
 	Maturity   *MaturityDeps
 	PDPA       *PDPADeps
+	// Connections are the cloud keys an admin stored (ADR-0022).
+	Connections *ConnectionDeps
 }
 
 // Mounter registers its own routes. The parameter is an unnamed interface so
@@ -179,6 +181,9 @@ func NewRouter(info Info, deps Deps) *Router {
 		}
 		if deps.BreakGlass != nil {
 			mountBreakGlass(mux, deps.Auth, *deps.BreakGlass)
+		}
+		if deps.Connections != nil {
+			mountConnections(mux, deps.Auth, *deps.Connections)
 		}
 	}
 	// Session cookies make cross-site writes possible; reject them (CSRF).

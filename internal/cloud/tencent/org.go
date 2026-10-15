@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
@@ -14,21 +13,6 @@ import (
 
 	"github.com/hx-thanadej/keel/internal/discovery"
 )
-
-// Credentials prefers keyless identity (ADR-0007): TKE pod identity (OIDC),
-// then the CVM instance role. Environment/profile keys are accepted only when
-// KEEL_ENV=dev.
-func Credentials() common.Provider {
-	var chain []common.Provider
-	if p, err := common.DefaultTkeOIDCRoleArnProvider(); err == nil && os.Getenv("TKE_WEB_IDENTITY_TOKEN_FILE") != "" {
-		chain = append(chain, p)
-	}
-	chain = append(chain, common.DefaultCvmRoleProvider())
-	if os.Getenv("KEEL_ENV") == "dev" {
-		chain = append(chain, common.DefaultEnvProvider(), common.DefaultProfileProvider())
-	}
-	return common.NewProviderChain(chain)
-}
 
 // OrgSource lists member accounts of the Tencent Cloud organisation the
 // credentials belong to (must be the organisation admin account).
@@ -46,7 +30,7 @@ func (s OrgSource) ListAccounts(ctx context.Context) ([]discovery.Account, error
 	if err != nil {
 		return nil, fmt.Errorf("tencent credentials: %w", err)
 	}
-	client, err := org.NewClient(cred, s.Region, profile.NewClientProfile())
+	client, err := guard(org.NewClient(cred, s.Region, profile.NewClientProfile()))
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +75,8 @@ func MemberAccount(m *org.OrgMember) discovery.Account {
 	return a
 }
 
-// STS yields short-lived Tencent credentials for S3-compatible COS access.
+// STS yields Tencent credentials for reading COS through its S3-compatible
+// API.
 type STS struct{ Creds common.Provider }
 
 // Get returns (secretId, secretKey, token).
@@ -99,6 +84,24 @@ func (s STS) Get() (string, string, string, error) {
 	c, err := s.Creds.GetCredential()
 	if err != nil {
 		return "", "", "", err
+	}
+	id, key, token := c.GetCredential()
+	return id, key, token, nil
+}
+
+// WriteSTS yields Tencent credentials for writing COS (the Activity Log
+// archive). COS is not behind guard, so a read-only identity is refused
+// here (ADR-0022).
+type WriteSTS struct{ Creds common.Provider }
+
+// Get returns (secretId, secretKey, token).
+func (s WriteSTS) Get() (string, string, string, error) {
+	c, err := s.Creds.GetCredential()
+	if err != nil {
+		return "", "", "", err
+	}
+	if IsReadOnly(c) {
+		return "", "", "", fmt.Errorf("tencent COS write %w", ErrReadOnly)
 	}
 	id, key, token := c.GetCredential()
 	return id, key, token, nil

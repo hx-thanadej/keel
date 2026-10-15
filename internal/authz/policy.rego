@@ -85,6 +85,8 @@ rules := {
 	"identity_provider.read": {"platform_admin", "security_lead"},
 	"identity_provider.create": {"platform_admin"},
 	"identity_provider.update": {"platform_admin"},
+	"cloud_connection.read": {"platform_admin", "security_lead", "finops_lead"},
+	"cloud_connection.manage": {"platform_admin"},
 }
 
 # A binding is usable only in the principal's own Tenant, unless the principal

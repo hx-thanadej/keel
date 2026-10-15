@@ -67,7 +67,7 @@ func (b Budgets) client() (*billing.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tencent credentials: %w", err)
 	}
-	return billing.NewClient(cred, b.Region, profile.NewClientProfile())
+	return guard(billing.NewClient(cred, b.Region, profile.NewClientProfile()))
 }
 
 // Create implements budget.Native.

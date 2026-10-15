@@ -44,7 +44,7 @@ func (l lazyOrg) client() (*org.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tencent credentials: %w", err)
 	}
-	return org.NewClient(cred, l.region, profile.NewClientProfile())
+	return guard(org.NewClient(cred, l.region, profile.NewClientProfile()))
 }
 
 func (l lazyOrg) DescribeOrganizationNodesWithContext(ctx context.Context, r *org.DescribeOrganizationNodesRequest) (*org.DescribeOrganizationNodesResponse, error) {

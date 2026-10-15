@@ -47,19 +47,19 @@ func NewWaste(region string, creds common.Provider) (*Waste, error) {
 		return nil, err
 	}
 	p := profile.NewClientProfile()
-	d, err := cbs.NewClient(cred, region, p)
+	d, err := guard(cbs.NewClient(cred, region, p))
 	if err != nil {
 		return nil, err
 	}
-	a, err := vpc.NewClient(cred, region, p)
+	a, err := guard(vpc.NewClient(cred, region, p))
 	if err != nil {
 		return nil, err
 	}
-	l, err := clb.NewClient(cred, region, p)
+	l, err := guard(clb.NewClient(cred, region, p))
 	if err != nil {
 		return nil, err
 	}
-	c, err := cvm.NewClient(cred, region, p)
+	c, err := guard(cvm.NewClient(cred, region, p))
 	if err != nil {
 		return nil, err
 	}

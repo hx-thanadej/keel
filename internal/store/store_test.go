@@ -21,7 +21,7 @@ import (
 // table to the schema without adding it to one fails TestEveryTableIsListed.
 var ownerOnly = []string{"keel_role_leases"}
 
-var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps", "releases", "promotions", "exceptions", "scan_runs", "release_attestations", "release_sboms", "release_components", "vex_statements", "access_roles", "access_grants", "breakglass_identities", "breakglass_uses", "webhook_deliveries", "scorecard_snapshots", "decision_records", "tenant_reports", "maturity_assessments", "pdpa_settings", "pdpa_breaches", "client_payers"}
+var tenantScoped = []string{"tenants", "teams", "projects", "environments", "cloud_accounts", "services", "activities", "identity_providers", "idp_group_roles", "sessions", "activity_digests", "discovered_accounts", "catalog_sync_runs", "activity_exports", "cost_loads", "cost_facts", "cost_source_files", "fx_rates", "budgets", "budget_alerts", "findings", "allocation_rules", "k8s_namespace_scopes", "k8s_namespace_costs", "budget_mirrors", "recommendations", "utilisation_daily", "flows", "flow_steps", "releases", "promotions", "exceptions", "scan_runs", "release_attestations", "release_sboms", "release_components", "vex_statements", "access_roles", "access_grants", "breakglass_identities", "breakglass_uses", "webhook_deliveries", "scorecard_snapshots", "decision_records", "tenant_reports", "maturity_assessments", "pdpa_settings", "pdpa_breaches", "client_payers", "cloud_connections"}
 
 type fixture struct {
 	tenant, team, project, env, account, service string
@@ -116,6 +116,10 @@ func seed(t *testing.T, s *store.Store, slug string) fixture {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO decision_records (tenant_id, service_id, path, title, status, url) VALUES ($1, $2, 'docs/decisions/0001-x.md', 'X', 'accepted', 'u')`, f.tenant, f.service); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cloud_connections (id, tenant_id, provider, name, payer_uin, default_region, secret_id_sealed, secret_key_sealed, secret_id_last4, created_at, created_by, updated_at)
+			VALUES (uuidv7(), $1, 'tencent', 'c', '100000000001', 'ap-bangkok', '\x00', '\x00', 'abcd', now(), 'u', now())`, f.tenant); err != nil {
 			return err
 		}
 		var bg string
